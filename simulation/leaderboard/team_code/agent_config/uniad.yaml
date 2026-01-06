@@ -1,0 +1,21 @@
+# UniAD configuration for CoLMDriver evaluation
+
+agent:
+  name: uniad_b2d
+  type: uniad
+
+model:
+  # Repo-relative paths to the shipped UniAD config and checkpoint
+  config_path: simulation/assets/UniAD/base_e2e_b2d.py
+  checkpoint_path: ckpt/UniAD/uniad_base_b2d.pth
+
+runtime:
+  device: cuda
+  fp16: false
+
+simulation:
+  timestep: 0.05
+  max_speed: 30
+
+logging:
+  verbose: true

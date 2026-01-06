@@ -1,0 +1,76 @@
+from .models import CropFeatures, GeometrySpec
+
+
+def _maneuver_needed_count(spec: GeometrySpec, man: str) -> int:
+    v = spec.required_maneuvers.get(man, 0)
+    try:
+        return int(v)
+    except Exception:
+        return 0
+
+
+def crop_satisfies_spec(spec: GeometrySpec, crop: CropFeatures) -> bool:
+    if spec.topology == "t_junction":
+        if not crop.is_t_junction:
+            return False
+        if spec.degree == 3 and len(crop.dirs) < 3:
+            return False
+    elif spec.topology == "intersection":
+        if len(crop.dirs) < 3:
+            return False
+        if spec.degree == 4 and not crop.is_four_way:
+            return False
+        if spec.degree == 3 and not crop.is_t_junction:
+            return False
+
+    for man in ["straight", "left", "right"]:
+        need = _maneuver_needed_count(spec, man)
+        if need > 0:
+            if crop.maneuver_stats.get(man, {}).get("count", 0.0) < 1.0:
+                return False
+
+    if spec.needs_oncoming and not crop.has_oncoming_pair:
+        return False
+
+    if spec.needs_merge_onto_same_road and not crop.has_merge_onto_same_road:
+        return False
+
+    if spec.needs_on_ramp and not crop.has_on_ramp:
+        return False
+
+    if spec.needs_multi_lane:
+        if crop.lane_count_est < max(2, spec.min_lane_count):
+            return False
+
+    if spec.preferred_entry_cardinals:
+        if not any(d in crop.entry_dirs for d in spec.preferred_entry_cardinals):
+            return False
+
+    for man in ["straight", "left", "right"]:
+        need = _maneuver_needed_count(spec, man)
+        if need > 0:
+            st = crop.maneuver_stats.get(man, {})
+            if float(st.get("max_entry_dist", 0.0)) < float(spec.min_entry_runup_m):
+                return False
+            if float(st.get("max_exit_dist", 0.0)) < float(spec.min_exit_runout_m):
+                return False
+
+    return True
+
+
+def crop_base_cost(spec: GeometrySpec, crop: CropFeatures, junction_penalty: float) -> float:
+    cost = crop.area
+    if spec.avoid_extra_intersections:
+        cost += junction_penalty * max(0, crop.junction_count - 1)
+
+    if spec.topology == "t_junction" and crop.is_t_junction:
+        cost *= 0.97
+    if spec.needs_multi_lane and crop.has_multi_lane:
+        cost *= 0.98
+    if spec.needs_merge_onto_same_road and crop.has_merge_onto_same_road:
+        cost *= 0.98
+    if spec.needs_on_ramp and crop.has_on_ramp:
+        cost *= 0.98
+    if spec.topology == "intersection" and spec.degree == 0 and crop.is_four_way:
+        cost *= 0.98
+    return float(cost)

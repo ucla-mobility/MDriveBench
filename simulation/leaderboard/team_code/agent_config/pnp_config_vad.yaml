@@ -1,0 +1,2 @@
+ckpt_path: ckpt/vad_b2d_base.pth
+target_point_distance: 10

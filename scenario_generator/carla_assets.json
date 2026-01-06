@@ -1,0 +1,7680 @@
+{
+  "meta": {
+    "host": "localhost",
+    "port": 2018,
+    "map": "Town03",
+    "attribute_details": true,
+    "bbox_attempted": true,
+    "bbox_units": "m",
+    "bbox_source": "actor.bounding_box.extent",
+    "bbox_success": 53,
+    "bbox_total": 157
+  },
+  "summary": {
+    "static": 90,
+    "other": 1,
+    "walker": 26,
+    "sensor": 13,
+    "vehicle": 27
+  },
+  "assets": {
+    "static": [
+      {
+        "id": "static.prop.advertisement",
+        "tags": [
+          "advertisement",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.atm",
+        "tags": [
+          "prop",
+          "atm",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.barbeque",
+        "tags": [
+          "barbeque",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.barrel",
+        "tags": [
+          "barrel",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.bench01",
+        "tags": [
+          "bench01",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.bench02",
+        "tags": [
+          "bench02",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.bench03",
+        "tags": [
+          "bench03",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.bike helmet",
+        "tags": [
+          "bike helmet",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.bin",
+        "tags": [
+          "bin",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.box01",
+        "tags": [
+          "box01",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.box02",
+        "tags": [
+          "box02",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.box03",
+        "tags": [
+          "box03",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.briefcase",
+        "tags": [
+          "briefcase",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.brokentile01",
+        "tags": [
+          "brokentile01",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.brokentile02",
+        "tags": [
+          "brokentile02",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.brokentile03",
+        "tags": [
+          "brokentile03",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.brokentile04",
+        "tags": [
+          "brokentile04",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.busstop",
+        "tags": [
+          "busstop",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.chainbarrier",
+        "tags": [
+          "prop",
+          "chainbarrier",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.chainbarrierend",
+        "tags": [
+          "chainbarrierend",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.clothcontainer",
+        "tags": [
+          "clothcontainer",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.clothesline",
+        "tags": [
+          "clothesline",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.colacan",
+        "tags": [
+          "colacan",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.constructioncone",
+        "tags": [
+          "constructioncone",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.container",
+        "tags": [
+          "container",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.creasedbox01",
+        "tags": [
+          "prop",
+          "creasedbox01",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.creasedbox02",
+        "tags": [
+          "creasedbox02",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.creasedbox03",
+        "tags": [
+          "creasedbox03",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.dirtdebris01",
+        "tags": [
+          "dirtdebris01",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.dirtdebris02",
+        "tags": [
+          "dirtdebris02",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.dirtdebris03",
+        "tags": [
+          "dirtdebris03",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.doghouse",
+        "tags": [
+          "doghouse",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.fountain",
+        "tags": [
+          "fountain",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.garbage01",
+        "tags": [
+          "garbage01",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.garbage02",
+        "tags": [
+          "garbage02",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.garbage03",
+        "tags": [
+          "garbage03",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.garbage04",
+        "tags": [
+          "garbage04",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.garbage05",
+        "tags": [
+          "garbage05",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.garbage06",
+        "tags": [
+          "garbage06",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.gardenlamp",
+        "tags": [
+          "gardenlamp",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.glasscontainer",
+        "tags": [
+          "glasscontainer",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.gnome",
+        "tags": [
+          "prop",
+          "gnome",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.guitarcase",
+        "tags": [
+          "guitarcase",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.ironplank",
+        "tags": [
+          "ironplank",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.kiosk_01",
+        "tags": [
+          "kiosk_01",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.mailbox",
+        "tags": [
+          "mailbox",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.maptable",
+        "tags": [
+          "maptable",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.mesh",
+        "tags": [
+          "mesh",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "default"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.mobile",
+        "tags": [
+          "prop",
+          "mobile",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.motorhelmet",
+        "tags": [
+          "prop",
+          "motorhelmet",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.pergola",
+        "tags": [
+          "pergola",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.plantpot01",
+        "tags": [
+          "plantpot01",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.plantpot02",
+        "tags": [
+          "plantpot02",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.plantpot03",
+        "tags": [
+          "plantpot03",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.plantpot04",
+        "tags": [
+          "prop",
+          "plantpot04",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.plantpot05",
+        "tags": [
+          "plantpot05",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.plantpot06",
+        "tags": [
+          "prop",
+          "plantpot06",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.plantpot07",
+        "tags": [
+          "plantpot07",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.plantpot08",
+        "tags": [
+          "plantpot08",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.plasticbag",
+        "tags": [
+          "plasticbag",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.plasticchair",
+        "tags": [
+          "plasticchair",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.plastictable",
+        "tags": [
+          "plastictable",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.platformgarbage01",
+        "tags": [
+          "platformgarbage01",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.purse",
+        "tags": [
+          "prop",
+          "purse",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.shoppingbag",
+        "tags": [
+          "shoppingbag",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.shoppingcart",
+        "tags": [
+          "shoppingcart",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.shoppingtrolley",
+        "tags": [
+          "shoppingtrolley",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.slide",
+        "tags": [
+          "slide",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.streetbarrier",
+        "tags": [
+          "streetbarrier",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.streetfountain",
+        "tags": [
+          "streetfountain",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.streetsign",
+        "tags": [
+          "streetsign",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.streetsign01",
+        "tags": [
+          "streetsign01",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.streetsign04",
+        "tags": [
+          "streetsign04",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.swing",
+        "tags": [
+          "swing",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.swingcouch",
+        "tags": [
+          "swingcouch",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.table",
+        "tags": [
+          "table",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.trafficcone01",
+        "tags": [
+          "trafficcone01",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.trafficcone02",
+        "tags": [
+          "trafficcone02",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.trafficwarning",
+        "tags": [
+          "trafficwarning",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.trampoline",
+        "tags": [
+          "trampoline",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.trashbag",
+        "tags": [
+          "trashbag",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.trashcan01",
+        "tags": [
+          "trashcan01",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.trashcan02",
+        "tags": [
+          "trashcan02",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.trashcan03",
+        "tags": [
+          "trashcan03",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.trashcan04",
+        "tags": [
+          "trashcan04",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.trashcan05",
+        "tags": [
+          "trashcan05",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.travelcase",
+        "tags": [
+          "travelcase",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.vendingmachine",
+        "tags": [
+          "vendingmachine",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.prop.wateringcan",
+        "tags": [
+          "wateringcan",
+          "prop",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "size",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "prop"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "static.trigger.friction",
+        "tags": [
+          "friction",
+          "trigger",
+          "static"
+        ],
+        "attributes": [
+          {
+            "id": "extent_z",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "1.0f"
+            ],
+            "default": null
+          },
+          {
+            "id": "extent_x",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "1.0f"
+            ],
+            "default": null
+          },
+          {
+            "id": "extent_y",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "1.0f"
+            ],
+            "default": null
+          },
+          {
+            "id": "friction",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "3.5f"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "default"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      }
+    ],
+    "other": [
+      {
+        "id": "controller.ai.walker",
+        "tags": [
+          "walker",
+          "ai",
+          "controller"
+        ],
+        "attributes": [
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "default"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      }
+    ],
+    "walker": [
+      {
+        "id": "walker.pedestrian.0001",
+        "tags": [
+          "0001",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.8",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      },
+      {
+        "id": "walker.pedestrian.0002",
+        "tags": [
+          "0002",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.7",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      },
+      {
+        "id": "walker.pedestrian.0003",
+        "tags": [
+          "0003",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.7",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      },
+      {
+        "id": "walker.pedestrian.0004",
+        "tags": [
+          "0004",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.7",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      },
+      {
+        "id": "walker.pedestrian.0005",
+        "tags": [
+          "0005",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.8",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      },
+      {
+        "id": "walker.pedestrian.0006",
+        "tags": [
+          "pedestrian",
+          "0006",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.8",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      },
+      {
+        "id": "walker.pedestrian.0007",
+        "tags": [
+          "0007",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.8",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      },
+      {
+        "id": "walker.pedestrian.0008",
+        "tags": [
+          "0008",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.8",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      },
+      {
+        "id": "walker.pedestrian.0009",
+        "tags": [
+          "0009",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.1",
+              "2.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.25,
+          "extent_y": 0.25,
+          "extent_z": 0.550000011920929,
+          "length": 0.5,
+          "width": 0.5,
+          "height": 1.100000023841858
+        }
+      },
+      {
+        "id": "walker.pedestrian.0010",
+        "tags": [
+          "0010",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.1",
+              "2.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.25,
+          "extent_y": 0.25,
+          "extent_z": 0.550000011920929,
+          "length": 0.5,
+          "width": 0.5,
+          "height": 1.100000023841858
+        }
+      },
+      {
+        "id": "walker.pedestrian.0011",
+        "tags": [
+          "0011",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.1",
+              "2.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.25,
+          "extent_y": 0.25,
+          "extent_z": 0.550000011920929,
+          "length": 0.5,
+          "width": 0.5,
+          "height": 1.100000023841858
+        }
+      },
+      {
+        "id": "walker.pedestrian.0012",
+        "tags": [
+          "0012",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.1",
+              "2.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.6499999761581421,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.2999999523162842
+        }
+      },
+      {
+        "id": "walker.pedestrian.0013",
+        "tags": [
+          "0013",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.1",
+              "2.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.6499999761581421,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.2999999523162842
+        }
+      },
+      {
+        "id": "walker.pedestrian.0014",
+        "tags": [
+          "0014",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.1",
+              "2.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.6499999761581421,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.2999999523162842
+        }
+      },
+      {
+        "id": "walker.pedestrian.0015",
+        "tags": [
+          "0015",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.8",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      },
+      {
+        "id": "walker.pedestrian.0016",
+        "tags": [
+          "0016",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.7",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      },
+      {
+        "id": "walker.pedestrian.0017",
+        "tags": [
+          "0017",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.7",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      },
+      {
+        "id": "walker.pedestrian.0018",
+        "tags": [
+          "0018",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.7",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      },
+      {
+        "id": "walker.pedestrian.0019",
+        "tags": [
+          "0019",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.7",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      },
+      {
+        "id": "walker.pedestrian.0020",
+        "tags": [
+          "0020",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.7",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      },
+      {
+        "id": "walker.pedestrian.0021",
+        "tags": [
+          "0021",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.7",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      },
+      {
+        "id": "walker.pedestrian.0022",
+        "tags": [
+          "0022",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.7",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      },
+      {
+        "id": "walker.pedestrian.0023",
+        "tags": [
+          "0023",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.7",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      },
+      {
+        "id": "walker.pedestrian.0024",
+        "tags": [
+          "pedestrian",
+          "0024",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.7",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      },
+      {
+        "id": "walker.pedestrian.0025",
+        "tags": [
+          "0025",
+          "pedestrian",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.7",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      },
+      {
+        "id": "walker.pedestrian.0026",
+        "tags": [
+          "pedestrian",
+          "0026",
+          "walker"
+        ],
+        "attributes": [
+          {
+            "id": "is_invincible",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "gender",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0",
+              "1.7",
+              "4.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "age",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "pedestrian"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.3400000035762787,
+          "extent_y": 0.3400000035762787,
+          "extent_z": 0.9300000071525574,
+          "length": 0.6800000071525574,
+          "width": 0.6800000071525574,
+          "height": 1.8600000143051147
+        }
+      }
+    ],
+    "sensor": [
+      {
+        "id": "sensor.camera.depth",
+        "tags": [
+          "depth",
+          "camera",
+          "sensor"
+        ],
+        "attributes": [
+          {
+            "id": "lens_y_size",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.08"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_x_size",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.08"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_kcube",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_circle_multiplier",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_k",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "-1.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_circle_falloff",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "5.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "fov",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "90.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "image_size_y",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "600"
+            ],
+            "default": null
+          },
+          {
+            "id": "image_size_x",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "800"
+            ],
+            "default": null
+          },
+          {
+            "id": "sensor_tick",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "front",
+              "back",
+              "left",
+              "right",
+              "front_left",
+              "front_right",
+              "back_left",
+              "back_right"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "sensor.camera.dvs",
+        "tags": [
+          "dvs",
+          "camera",
+          "sensor"
+        ],
+        "attributes": [
+          {
+            "id": "refractory_period_ns",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0"
+            ],
+            "default": null
+          },
+          {
+            "id": "sigma_negative_threshold",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "sigma_positive_threshold",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "negative_threshold",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.3"
+            ],
+            "default": null
+          },
+          {
+            "id": "positive_threshold",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.3"
+            ],
+            "default": null
+          },
+          {
+            "id": "chromatic_aberration_offset",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "chromatic_aberration_intensity",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "black_clip",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "log_eps",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.001"
+            ],
+            "default": null
+          },
+          {
+            "id": "shoulder",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.26"
+            ],
+            "default": null
+          },
+          {
+            "id": "slope",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.88"
+            ],
+            "default": null
+          },
+          {
+            "id": "blade_count",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "5"
+            ],
+            "default": null
+          },
+          {
+            "id": "focal_distance",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "1000.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "exposure_speed_down",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "1.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "calibration_constant",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "16.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_flare_intensity",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.1"
+            ],
+            "default": null
+          },
+          {
+            "id": "blur_amount",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "1.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "exposure_max_bright",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "9.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "gamma",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "2.2"
+            ],
+            "default": null
+          },
+          {
+            "id": "white_clip",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.04"
+            ],
+            "default": null
+          },
+          {
+            "id": "enable_postprocess_effects",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "fstop",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "1.4"
+            ],
+            "default": null
+          },
+          {
+            "id": "iso",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "100.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "blur_radius",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "shutter_speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "200.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "exposure_speed_up",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "3.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "motion_blur_min_object_screen_size",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.1"
+            ],
+            "default": null
+          },
+          {
+            "id": "motion_blur_intensity",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.45"
+            ],
+            "default": null
+          },
+          {
+            "id": "exposure_compensation",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "exposure_mode",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "histogram",
+              "manual"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_y_size",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.08"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_x_size",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.08"
+            ],
+            "default": null
+          },
+          {
+            "id": "toe",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.55"
+            ],
+            "default": null
+          },
+          {
+            "id": "bloom_intensity",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.675"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_kcube",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "motion_blur_max_distortion",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.35"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_k",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "-1.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_circle_multiplier",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_circle_falloff",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "5.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "tint",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "fov",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "90.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "temp",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "6500.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "image_size_y",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "600"
+            ],
+            "default": null
+          },
+          {
+            "id": "use_log",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "True"
+            ],
+            "default": null
+          },
+          {
+            "id": "image_size_x",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "800"
+            ],
+            "default": null
+          },
+          {
+            "id": "sensor_tick",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "min_fstop",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "1.2"
+            ],
+            "default": null
+          },
+          {
+            "id": "exposure_min_bright",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "7.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "front",
+              "back",
+              "left",
+              "right",
+              "front_left",
+              "front_right",
+              "back_left",
+              "back_right"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "sensor.camera.rgb",
+        "tags": [
+          "rgb",
+          "camera",
+          "sensor"
+        ],
+        "attributes": [
+          {
+            "id": "chromatic_aberration_intensity",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "tint",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "shoulder",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.26"
+            ],
+            "default": null
+          },
+          {
+            "id": "toe",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.55"
+            ],
+            "default": null
+          },
+          {
+            "id": "white_clip",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.04"
+            ],
+            "default": null
+          },
+          {
+            "id": "slope",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.88"
+            ],
+            "default": null
+          },
+          {
+            "id": "blur_radius",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "blur_amount",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "1.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "blade_count",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "5"
+            ],
+            "default": null
+          },
+          {
+            "id": "exposure_speed_down",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "1.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "min_fstop",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "1.2"
+            ],
+            "default": null
+          },
+          {
+            "id": "exposure_speed_up",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "3.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "exposure_max_bright",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "9.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "motion_blur_min_object_screen_size",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.1"
+            ],
+            "default": null
+          },
+          {
+            "id": "bloom_intensity",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.675"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_flare_intensity",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.1"
+            ],
+            "default": null
+          },
+          {
+            "id": "black_clip",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "motion_blur_max_distortion",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.35"
+            ],
+            "default": null
+          },
+          {
+            "id": "focal_distance",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "1000.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "motion_blur_intensity",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.45"
+            ],
+            "default": null
+          },
+          {
+            "id": "temp",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "6500.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "gamma",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "2.2"
+            ],
+            "default": null
+          },
+          {
+            "id": "enable_postprocess_effects",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "iso",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "100.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "shutter_speed",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "200.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "exposure_compensation",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "exposure_mode",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "histogram",
+              "manual"
+            ],
+            "default": null
+          },
+          {
+            "id": "calibration_constant",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "16.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_y_size",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.08"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_x_size",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.08"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_kcube",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_k",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "-1.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_circle_multiplier",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "fstop",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "1.4"
+            ],
+            "default": null
+          },
+          {
+            "id": "fov",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "90.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "image_size_y",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "600"
+            ],
+            "default": null
+          },
+          {
+            "id": "chromatic_aberration_offset",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_circle_falloff",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "5.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "image_size_x",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "800"
+            ],
+            "default": null
+          },
+          {
+            "id": "sensor_tick",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "exposure_min_bright",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "7.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "front",
+              "back",
+              "left",
+              "right",
+              "front_left",
+              "front_right",
+              "back_left",
+              "back_right"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "sensor.camera.semantic_segmentation",
+        "tags": [
+          "semantic_segmentation",
+          "camera",
+          "sensor"
+        ],
+        "attributes": [
+          {
+            "id": "lens_y_size",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.08"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_x_size",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.08"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_kcube",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_circle_multiplier",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_k",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "-1.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "lens_circle_falloff",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "5.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "fov",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "90.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "image_size_y",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "600"
+            ],
+            "default": null
+          },
+          {
+            "id": "image_size_x",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "800"
+            ],
+            "default": null
+          },
+          {
+            "id": "sensor_tick",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "front",
+              "back",
+              "left",
+              "right",
+              "front_left",
+              "front_right",
+              "back_left",
+              "back_right"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "sensor.lidar.ray_cast",
+        "tags": [
+          "ray_cast",
+          "lidar",
+          "sensor"
+        ],
+        "attributes": [
+          {
+            "id": "dropoff_general_rate",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.45"
+            ],
+            "default": null
+          },
+          {
+            "id": "noise_stddev",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "dropoff_zero_intensity",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.4"
+            ],
+            "default": null
+          },
+          {
+            "id": "atmosphere_attenuation_rate",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.004"
+            ],
+            "default": null
+          },
+          {
+            "id": "upper_fov",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "10.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "rotation_frequency",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "10.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "lower_fov",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "-30.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "points_per_second",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "56000"
+            ],
+            "default": null
+          },
+          {
+            "id": "range",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "10.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "channels",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "32"
+            ],
+            "default": null
+          },
+          {
+            "id": "sensor_tick",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "dropoff_intensity_limit",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.8"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "front",
+              "back",
+              "left",
+              "right",
+              "front_left",
+              "front_right",
+              "back_left",
+              "back_right"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "sensor.lidar.ray_cast_semantic",
+        "tags": [
+          "ray_cast_semantic",
+          "lidar",
+          "sensor"
+        ],
+        "attributes": [
+          {
+            "id": "lower_fov",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "-30.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "upper_fov",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "10.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "rotation_frequency",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "10.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "points_per_second",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "56000"
+            ],
+            "default": null
+          },
+          {
+            "id": "range",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "10.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "channels",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "32"
+            ],
+            "default": null
+          },
+          {
+            "id": "sensor_tick",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "front",
+              "back",
+              "left",
+              "right",
+              "front_left",
+              "front_right",
+              "back_left",
+              "back_right"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "sensor.other.collision",
+        "tags": [
+          "collision",
+          "other",
+          "sensor"
+        ],
+        "attributes": [
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "front",
+              "back",
+              "left",
+              "right",
+              "front_left",
+              "front_right",
+              "back_left",
+              "back_right"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "sensor.other.gnss",
+        "tags": [
+          "gnss",
+          "other",
+          "sensor"
+        ],
+        "attributes": [
+          {
+            "id": "noise_alt_bias",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "noise_alt_stddev",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "noise_lon_bias",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "noise_lon_stddev",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "noise_lat_bias",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "noise_seed",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0"
+            ],
+            "default": null
+          },
+          {
+            "id": "noise_lat_stddev",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "sensor_tick",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "default"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "sensor.other.imu",
+        "tags": [
+          "other",
+          "imu",
+          "sensor"
+        ],
+        "attributes": [
+          {
+            "id": "noise_gyro_stddev_y",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "noise_gyro_stddev_x",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "noise_gyro_stddev_z",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "noise_accel_stddev_y",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "noise_accel_stddev_x",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "noise_accel_stddev_z",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "noise_seed",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0"
+            ],
+            "default": null
+          },
+          {
+            "id": "noise_gyro_bias_x",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "sensor_tick",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "noise_gyro_bias_z",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "noise_gyro_bias_y",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "default"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "sensor.other.lane_invasion",
+        "tags": [
+          "lane_invasion",
+          "other",
+          "sensor"
+        ],
+        "attributes": [
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "front",
+              "back",
+              "left",
+              "right",
+              "front_left",
+              "front_right",
+              "back_left",
+              "back_right"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "sensor.other.obstacle",
+        "tags": [
+          "obstacle",
+          "other",
+          "sensor"
+        ],
+        "attributes": [
+          {
+            "id": "debug_linetrace",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "false"
+            ],
+            "default": null
+          },
+          {
+            "id": "hit_radius",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.5"
+            ],
+            "default": null
+          },
+          {
+            "id": "distance",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "5.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "sensor_tick",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "only_dynamics",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "false"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "front",
+              "back",
+              "left",
+              "right",
+              "front_left",
+              "front_right",
+              "back_left",
+              "back_right"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "sensor.other.radar",
+        "tags": [
+          "radar",
+          "other",
+          "sensor"
+        ],
+        "attributes": [
+          {
+            "id": "range",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "100"
+            ],
+            "default": null
+          },
+          {
+            "id": "points_per_second",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "1500"
+            ],
+            "default": null
+          },
+          {
+            "id": "vertical_fov",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "30"
+            ],
+            "default": null
+          },
+          {
+            "id": "sensor_tick",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0.0"
+            ],
+            "default": null
+          },
+          {
+            "id": "horizontal_fov",
+            "type": "Float",
+            "is_modifiable": true,
+            "recommended_values": [
+              "30"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "default"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      },
+      {
+        "id": "sensor.other.rss",
+        "tags": [
+          "rss",
+          "other",
+          "sensor"
+        ],
+        "attributes": [
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "front",
+              "back",
+              "left",
+              "right",
+              "front_left",
+              "front_right",
+              "back_left",
+              "back_right"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": null
+      }
+    ],
+    "vehicle": [
+      {
+        "id": "vehicle.audi.a2",
+        "tags": [
+          "a2",
+          "audi",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "224,0,0",
+              "134,134,134",
+              "66,66,66",
+              "108,109,126",
+              "255,255,255",
+              "0,0,0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 1.852684736251831,
+          "extent_y": 0.8943394422531128,
+          "extent_z": 0.7735435366630554,
+          "length": 3.705369472503662,
+          "width": 1.7886788845062256,
+          "height": 1.5470870733261108
+        }
+      },
+      {
+        "id": "vehicle.audi.etron",
+        "tags": [
+          "etron",
+          "audi",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "18,185,251",
+              "17,37,103",
+              "177,177,177",
+              "248,248,248",
+              "60,152,82",
+              "33,33,33",
+              "168,155,0",
+              "216,0,0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 2.427854299545288,
+          "extent_y": 1.0163782835006714,
+          "extent_z": 0.8246796727180481,
+          "length": 4.855708599090576,
+          "width": 2.0327565670013428,
+          "height": 1.6493593454360962
+        }
+      },
+      {
+        "id": "vehicle.audi.tt",
+        "tags": [
+          "tt",
+          "audi",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "186,0,0",
+              "65,63,197",
+              "67,67,67",
+              "246,246,246",
+              "230,221,0",
+              "178,114,0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 2.0906050205230713,
+          "extent_y": 0.9970585703849792,
+          "extent_z": 0.6926480531692505,
+          "length": 4.181210041046143,
+          "width": 1.9941171407699585,
+          "height": 1.385296106338501
+        }
+      },
+      {
+        "id": "vehicle.bh.crossbike",
+        "tags": [
+          "crossbike",
+          "bh",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "driver_id",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "2",
+              "3",
+              "7",
+              "8"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "255,160,145",
+              "130,142,217",
+              "137,200,147",
+              "255,245,0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.7436444163322449,
+          "extent_y": 0.42962872982025146,
+          "extent_z": 0.5397894978523254,
+          "length": 1.4872888326644897,
+          "width": 0.8592574596405029,
+          "height": 1.0795789957046509
+        }
+      },
+      {
+        "id": "vehicle.bmw.grandtourer",
+        "tags": [
+          "grandtourer",
+          "bmw",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "109,109,109",
+              "12,38,88",
+              "68,68,77",
+              "77,155,187",
+              "255,255,255",
+              "255,21,0",
+              "0,0,0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 2.3055028915405273,
+          "extent_y": 1.1208566427230835,
+          "extent_z": 0.8336379528045654,
+          "length": 4.611005783081055,
+          "width": 2.241713285446167,
+          "height": 1.6672759056091309
+        }
+      },
+      {
+        "id": "vehicle.bmw.isetta",
+        "tags": [
+          "isetta",
+          "bmw",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "21,158,255",
+              "145,255,181",
+              "255,33,0",
+              "255,208,0",
+              "181,255,0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 1.1036475896835327,
+          "extent_y": 0.7404598593711853,
+          "extent_z": 0.6893735527992249,
+          "length": 2.2072951793670654,
+          "width": 1.4809197187423706,
+          "height": 1.3787471055984497
+        }
+      },
+      {
+        "id": "vehicle.carlamotors.carlacola",
+        "tags": [
+          "carlacola",
+          "carlamotors",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "255,68,0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 2.601919174194336,
+          "extent_y": 1.3072861433029175,
+          "extent_z": 1.2337223291397095,
+          "length": 5.203838348388672,
+          "width": 2.614572286605835,
+          "height": 2.467444658279419
+        }
+      },
+      {
+        "id": "vehicle.chevrolet.impala",
+        "tags": [
+          "impala",
+          "chevrolet",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "61,86,143",
+              "0,12,49",
+              "42,99,159",
+              "71,12,12",
+              "155,0,0",
+              "114,85,55",
+              "158,149,129",
+              "218,196,56"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 2.6787397861480713,
+          "extent_y": 1.0166015625,
+          "extent_z": 0.7053292393684387,
+          "length": 5.357479572296143,
+          "width": 2.033203125,
+          "height": 1.4106584787368774
+        }
+      },
+      {
+        "id": "vehicle.citroen.c3",
+        "tags": [
+          "c3",
+          "citroen",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "73,155,204",
+              "237,0,0",
+              "6,15,73",
+              "255,33,0",
+              "255,255,255",
+              "0,0,0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 1.9938424825668335,
+          "extent_y": 0.9254241585731506,
+          "extent_z": 0.8085548281669617,
+          "length": 3.987684965133667,
+          "width": 1.8508483171463013,
+          "height": 1.6171096563339233
+        }
+      },
+      {
+        "id": "vehicle.diamondback.century",
+        "tags": [
+          "century",
+          "diamondback",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "driver_id",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "4",
+              "5",
+              "6",
+              "7"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "255,160,145",
+              "50,96,242",
+              "78,247,119"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.8214218020439148,
+          "extent_y": 0.18625812232494354,
+          "extent_z": 0.5119513869285583,
+          "length": 1.6428436040878296,
+          "width": 0.3725162446498871,
+          "height": 1.0239027738571167
+        }
+      },
+      {
+        "id": "vehicle.dodge_charger.police",
+        "tags": [
+          "police",
+          "dodge_charger",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0,0,0",
+              "8,53,0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 2.487122058868408,
+          "extent_y": 1.0192006826400757,
+          "extent_z": 0.7771479487419128,
+          "length": 4.974244117736816,
+          "width": 2.0384013652801514,
+          "height": 1.5542958974838257
+        }
+      },
+      {
+        "id": "vehicle.gazelle.omafiets",
+        "tags": [
+          "omafiets",
+          "gazelle",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "driver_id",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0",
+              "1",
+              "3",
+              "5"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0,0,0",
+              "41,73,217",
+              "202,88,176"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 0.9177202582359314,
+          "extent_y": 0.16446444392204285,
+          "extent_z": 0.5628286004066467,
+          "length": 1.8354405164718628,
+          "width": 0.3289288878440857,
+          "height": 1.1256572008132935
+        }
+      },
+      {
+        "id": "vehicle.harley-davidson.low_rider",
+        "tags": [
+          "low_rider",
+          "harley-davidson",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "driver_id",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0",
+              "3",
+              "7",
+              "4"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "67,67,67",
+              "251,251,251",
+              "255,0,0",
+              "255,154,0",
+              "0,38,132",
+              "0,57,32",
+              "191,191,191"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 1.1778701543807983,
+          "extent_y": 0.38183942437171936,
+          "extent_z": 0.6382853388786316,
+          "length": 2.3557403087615967,
+          "width": 0.7636788487434387,
+          "height": 1.2765706777572632
+        }
+      },
+      {
+        "id": "vehicle.jeep.wrangler_rubicon",
+        "tags": [
+          "wrangler_rubicon",
+          "jeep",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "113,114,28",
+              "0,0,0",
+              "140,140,140",
+              "132,183,0",
+              "109,0,0",
+              "66,52,33",
+              "22,24,43",
+              "21,12,55",
+              "201,147,0",
+              "253,136,0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 1.9331103563308716,
+          "extent_y": 0.9525982737541199,
+          "extent_z": 0.9389679431915283,
+          "length": 3.866220712661743,
+          "width": 1.9051965475082397,
+          "height": 1.8779358863830566
+        }
+      },
+      {
+        "id": "vehicle.kawasaki.ninja",
+        "tags": [
+          "ninja",
+          "kawasaki",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "driver_id",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0",
+              "7",
+              "3",
+              "4"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "171,255,0",
+              "11,129,0",
+              "255,203,39",
+              "30,121,154",
+              "168,0,0",
+              "0,0,0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 1.0166761875152588,
+          "extent_y": 0.4012899398803711,
+          "extent_z": 0.5727267861366272,
+          "length": 2.0333523750305176,
+          "width": 0.8025798797607422,
+          "height": 1.1454535722732544
+        }
+      },
+      {
+        "id": "vehicle.lincoln.mkz2017",
+        "tags": [
+          "mkz2017",
+          "lincoln",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "15,11,44",
+              "0,0,0",
+              "229,28,0",
+              "245,245,245",
+              "133,133,133"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 2.4508416652679443,
+          "extent_y": 1.0641621351242065,
+          "extent_z": 0.7553732395172119,
+          "length": 4.901683330535889,
+          "width": 2.128324270248413,
+          "height": 1.5107464790344238
+        }
+      },
+      {
+        "id": "vehicle.mercedes-benz.coupe",
+        "tags": [
+          "coupe",
+          "mercedes-benz",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "183,187,162"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 2.5133883953094482,
+          "extent_y": 1.0757731199264526,
+          "extent_z": 0.8177640438079834,
+          "length": 5.0267767906188965,
+          "width": 2.1515462398529053,
+          "height": 1.6355280876159668
+        }
+      },
+      {
+        "id": "vehicle.mini.cooperst",
+        "tags": [
+          "mini",
+          "cooperst",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "239,227,82",
+              "195,78,78",
+              "87,99,172",
+              "136,136,136"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 1.9029000997543335,
+          "extent_y": 0.985137939453125,
+          "extent_z": 0.7375151515007019,
+          "length": 3.805800199508667,
+          "width": 1.97027587890625,
+          "height": 1.4750303030014038
+        }
+      },
+      {
+        "id": "vehicle.mustang.mustang",
+        "tags": [
+          "mustang",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "87,149,84",
+              "184,163,83",
+              "6,15,73",
+              "255,33,0",
+              "245,245,245",
+              "64,64,64"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 2.358762502670288,
+          "extent_y": 0.947413444519043,
+          "extent_z": 0.650469958782196,
+          "length": 4.717525005340576,
+          "width": 1.894826889038086,
+          "height": 1.300939917564392
+        }
+      },
+      {
+        "id": "vehicle.nissan.micra",
+        "tags": [
+          "micra",
+          "nissan",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "243,243,243",
+              "112,115,83",
+              "83,83,86",
+              "162,162,162",
+              "187,0,0",
+              "28,0,46",
+              "0,0,0",
+              "17,21,99",
+              "12,90,103",
+              "211,211,211"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 1.8166879415512085,
+          "extent_y": 0.9225568771362305,
+          "extent_z": 0.750732421875,
+          "length": 3.633375883102417,
+          "width": 1.845113754272461,
+          "height": 1.50146484375
+        }
+      },
+      {
+        "id": "vehicle.nissan.patrol",
+        "tags": [
+          "patrol",
+          "nissan",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "183,187,162",
+              "0,0,0",
+              "140,140,140",
+              "66,52,33",
+              "22,24,43",
+              "201,147,0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 2.3022549152374268,
+          "extent_y": 0.9657965898513794,
+          "extent_z": 0.9274230599403381,
+          "length": 4.6045098304748535,
+          "width": 1.9315931797027588,
+          "height": 1.8548461198806763
+        }
+      },
+      {
+        "id": "vehicle.seat.leon",
+        "tags": [
+          "leon",
+          "seat",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "42,61,214",
+              "21,38,98",
+              "237,237,237",
+              "109,109,109",
+              "38,38,38",
+              "79,33,85",
+              "155,0,0",
+              "193,193,193",
+              "255,250,122",
+              "0,0,0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 2.0964150428771973,
+          "extent_y": 0.9080929160118103,
+          "extent_z": 0.7369155883789062,
+          "length": 4.1928300857543945,
+          "width": 1.8161858320236206,
+          "height": 1.4738311767578125
+        }
+      },
+      {
+        "id": "vehicle.tesla.cybertruck",
+        "tags": [
+          "cybertruck",
+          "tesla",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 3.1367764472961426,
+          "extent_y": 1.1947870254516602,
+          "extent_z": 1.049095630645752,
+          "length": 6.273552894592285,
+          "width": 2.3895740509033203,
+          "height": 2.098191261291504
+        }
+      },
+      {
+        "id": "vehicle.tesla.model3",
+        "tags": [
+          "tesla",
+          "model3",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "17,37,103",
+              "75,87,173",
+              "180,44,44",
+              "180,180,180",
+              "44,44,44",
+              "137,0,0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 2.3958897590637207,
+          "extent_y": 1.081725001335144,
+          "extent_z": 0.744159996509552,
+          "length": 4.791779518127441,
+          "width": 2.163450002670288,
+          "height": 1.488319993019104
+        }
+      },
+      {
+        "id": "vehicle.toyota.prius",
+        "tags": [
+          "prius",
+          "toyota",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "255,0,0",
+              "215,255,143",
+              "251,242,176",
+              "96,102,99",
+              "28,46,58",
+              "23,51,236",
+              "255,255,255",
+              "255,243,243",
+              "227,227,227",
+              "0,0,0"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 2.256761312484741,
+          "extent_y": 1.0034072399139404,
+          "extent_z": 0.7624167203903198,
+          "length": 4.513522624969482,
+          "width": 2.006814479827881,
+          "height": 1.5248334407806396
+        }
+      },
+      {
+        "id": "vehicle.volkswagen.t2",
+        "tags": [
+          "volkswagen",
+          "t2",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "18,185,251",
+              "184,175,52",
+              "134,133,134",
+              "177,177,177",
+              "254,62,0",
+              "25,167,71",
+              "122,61,224"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 2.2402184009552,
+          "extent_y": 1.034657597541809,
+          "extent_z": 1.0188955068588257,
+          "length": 4.4804368019104,
+          "width": 2.069315195083618,
+          "height": 2.0377910137176514
+        }
+      },
+      {
+        "id": "vehicle.yamaha.yzf",
+        "tags": [
+          "yzf",
+          "yamaha",
+          "vehicle"
+        ],
+        "attributes": [
+          {
+            "id": "number_of_wheels",
+            "type": "Int",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "sticky_control",
+            "type": "Bool",
+            "is_modifiable": true,
+            "recommended_values": [
+              "true"
+            ],
+            "default": null
+          },
+          {
+            "id": "driver_id",
+            "type": "Int",
+            "is_modifiable": true,
+            "recommended_values": [
+              "0",
+              "2",
+              "3",
+              "6"
+            ],
+            "default": null
+          },
+          {
+            "id": "object_type",
+            "type": "String",
+            "is_modifiable": false,
+            "recommended_values": [],
+            "default": null
+          },
+          {
+            "id": "color",
+            "type": "RGBColor",
+            "is_modifiable": true,
+            "recommended_values": [
+              "236,234,255",
+              "0,0,0",
+              "206,206,206",
+              "0,12,49",
+              "42,99,159",
+              "61,68,66",
+              "86,137,151",
+              "33,55,61",
+              "255,0,0",
+              "58,21,21",
+              "155,0,0",
+              "114,85,55",
+              "255,213,0",
+              "127,130,135",
+              "141,0,58"
+            ],
+            "default": null
+          },
+          {
+            "id": "role_name",
+            "type": "String",
+            "is_modifiable": true,
+            "recommended_values": [
+              "autopilot",
+              "scenario",
+              "ego_vehicle"
+            ],
+            "default": null
+          }
+        ],
+        "bbox": {
+          "extent_x": 1.1047229766845703,
+          "extent_y": 0.43351709842681885,
+          "extent_z": 0.6255727410316467,
+          "length": 2.2094459533691406,
+          "width": 0.8670341968536377,
+          "height": 1.2511454820632935
+        }
+      }
+    ]
+  }
+}
