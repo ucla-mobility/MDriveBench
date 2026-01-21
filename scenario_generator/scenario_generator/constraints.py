@@ -207,7 +207,6 @@ class ScenarioSpec:
     """
     # Metadata
     category: str
-    difficulty: int  # 1-5
     
     # Map requirements
     topology: TopologyType
@@ -405,36 +404,23 @@ class ScenarioSpec:
         for actor in self.actors:
             parts.append(actor.to_natural_language() + ".")
 
-        if self.category == "Occluded Hazard":
-            occluder = next(
-                (a for a in self.actors if a.motion == MotionType.STATIC and a.kind in {ActorKind.PARKED_VEHICLE, ActorKind.STATIC_PROP}),
-                None,
-            )
-            hazard = next(
-                (a for a in self.actors if a.motion == MotionType.CROSS_PERPENDICULAR and a.kind in {ActorKind.WALKER, ActorKind.CYCLIST}),
-                None,
-            )
-            if occluder and hazard:
-                vehicle_ids = [v.vehicle_id for v in self.ego_vehicles]
-                vehicles_phrase = vehicle_list_phrase(vehicle_ids)
-                parts.append(
-                    f"The {occluder.actor_id} blocks the view of the {hazard.actor_id} from {vehicles_phrase} as they approach, "
-                    f"and the {hazard.actor_id} emerges from behind the occluder."
-                )
-
         self.description = " ".join(parts)
         return self.description
     
     def _compute_approach_groups(self) -> List[set]:
         """
         Compute groups of vehicles that share the same approach road.
-        Uses union-find on same_approach_as constraints.
+        Groups are based on matching entry_road values (main/side), augmented
+        by explicit same_approach_as constraints.
         
         Returns a list of sets, where each set contains vehicle IDs that
         share the same approach road.
         """
-        # Initialize each vehicle in its own group
-        vehicle_ids = {v.vehicle_id for v in self.ego_vehicles}
+        # Build vehicle lookup
+        vehicle_by_id = {v.vehicle_id: v for v in self.ego_vehicles}
+        vehicle_ids = set(vehicle_by_id.keys())
+        
+        # Initialize parent for union-find
         parent = {vid: vid for vid in vehicle_ids}
         
         def find(x: str) -> str:
@@ -447,9 +433,25 @@ class ScenarioSpec:
             if pa != pb:
                 parent[pa] = pb
         
-        # Union vehicles connected by same_approach_as or follow_route_of constraints
+        # First, group vehicles by their explicit entry_road values (main/side)
+        # Vehicles with the same non-unknown entry_road should be grouped together
+        entry_road_groups: Dict[str, List[str]] = {}
+        for vid, veh in vehicle_by_id.items():
+            er = veh.entry_road
+            if er in ("main", "side"):
+                if er not in entry_road_groups:
+                    entry_road_groups[er] = []
+                entry_road_groups[er].append(vid)
+        
+        # Union vehicles with the same entry_road
+        for road_type, vids in entry_road_groups.items():
+            if len(vids) >= 2:
+                for vid in vids[1:]:
+                    union(vids[0], vid)
+        
+        # Also honor explicit same_approach_as constraints (these are definitive)
         for c in self.vehicle_constraints:
-            if c.constraint_type in {ConstraintType.SAME_APPROACH_AS, ConstraintType.FOLLOW_ROUTE_OF}:
+            if c.constraint_type == ConstraintType.SAME_APPROACH_AS:
                 if c.vehicle_a in vehicle_ids and c.vehicle_b in vehicle_ids:
                     union(c.vehicle_a, c.vehicle_b)
         
@@ -525,10 +527,6 @@ def validate_spec(spec: ScenarioSpec) -> Tuple[bool, List[str]]:
     if spec.category not in get_available_categories():
         errors.append(f"Category '{spec.category}' is not supported by current pipeline")
     
-    # Check difficulty range
-    if not 1 <= spec.difficulty <= 5:
-        errors.append(f"Difficulty must be 1-5, got {spec.difficulty}")
-    
     # Check topology is supported
     if spec.topology not in {TopologyType.INTERSECTION, TopologyType.T_JUNCTION, TopologyType.CORRIDOR, TopologyType.HIGHWAY}:
         errors.append(f"Topology '{spec.topology.value}' is not supported")
@@ -577,7 +575,6 @@ def spec_to_dict(spec: ScenarioSpec) -> Dict[str, Any]:
     """Convert spec to dictionary for JSON serialization."""
     return {
         "category": spec.category,
-        "difficulty": spec.difficulty,
         "topology": spec.topology.value,
         "needs_oncoming": spec.needs_oncoming,
         "needs_multi_lane": spec.needs_multi_lane,
@@ -666,7 +663,6 @@ def spec_from_dict(d: Dict[str, Any]) -> ScenarioSpec:
     
     return ScenarioSpec(
         category=d["category"],
-        difficulty=d["difficulty"],
         topology=TopologyType(d["topology"]),
         needs_oncoming=d.get("needs_oncoming", False),
         needs_multi_lane=d.get("needs_multi_lane", False),

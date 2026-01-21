@@ -78,7 +78,7 @@ Each pattern above must be expressed using only the allowed constraints (no spee
 
 Conflict Complexity Dimensions
 
-Scenarios vary in difficulty along several axes:
+Scenarios vary in challenge along several axes:
 
 Number of Vehicles: More vehicles exponentially increase possible interactions (e.g. three-car vs. four-car triangle vs. five-car star). Small groups (2–3) yield few simple modes; large groups (5–6) admit many modes (permutations of passing orders).
 
@@ -133,7 +133,7 @@ Maintain Realism: Keep scenarios plausible. All vehicles should have legal maneu
 
 Avoid Trivial Resolutions: Don’t create situations with an obvious “only one answer” or where the implicit coordination is essentially forced by constraints. The goal is genuine hesitation, not trivial compliance.
 
-Quality Metrics: After generation, evaluate scenario difficulty using metrics from the literature. Time-to-collision (TTC), minimum distance, required deceleration, or predicted collision probability are useful indicators of challenge
+Quality Metrics: After generation, evaluate scenario challenge using metrics from the literature. Time-to-collision (TTC), minimum distance, required deceleration, or predicted collision probability are useful indicators of challenge
 preprints.org
 . Scenarios with low TTC or high collision probability are high-stress tests. Measuring diversity (different combinations of constraints) ensures variety.
 

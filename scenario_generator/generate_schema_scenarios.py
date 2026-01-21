@@ -28,7 +28,7 @@ def main():
             "Examples:\n"
             "  python generate_schema_scenarios.py --output-dir log_schema\n"
             "  python generate_schema_scenarios.py --categories \"Unprotected Left Turn\" --template-only\n"
-            "  python generate_schema_scenarios.py --count-per-combination 2 --difficulties 3 4 5\n"
+            "  python generate_schema_scenarios.py --count-per-combination 2\n"
         ),
     )
 
@@ -37,12 +37,8 @@ def main():
         help="Category names to generate (default: reduced test set)"
     )
     parser.add_argument(
-        "--difficulties", nargs="+", type=int, default=[1, 2, 3, 4, 5],
-        help="Difficulty levels to generate (default: 1-5)"
-    )
-    parser.add_argument(
         "--count-per-combination", type=int, default=1,
-        help="Scenarios per category/difficulty (default: 1)"
+        help="Scenarios per category (default: 1)"
     )
     parser.add_argument(
         "--output-dir", default="log_schema",
@@ -148,8 +144,7 @@ def main():
 
     config = SchemaGenerationLoopConfig(
         categories=categories,
-        difficulties=args.difficulties,
-        count_per_combination=args.count_per_combination,
+        variants_per_category=args.count_per_combination,
         output_dir=args.output_dir,
         town=args.town,
         highway_town=args.highway_town,
@@ -175,8 +170,7 @@ def main():
     print("=" * 60)
     print(f"Model:            {config.model_id}")
     print(f"Categories:       {len(categories)}")
-    print(f"Difficulties:     {config.difficulties}")
-    print(f"Per combination:  {config.count_per_combination}")
+    print(f"Variants/category:{config.variants_per_category}")
     print(f"Output dir:       {config.output_dir}")
     print(f"Town (default):   {config.town}")
     print(f"Town (highway):   {config.highway_town or config.town}")

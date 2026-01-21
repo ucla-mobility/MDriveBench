@@ -2,8 +2,8 @@
 """
 Audit runner for schema-driven scenario generation + CARLA evaluation.
 
-Runs every category and difficulty, records each run in a single CSV, and
-is restartable without duplicating completed work.
+Runs each category, samples best-of candidates, ranks the top K, records each
+run in a single CSV, and is restartable without duplicating completed work.
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ sys.path.insert(0, str(REPO_ROOT / "scenario_generator"))
 from scenario_generator.schema_generator import (  # noqa: E402
     SchemaScenarioGenerator,
     SchemaGenerationConfig,
-    _build_difficulty_requirement_lines,
 )
 from scenario_generator.schema_utils import (  # noqa: E402
     description_from_spec,
@@ -57,10 +56,7 @@ CSV_FIELDS = [
     "run_key",
     "category",
     "category_description",
-    "difficulty",
-    "difficulty_description",
-    "difficulty_knobs",
-    "difficulty_requirements",
+    "run_tag",
     "variant_index",
     "scenario_id",
     "scenario_description",
@@ -92,6 +88,8 @@ CSV_FIELDS = [
     "video_path",
     "video_generation_success",
     "state_history",
+    "best_rank",
+    "kept_best",
     "start_time",
     "end_time",
     "elapsed_s",
@@ -242,7 +240,6 @@ def _atomic_write_json(path: Path, obj: Any) -> None:
 def _write_schema_validation_report(
     report_path: Path,
     category: str,
-    difficulty: int,
     attempt: int,
     errors: List[str],
     warnings: Optional[List[str]] = None,
@@ -256,7 +253,6 @@ def _write_schema_validation_report(
     report = {
         "timestamp": _now_iso(),
         "category": category,
-        "difficulty": difficulty,
         "attempt": attempt,
         "is_valid": False,
         "summary": {
@@ -382,8 +378,6 @@ def _build_category_description(category: str) -> str:
     parts = [info.notes.strip()] if info.notes else []
     if info.conflict_via:
         parts.append("conflict_via: " + "; ".join(info.conflict_via))
-    if info.difficulty_knobs:
-        parts.append("difficulty_knobs: " + "; ".join(info.difficulty_knobs))
     if info.variation_axes:
         parts.append("variation_axes: " + "; ".join(info.variation_axes))
     return " | ".join(p for p in parts if p)
@@ -402,24 +396,6 @@ def _resolve_town_for_category(
         if t_junction_town and info.required_topology == TopologyType.T_JUNCTION:
             return t_junction_town
     return default_town
-
-
-def _build_difficulty_description(category: str, difficulty: int) -> Dict[str, str]:
-    info = CATEGORY_DEFINITIONS.get(category)
-    if not info:
-        return {"description": "", "knobs": "", "requirements": ""}
-    knobs = info.difficulty_knobs or []
-    requirements = _build_difficulty_requirement_lines(difficulty, info)
-    desc_parts = []
-    if requirements:
-        desc_parts.append("requirements: " + "; ".join(requirements))
-    if knobs:
-        desc_parts.append("knobs: " + "; ".join(knobs))
-    return {
-        "description": " | ".join(desc_parts),
-        "knobs": "; ".join(knobs),
-        "requirements": "; ".join(requirements),
-    }
 
 
 def _load_scene_objects(scene_path: Optional[str]) -> Dict[str, Any]:
@@ -521,12 +497,12 @@ def _collect_route_files(routes_dir: Path) -> List[str]:
     return files
 
 
-def _init_status(run_id: str, run_key: str, category: str, difficulty: int, variant_index: int) -> Dict[str, Any]:
+def _init_status(run_id: str, run_key: str, category: str, run_tag: str, variant_index: int) -> Dict[str, Any]:
     return {
         "run_id": run_id,
         "run_key": run_key,
         "category": category,
-        "difficulty": difficulty,
+        "run_tag": run_tag,
         "variant_index": variant_index,
         "state_history": [],
         "completed_states": [],
@@ -574,6 +550,116 @@ def _create_success_symlinks(run_root: Path, run_key: str, status: Dict[str, Any
         video_link.symlink_to(Path(video_path))
 
 
+def _rank_and_mark_best(statuses: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
+    """
+    Rank a batch of run statuses by validation_score and mark the top_k unique outputs.
+    Deduplicates within the batch using the scene output hash.
+    """
+    candidates: List[Dict[str, Any]] = []
+    for status in statuses:
+        if not status:
+            continue
+        scene_path = status.get("scene_objects_path")
+        output_hash = _compute_scene_output_hash(scene_path) if scene_path else None
+        status["output_hash"] = output_hash
+        status["kept_best"] = False
+        status["best_rank"] = ""
+        candidates.append(status)
+
+    candidates.sort(
+        key=lambda s: (
+            bool(s.get("scenario_generation_success")),
+            float(s.get("validation_score") or 0.0),
+        ),
+        reverse=True,
+    )
+
+    seen_hashes: Set[str] = set()
+    kept_count = 0
+    for status in candidates:
+        if status.get("output_hash") and status["output_hash"] in seen_hashes:
+            continue
+        if kept_count < top_k and status.get("scenario_generation_success"):
+            status["kept_best"] = True
+            kept_count += 1
+            status["best_rank"] = kept_count
+            if status.get("output_hash"):
+                seen_hashes.add(status["output_hash"])
+
+    return candidates
+
+
+def _update_best_marks(csv_path: Path, statuses: List[Dict[str, Any]]) -> None:
+    """Update existing CSV rows with best-of annotations."""
+    status_by_run_key = {
+        s.get("run_key"): s for s in statuses if s and s.get("run_key")
+    }
+    if not status_by_run_key:
+        return
+
+    rows = _read_csv_rows(csv_path)
+    for row in rows:
+        run_key = row.get("run_key")
+        if run_key in status_by_run_key:
+            s = status_by_run_key[run_key]
+            row["best_rank"] = s.get("best_rank", "")
+            row["kept_best"] = s.get("kept_best", False)
+    _write_csv_rows(csv_path, rows)
+
+
+def _log_kept_best(category: str, statuses: List[Dict[str, Any]], top_k: int) -> None:
+    """Print a concise summary of which samples were kept as best."""
+    kept = [s for s in statuses if s and s.get("kept_best")]
+    kept.sort(key=lambda s: (int(s.get("best_rank") or 999), s.get("run_key", "")))
+    if not kept:
+        print(f"[BEST] Category {category}: no kept samples (top_k={top_k}).")
+        return
+    print(f"[BEST] Category {category}: kept {len(kept)}/{top_k}")
+    for s in kept:
+        score = s.get("validation_score")
+        score_str = f"{float(score):.3f}" if score is not None else "n/a"
+        print(
+            f"  #{s.get('best_rank')}: {s.get('run_key')} "
+            f"score={score_str} hash={s.get('output_hash', '')}"
+        )
+
+
+def _create_kept_best_symlinks(run_root: Path, statuses: List[Dict[str, Any]]) -> None:
+    """
+    Create symlinks for kept-best scenarios only.
+    Structure: kept_best/<run_key>/{scenario_spec.json, scene_objects.json, scene_objects.png, routes/}
+    """
+    kept = [s for s in statuses if s and s.get("kept_best")]
+    if not kept:
+        return
+
+    kept_root = run_root / "kept_best"
+    kept_root.mkdir(parents=True, exist_ok=True)
+
+    for s in kept:
+        run_key = s.get("run_key")
+        if not run_key:
+            continue
+        dest = kept_root / run_key
+        dest.mkdir(parents=True, exist_ok=True)
+
+        def link(src: Optional[str], name: str, is_dir: bool = False) -> None:
+            if not src:
+                return
+            src_path = Path(src)
+            if not src_path.exists():
+                return
+            tgt = dest / name
+            if tgt.exists() or tgt.is_symlink():
+                tgt.unlink()
+            tgt.symlink_to(src_path, target_is_directory=is_dir)
+
+        link(s.get("scenario_spec_path"), "scenario_spec.json")
+        link(s.get("scene_objects_path"), "scene_objects.json")
+        link(s.get("scene_png_path"), "scene_objects.png")
+        link(s.get("routes_dir"), "routes", is_dir=True)
+
+
 def _run_single(
     args: argparse.Namespace,
     run_id: str,
@@ -584,20 +670,12 @@ def _run_single(
     tokenizer,
     scene_validator: SceneValidator,
     category: str,
-    difficulty: int,
+    run_tag: str,
     variant_index: int,
-    output_hash_tracker: Optional[Dict[str, Dict[int, Tuple[str, Dict[str, Any]]]]] = None,
-) -> None:
-    """
-    Run a single scenario generation for a category/difficulty/variant combination.
-    
-    Args:
-        output_hash_tracker: Optional dict tracking output hashes per category:
-            {category: {difficulty: (hash, spec_dict)}}
-            Used to detect cross-difficulty duplicate outputs.
-    """
+) -> Dict[str, Any]:
     safe_category = _safe_name(category)
-    run_key = f"{safe_category}_d{difficulty}"
+    safe_tag = _safe_name(run_tag)
+    run_key = f"{safe_category}_{safe_tag}"
     if variant_index > 1:
         run_key = f"{run_key}_v{variant_index}"
 
@@ -606,7 +684,7 @@ def _run_single(
     status_path = run_dir / "status.json"
     status = _read_json(status_path)
     if not status:
-        status = _init_status(run_id, run_key, category, difficulty, variant_index)
+        status = _init_status(run_id, run_key, category, run_tag, variant_index)
 
     if status.get("success") and status.get("row_written"):
         return
@@ -646,8 +724,9 @@ def _run_single(
         template_fallback_used = int(metrics.get("schema_template_fallback", 0))
         failed_spec_signatures: Set[str] = set()
         last_validation_feedback: Optional[Dict[str, Any]] = None
-
-        for attempt in range(start_attempt, args.max_attempts + 1):
+        max_attempts = args.max_attempts if args.max_attempts and args.max_attempts > 0 else None
+        attempt = start_attempt
+        while True:
             if attempt > 1:
                 _set_state(status, "repair_loops")
                 save_status()
@@ -663,10 +742,10 @@ def _run_single(
             spec_stats: Dict[str, Any] = {}
             spec, errors, warnings = generator.generate_spec(
                 category, 
-                difficulty, 
                 stats=spec_stats,
                 exclude_signatures=failed_spec_signatures if attempt > 1 else None,
-                previous_validation_feedback=last_validation_feedback if attempt > 1 else None
+                previous_validation_feedback=last_validation_feedback if attempt > 1 else None,
+                debug_dir=scenario_dir,
             )
             schema_attempts_total += int(spec_stats.get("schema_generation_attempts", 0))
             schema_repairs_total += int(spec_stats.get("schema_generation_repair_attempts", 0))
@@ -683,7 +762,6 @@ def _run_single(
                 _write_schema_validation_report(
                     scenario_dir / "schema_validation_report.json",
                     category=category,
-                    difficulty=difficulty,
                     attempt=attempt,
                     errors=errors,
                     warnings=warnings,
@@ -716,6 +794,9 @@ def _run_single(
                 last_error = "; ".join(errors) if errors else "spec_generation_failed"
                 attempt_history.append(attempt_record)
                 save_status()
+                attempt += 1
+                if max_attempts and attempt > max_attempts:
+                    break
                 continue
 
             description = description_from_spec(spec)
@@ -740,7 +821,6 @@ def _run_single(
             success, scene_path, error_msg = pipeline_runner.run_full_pipeline(
                 scenario_text=description,
                 category=category,
-                difficulty=difficulty,
                 scenario_id=scenario_id_safe,
                 town=town,
                 mute=not args.show_pipeline,
@@ -755,13 +835,15 @@ def _run_single(
                 last_error = error_msg or "pipeline_failed"
                 attempt_history.append(attempt_record)
                 save_status()
+                attempt += 1
+                if max_attempts and attempt > max_attempts:
+                    break
                 continue
 
             validation = scene_validator.validate_scene(
                 scene_path,
                 description,
                 category=category,
-                difficulty=difficulty,
                 scenario_spec=spec_dict,
             )
             
@@ -772,7 +854,6 @@ def _run_single(
                     scene_path=scene_path,
                     scenario_text=description,
                     category=category,
-                    difficulty=difficulty,
                     repair_history=[{
                         "attempt": attempt,
                         "pipeline_success": success,
@@ -785,67 +866,8 @@ def _run_single(
             except Exception as e:
                 print(f"[WARNING] Failed to generate validation report: {e}")
             
-            # CROSS-DIFFICULTY DUPLICATE DETECTION
-            # Compute output hash and check for duplicates from previous difficulties
-            # If duplicate detected, FAIL this attempt to force retry with different spec
-            duplicate_feedback = None
-            is_duplicate = False
-            if output_hash_tracker is not None:
-                output_hash = _compute_scene_output_hash(scene_path)
-                if output_hash:
-                    cat_tracker = output_hash_tracker.setdefault(category, {})
-                    
-                    # Check for duplicates against previous difficulties
-                    for prev_diff, (prev_hash, prev_spec) in cat_tracker.items():
-                        if prev_hash == output_hash and prev_diff != difficulty:
-                            # Duplicate detected! Compute spec diff
-                            spec_diff = _compute_spec_structural_diff(prev_spec, spec_dict)
-                            duplicate_feedback = (
-                                f"OUTPUT DUPLICATE DETECTED: This output (hash={output_hash}) "
-                                f"is identical to difficulty {prev_diff}. "
-                                f"SPEC DIFF: {spec_diff}. "
-                                "The spec changes did NOT produce different paths. "
-                                "You MUST use FUNDAMENTALLY DIFFERENT constraint types. "
-                                "Options: (1) Add MORE on-ramp vehicles (entry_road='side' with merges_into_lane_of), "
-                                "(2) Use same_lane_as to queue mainline vehicles in the SAME physical lane, "
-                                "(3) Use perpendicular_left_of/right_of for cross-approach conflict."
-                            )
-                            print(f"[DUPLICATE DETECTION] {duplicate_feedback}")
-                            is_duplicate = True
-                            break
-                    
-                    # Only store hash if NOT a duplicate (we want retries to try again)
-                    if not is_duplicate:
-                        cat_tracker[difficulty] = (output_hash, spec_dict)
-            
             attempt_record["validation_score"] = validation.score
-            
-            # Fail if duplicate detected, even if validation score was good
-            if is_duplicate:
-                attempt_record["status"] = "validation_failed"
-                attempt_record["duplicate_of_difficulty"] = prev_diff
-                last_error = f"duplicate_of_d{prev_diff}"
-                # Track the failed spec signature
-                spec_sig = generator._signature(spec)
-                failed_spec_signatures.add(spec_sig)
-                if spec_sig in generator.generated_signatures.get(category, set()):
-                    generator.generated_signatures[category].discard(spec_sig)
-                # Store duplicate feedback for next attempt
-                last_validation_feedback = {
-                    "score": 0.0,  # Force low score to emphasize failure
-                    "issues": [{
-                        "severity": "error",
-                        "category": "DUPLICATE_OUTPUT",
-                        "message": duplicate_feedback,
-                        "expected": "unique output different from previous difficulties",
-                        "actual": f"identical output to difficulty {prev_diff}",
-                        "suggestion": duplicate_feedback,
-                    }]
-                }
-                attempt_history.append(attempt_record)
-                save_status()
-                continue
-            
+
             if validation.score < args.min_score:
                 attempt_record["status"] = "validation_failed"
                 last_error = f"validation_score={validation.score:.2f}"
@@ -868,23 +890,15 @@ def _run_single(
                     for issue in validation.issues
                 ]
                 
-                # Add duplicate detection feedback as a top-level issue if detected
-                if duplicate_feedback:
-                    issues_list.insert(0, {
-                        "severity": "error",
-                        "category": "DUPLICATE_OUTPUT",
-                        "message": duplicate_feedback,
-                        "expected": "unique output different from previous difficulties",
-                        "actual": "identical output to previous difficulty",
-                        "suggestion": duplicate_feedback,
-                    })
-                
                 last_validation_feedback = {
                     "score": validation.score,
                     "issues": issues_list,
                 }
                 attempt_history.append(attempt_record)
                 save_status()
+                attempt += 1
+                if max_attempts and attempt > max_attempts:
+                    break
                 continue
 
             attempt_record["status"] = "success"
@@ -903,7 +917,7 @@ def _run_single(
             break
 
         if attempt_used is None:
-            failure_state = "repair_loops" if args.max_attempts > 1 or start_attempt > 1 else "scenario_generation"
+            failure_state = "repair_loops" if (max_attempts and max_attempts > 1) or start_attempt > 1 else "scenario_generation"
             _fail_state(status, failure_state, last_error or "scenario_generation_failed")
             status["scenario_generation_success"] = False
             status["pipeline_attempts_used"] = len(attempt_history)
@@ -1110,7 +1124,7 @@ def _run_single(
         scene = _load_scene_objects(status.get("scene_objects_path"))
         manifest = _build_object_manifest(spec, scene)
 
-        difficulty_info = _build_difficulty_description(category, difficulty)
+        run_tag_value = status.get("run_tag", args.run_tag)
         repair_outer_attempts = 0
         if attempt_used:
             repair_outer_attempts = max(0, int(attempt_used) - 1)
@@ -1135,10 +1149,7 @@ def _run_single(
             "run_key": run_key,
             "category": category,
             "category_description": _build_category_description(category),
-            "difficulty": difficulty,
-            "difficulty_description": difficulty_info["description"],
-            "difficulty_knobs": difficulty_info["knobs"],
-            "difficulty_requirements": difficulty_info["requirements"],
+            "run_tag": run_tag_value,
             "variant_index": variant_index,
             "scenario_id": status.get("scenario_id"),
             "scenario_description": status.get("scenario_description"),
@@ -1147,9 +1158,11 @@ def _run_single(
             "scenario_objects_json": manifest,
             "scenario_generation_success": status.get("scenario_generation_success"),
             "validation_score": status.get("validation_score"),
+            "best_rank": status.get("best_rank", ""),
+            "kept_best": status.get("kept_best", False),
             "failure_state": status.get("failure_state"),
             "failure_reason": status.get("failure_reason"),
-            "pipeline_attempts": args.max_attempts,
+            "pipeline_attempts": args.max_attempts if args.max_attempts > 0 else "unbounded",
             "pipeline_attempts_used": attempt_used or "",
             "repair_attempts_total": repair_total,
             "repair_outer_attempts": repair_outer_attempts,
@@ -1187,6 +1200,7 @@ def _run_single(
         save_status()
 
     log(f"Completed run {run_key} (success={status.get('success')}, failure_state={status.get('failure_state')})")
+    return status
 
 
 def parse_args() -> argparse.Namespace:
@@ -1198,8 +1212,12 @@ def parse_args() -> argparse.Namespace:
         help="Root directory for audit outputs (relative to repo root unless absolute).",
     )
     parser.add_argument("--categories", nargs="+", default=None, help="Categories to run (default: all).")
-    parser.add_argument("--difficulties", nargs="+", type=int, default=[1, 2, 3, 4, 5])
-    parser.add_argument("--count-per-combination", type=int, default=1)
+    parser.add_argument("--run-tag", type=str, default="base", help="Tag to differentiate runs (included in run_key and CSV).")
+    parser.add_argument("--count-per-combination", type=int, default=2, help="How many top scenarios to keep per category (alias: --keep-top).")
+    parser.add_argument("--keep-top", type=int, default=None, help="Alias for --count-per-combination.")
+    parser.add_argument("--best-of", type=int, default=5, help="Target number of successful samples per category (alias: --samples-per-category). Failed samples do not count toward this target.")
+    parser.add_argument("--samples-per-category", type=int, default=None, help="Alias for --best-of (target successful samples per category).")
+    parser.add_argument("--max-sample-attempts", type=int, default=None, help="Safety cap on total sample attempts per category (successes + failures). Default: 3x samples-per-category.")
     parser.add_argument("--town", default="Town05")
     parser.add_argument(
         "--highway-town",
@@ -1212,17 +1230,13 @@ def parse_args() -> argparse.Namespace:
         help="Town to use for T-junction categories (default: Town02)",
     )
     parser.add_argument("--model", default="Qwen/Qwen2.5-32B-Instruct-AWQ")
-    parser.add_argument("--template-only", action="store_true")
-    parser.add_argument("--no-template-fallback", action="store_true")
     parser.add_argument("--schema-max-new-tokens", type=int, default=1024)
     parser.add_argument("--schema-temperature", type=float, default=0.6)
     parser.add_argument("--schema-top-p", type=float, default=0.9)
     parser.add_argument("--schema-repetition-penalty", type=float, default=1.1)
     parser.add_argument("--schema-max-retries", type=int, default=3)
-    parser.add_argument("--schema-do-sample", action="store_true", default=True, help="Enable sampling (default: True)")
-    parser.add_argument("--schema-no-sample", dest="schema_do_sample", action="store_false", help="Disable sampling (use greedy decoding)")
-    parser.add_argument("--max-attempts", type=int, default=3, help="Max attempts per scenario.")
-    parser.add_argument("--min-score", type=float, default=0.6)
+    parser.add_argument("--max-attempts", type=int, default=1, help="Per-sample retries before moving to a new sample (set 0 for unlimited).")
+    parser.add_argument("--min-score", type=float, default=0.3)
     parser.add_argument("--show-pipeline", action="store_true")
     parser.add_argument("--routes-ego-num", type=int, default=None)
     parser.add_argument("--no-align-routes", action="store_true")
@@ -1278,6 +1292,16 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    # Resolve aliases and enforce intuitive naming
+    if args.keep_top is not None:
+        args.count_per_combination = args.keep_top
+    if args.samples_per_category is not None:
+        args.best_of = args.samples_per_category
+    # Ensure we aim for at least as many successes as we plan to keep
+    args.best_of = max(args.best_of, args.count_per_combination)
+    if args.max_sample_attempts is None:
+        args.max_sample_attempts = args.best_of * 3
     
     # If only one category specified and no custom run_id, use category name
     if not args.run_id and args.categories and len(args.categories) == 1:
@@ -1314,7 +1338,7 @@ def main() -> None:
                 "created_at": _now_iso(),
                 "args": vars(args),
                 "categories": args.categories,
-                "difficulties": args.difficulties,
+                "run_tag": args.run_tag,
                 "states": STATES,
                 "csv_fields": CSV_FIELDS,
             },
@@ -1333,19 +1357,15 @@ def main() -> None:
         top_p=args.schema_top_p,
         repetition_penalty=args.schema_repetition_penalty,
         max_retries=args.schema_max_retries,
-        do_sample=args.schema_do_sample,
-        allow_template_fallback=not args.no_template_fallback,
+        do_sample=True,
+        allow_template_fallback=False,
     )
-
-    if args.template_only and args.schema_do_sample:
-        raise SystemExit("--template-only cannot be combined with --schema-do-sample")
 
     model, tokenizer = _load_shared_model(args.model)
     generator = SchemaScenarioGenerator(
         schema_config,
         model=model,
         tokenizer=tokenizer,
-        template_only=args.template_only,
     )
     scene_validator = SceneValidator()
 
@@ -1353,26 +1373,40 @@ def main() -> None:
         category_description = _build_category_description(category)
         _ensure_category_row(csv_path, run_id, category, category_description)
         
-        # Cross-difficulty output hash tracker for this category
-        # Tracks {difficulty: (output_hash, spec_dict)} to detect identical outputs
-        output_hash_tracker: Dict[str, Dict[int, Tuple[str, Dict[str, Any]]]] = {category: {}}
+        statuses: List[Dict[str, Any]] = []
+        sample_attempts = 0
+        success_count = 0
+        target_successes = args.best_of
+        while (
+            sample_attempts < args.max_sample_attempts
+            and success_count < target_successes
+        ):
+            sample_attempts += 1
+            sample_idx = sample_attempts
+            status = _run_single(
+                args=args,
+                run_id=run_id,
+                run_root=run_root,
+                csv_path=csv_path,
+                generator=generator,
+                model=model,
+                tokenizer=tokenizer,
+                scene_validator=scene_validator,
+                category=category,
+                run_tag=args.run_tag,
+                variant_index=sample_idx,
+            )
+            statuses.append(status)
+            if status and status.get("scenario_generation_success") and (status.get("validation_score") or 0) >= args.min_score:
+                success_count += 1
+                if success_count >= args.count_per_combination and success_count >= target_successes:
+                    break
         
-        for difficulty in args.difficulties:
-            for variant_index in range(1, args.count_per_combination + 1):
-                _run_single(
-                    args=args,
-                    run_id=run_id,
-                    run_root=run_root,
-                    csv_path=csv_path,
-                    generator=generator,
-                    model=model,
-                    tokenizer=tokenizer,
-                    scene_validator=scene_validator,
-                    category=category,
-                    difficulty=difficulty,
-                    variant_index=variant_index,
-                    output_hash_tracker=output_hash_tracker,
-                )
+        # Rank best runs and update CSV rows
+        ranked = _rank_and_mark_best(statuses, args.count_per_combination)
+        _update_best_marks(csv_path, ranked)
+        _log_kept_best(category, ranked, args.count_per_combination)
+        _create_kept_best_symlinks(run_root, ranked)
 
 
 if __name__ == "__main__":

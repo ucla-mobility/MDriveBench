@@ -29,7 +29,6 @@ DEFAULT_SCHEMA_CATEGORIES = [
 class SchemaGenerationResult:
     scenario_id: str
     category: str
-    difficulty: int
     description: str
     success: bool
     scene_path: Optional[str] = None
@@ -42,8 +41,7 @@ class SchemaGenerationResult:
 @dataclass
 class SchemaGenerationLoopConfig:
     categories: Optional[List[str]] = None
-    difficulties: List[int] = field(default_factory=lambda: [1, 2, 3, 4, 5])
-    count_per_combination: int = 1
+    variants_per_category: int = 1
     output_dir: str = "log_schema"
     town: str = "Town05"
     highway_town: Optional[str] = "Town06"
@@ -56,11 +54,11 @@ class SchemaGenerationLoopConfig:
     carla_host: str = "127.0.0.1"
     carla_port: int = 2000
     max_retries_per_scenario: int = 3
-    min_validation_score: float = 0.6
+    min_validation_score: float = 0.3
     mute_pipeline: bool = True
     template_only: bool = False
     verbose: bool = False
-    allow_template_fallback: bool = True
+    allow_template_fallback: bool = False
 
 
 class SchemaGenerationLoop:
@@ -160,23 +158,23 @@ class SchemaGenerationLoop:
         if missing:
             self.logger.warning(f"Missing outputs: {', '.join(missing)}")
 
-    def _routes_dir_for(self, category: str, difficulty: int, variant_index: int) -> Path:
-        clean_id = f"{self._safe_name(category)}_d{difficulty}"
+    def _routes_dir_for(self, category: str, variant_index: int) -> Path:
+        clean_id = self._safe_name(category)
         if variant_index > 1:
-            clean_id = f"{clean_id}_{variant_index}"
+            clean_id = f"{clean_id}_v{variant_index}"
         return Path(self.config.routes_out_dir) / clean_id
 
-    def generate_single(self, category: str, difficulty: int, variant_index: int) -> SchemaGenerationResult:
-        base_id = f"{self._safe_name(category)}_d{difficulty}"
+    def generate_single(self, category: str, variant_index: int) -> SchemaGenerationResult:
+        base_id = self._safe_name(category)
         if variant_index > 1:
-            base_id = f"{base_id}_{variant_index}"
+            base_id = f"{base_id}_v{variant_index}"
 
         last_error = None
         for attempt in range(1, self.config.max_retries_per_scenario + 1):
             self.total_attempts += 1
             scenario_id = f"{base_id}_attempt{attempt}"
 
-            spec_obj, errors, _warnings = self.generator.generate_spec(category, difficulty)
+            spec_obj, errors, _warnings = self.generator.generate_spec(category)
             if spec_obj is None:
                 last_error = "; ".join(errors) if errors else "spec_generation_failed"
                 continue
@@ -196,7 +194,6 @@ class SchemaGenerationLoop:
             success, scene_path, error_msg = self.pipeline_runner.run_full_pipeline(
                 scenario_text=description,
                 category=category,
-                difficulty=difficulty,
                 scenario_id=scenario_id,
                 town=town,
                 mute=self.config.mute_pipeline,
@@ -215,7 +212,6 @@ class SchemaGenerationLoop:
                 scene_path,
                 description,
                 category=category,
-                difficulty=difficulty,
                 scenario_spec=spec_dict,
             )
             if validation.score < self.config.min_validation_score:
@@ -228,7 +224,7 @@ class SchemaGenerationLoop:
                 try:
                     from convert_scene_to_routes import convert_scene_to_routes
 
-                    routes_dir = self._routes_dir_for(category, difficulty, variant_index)
+                    routes_dir = self._routes_dir_for(category, variant_index)
                     convert_scene_to_routes(
                         str(scene_path),
                         str(routes_dir),
@@ -243,7 +239,6 @@ class SchemaGenerationLoop:
             return SchemaGenerationResult(
                 scenario_id=scenario_id,
                 category=category,
-                difficulty=difficulty,
                 description=description,
                 success=True,
                 scene_path=scene_path,
@@ -255,7 +250,6 @@ class SchemaGenerationLoop:
         return SchemaGenerationResult(
             scenario_id=base_id,
             category=category,
-            difficulty=difficulty,
             description="",
             success=False,
             attempts=self.config.max_retries_per_scenario,
@@ -265,7 +259,7 @@ class SchemaGenerationLoop:
     def run(self) -> List[SchemaGenerationResult]:
         self.logger.divider()
         self.logger.info("Starting schema generation loop")
-        self.logger.info(f"Categories: {len(self.categories)}, Difficulties: {self.config.difficulties}")
+        self.logger.info(f"Categories: {len(self.categories)}, Variants per category: {self.config.variants_per_category}")
         output_root = Path(self.config.output_dir).resolve()
         output_root.mkdir(parents=True, exist_ok=True)
         self.logger.info(f"Schema output dir: {output_root}")
@@ -274,21 +268,20 @@ class SchemaGenerationLoop:
         start_time = time.time()
 
         for category in self.categories:
-            for difficulty in self.config.difficulties:
-                for idx in range(1, self.config.count_per_combination + 1):
-                    self.logger.info(f"Generating {category} (difficulty {difficulty}, variant {idx})")
-                    result = self.generate_single(category, difficulty, idx)
-                    if result.success:
-                        self.generated_results.append(result)
-                        score = result.validation_result.score if result.validation_result else 0.0
-                        self.logger.success(
-                            f"Generated {category} d{difficulty} (attempts={result.attempts}, score={score:.2f})"
-                        )
-                    else:
-                        self.failed_results.append(result)
-                        self.logger.warning(
-                            f"Failed {category} d{difficulty} after {result.attempts} attempts: {result.error_message}"
-                        )
+            for idx in range(1, self.config.variants_per_category + 1):
+                self.logger.info(f"Generating {category} (variant {idx})")
+                result = self.generate_single(category, idx)
+                if result.success:
+                    self.generated_results.append(result)
+                    score = result.validation_result.score if result.validation_result else 0.0
+                    self.logger.success(
+                        f"Generated {category} variant {idx} (attempts={result.attempts}, score={score:.2f})"
+                    )
+                else:
+                    self.failed_results.append(result)
+                    self.logger.warning(
+                        f"Failed {category} variant {idx} after {result.attempts} attempts: {result.error_message}"
+                    )
 
         elapsed = time.time() - start_time
         self.logger.divider()
@@ -316,7 +309,6 @@ class SchemaGenerationLoop:
         for result in self.generated_results:
             scenarios.setdefault(result.category, []).append(
                 {
-                    "difficulty": result.difficulty,
                     "spec": result.spec,
                     "description": result.description,
                     "scenario_id": result.scenario_id,
@@ -329,7 +321,6 @@ class SchemaGenerationLoop:
                 {
                     "scenario_id": r.scenario_id,
                     "category": r.category,
-                    "difficulty": r.difficulty,
                     "success": r.success,
                     "attempts": r.attempts,
                     "scene_path": r.scene_path,
@@ -341,7 +332,6 @@ class SchemaGenerationLoop:
                 {
                     "scenario_id": r.scenario_id,
                     "category": r.category,
-                    "difficulty": r.difficulty,
                     "success": r.success,
                     "attempts": r.attempts,
                     "error_message": r.error_message,

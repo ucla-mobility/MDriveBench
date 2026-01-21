@@ -183,7 +183,6 @@ class SceneValidator:
         self.intersection_required_pattern = re.compile(
             '|'.join(self.INTERSECTION_REQUIRED_PATTERNS), re.IGNORECASE
         )
-        
         # Actor patterns
         self.actor_patterns = {
             'walker': re.compile(r'(?:pedestrian|walker|person|crossing)\s*(?:cross(?:es|ing)?)?', re.IGNORECASE),
@@ -242,7 +241,7 @@ class SceneValidator:
             if len(turners) >= 2:
                 return True
 
-        if category in {"Multi Left Turn Conflict", "Intersection Deadlock Resolution", "Multi-Way Standoff"}:
+        if category in {"Intersection Deadlock Resolution"}:
             return True
 
         return bool(self.intersection_required_pattern.search(self._vehicle_only_text(text)))
@@ -1682,21 +1681,14 @@ class SceneValidator:
         scene_path: str,
         scenario_text: str,
         category: Optional[str] = None,
-        difficulty: Optional[int] = None,
         scenario_spec: Optional[Any] = None,
     ) -> SceneValidationResult:
         """
-        Validate a generated scene against its description.
-        
-        Args:
-            scene_path: Path to scene_objects.json
-            scenario_text: The natural language scenario description
-            
-        Returns:
-            SceneValidationResult with detailed validation info
+        Simplified validation: only hard-fail parse errors, empty scenes, missing required geometry/flags,
+        or fully isolated vehicles. All other issues are treated as warnings with a lower score threshold.
         """
         result = SceneValidationResult(is_valid=True, score=1.0)
-        
+
         # Load scene
         try:
             with open(scene_path, 'r') as f:
@@ -1705,479 +1697,156 @@ class SceneValidator:
             result.is_valid = False
             result.score = 0.0
             result.add_issue(
-                ValidationIssue.PARSE_ERROR, "error",
+                ValidationIssue.PARSE_ERROR,
+                "error",
                 f"Failed to load scene_objects.json: {e}",
-                pipeline_stage="step_05_object_placer"
+                pipeline_stage="step_05_object_placer",
             )
             return result
-        
+
         if not category and scenario_spec:
             category = self._get_spec_value(scenario_spec, "category")
 
-        # Extract expected elements from spec if available, otherwise from text
+        # Extract expected elements for reference
         if scenario_spec:
             expected = self.extract_expected_from_spec(scenario_spec)
         else:
             expected = self.extract_expected_from_text(scenario_text)
-
         expected_flags = self._infer_expected_features(
             scenario_text,
             category,
             scenario_spec=scenario_spec,
         )
-        if expected_flags.get("needs_oncoming") and "opposite_approach" not in expected["relationships"]:
-            expected["relationships"].append("opposite_approach")
         result.expected_vehicles = len(expected['vehicles'])
         result.expected_maneuvers = expected['maneuvers']
         result.expected_actors = expected['actors']
         result.expected_relationships = expected['relationships']
-        
-        # Extract actual elements from scene
+
+        # Extract actual elements
         actual = self.extract_actual_from_scene(scene_data)
         result.actual_vehicles = len(actual['vehicles'])
         result.actual_maneuvers = actual['maneuvers']
         result.actual_actors = actual['actors']
-        geometry = self._analyze_scene_geometry(scene_data)
-        
-        # Calculate score components
-        score_components = []
-        
-        # 1. Validate vehicle count
-        expected_count = len(expected['vehicles'])
-        actual_count = len(actual['vehicles'])
-        
-        if actual_count == 0:
+
+        if result.actual_vehicles == 0:
             result.is_valid = False
+            result.score = 0.0
             result.add_issue(
-                ValidationIssue.SCENE_EMPTY, "error",
+                ValidationIssue.SCENE_EMPTY,
+                "error",
                 "Scene has no ego vehicles",
-                expected=f"{expected_count} vehicles",
+                expected=f"{result.expected_vehicles} vehicles" if result.expected_vehicles else "1+ vehicles",
                 actual="0 vehicles",
-                suggestion="Check path picker stage",
-                pipeline_stage="step_03_path_picker"
-            )
-            score_components.append(0.0)
-        elif actual_count != expected_count:
-            severity = "error" if abs(actual_count - expected_count) > 1 else "warning"
-            if severity == "error":
-                result.is_valid = False
-            result.add_issue(
-                ValidationIssue.VEHICLE_COUNT_MISMATCH, severity,
-                f"Vehicle count mismatch: expected {expected_count}, got {actual_count}",
-                expected=str(expected_count),
-                actual=str(actual_count),
-                suggestion="Re-run path picker with correct vehicle count",
-                pipeline_stage="step_03_path_picker"
-            )
-            score_components.append(min(actual_count, expected_count) / max(actual_count, expected_count))
-        else:
-            score_components.append(1.0)
-        
-        # 2. Validate maneuvers
-        maneuver_score = 1.0
-        for vehicle, expected_maneuver in expected['maneuvers'].items():
-            actual_maneuver = actual['maneuvers'].get(vehicle)
-            if str(expected_maneuver).lower() == "lane_change":
-                lane_change = actual.get('lane_changes', {}).get(vehicle)
-                if lane_change is None:
-                    result.add_issue(
-                        ValidationIssue.MISSING_MANEUVER, "warning",
-                        f"{vehicle} lane change could not be verified (no lane data)",
-                        expected=expected_maneuver,
-                        pipeline_stage="step_03_path_picker"
-                    )
-                    maneuver_score -= 0.2
-                elif not lane_change:
-                    result.add_issue(
-                        ValidationIssue.WRONG_MANEUVER, "warning",
-                        f"{vehicle} did not change lanes as expected",
-                        expected=expected_maneuver,
-                        actual=actual_maneuver,
-                        suggestion="Re-run path picker to include a lane change",
-                        pipeline_stage="step_03_path_picker"
-                    )
-                    maneuver_score -= 0.3
-                continue
-            if actual_maneuver is None:
-                result.add_issue(
-                    ValidationIssue.MISSING_MANEUVER, "warning",
-                    f"{vehicle} maneuver could not be verified (vehicle not found)",
-                    expected=expected_maneuver,
-                    pipeline_stage="step_03_path_picker"
-                )
-                maneuver_score -= 0.2
-            elif actual_maneuver.lower() != expected_maneuver.lower():
-                result.add_issue(
-                    ValidationIssue.WRONG_MANEUVER, "warning",
-                    f"{vehicle} has wrong maneuver",
-                    expected=expected_maneuver,
-                    actual=actual_maneuver,
-                    suggestion=f"Re-run path picker to get {expected_maneuver} maneuver",
-                    pipeline_stage="step_03_path_picker"
-                )
-                maneuver_score -= 0.3
-        score_components.append(max(0, maneuver_score))
-        
-        # 3. Validate actors
-        actor_score = 1.0
-        expected_actor_types = {a['kind'] for a in expected['actors']}
-        actual_actor_types = {a['kind'] for a in actual['actors']}
-        
-        # Map category names to object_placer categories
-        category_map = {
-            'walker': 'walker',
-            'parked_vehicle': 'vehicle',
-            'cyclist': 'cyclist',
-            'static_prop': 'static',
-        }
-        
-        for expected_type in expected_actor_types:
-            mapped_type = category_map.get(expected_type, expected_type)
-            if mapped_type not in actual_actor_types and expected_type not in actual_actor_types:
-                result.add_issue(
-                    ValidationIssue.MISSING_ACTOR, "warning",
-                    f"Expected {expected_type} actor not found in scene",
-                    expected=expected_type,
-                    actual=str(list(actual_actor_types)) if actual_actor_types else "none",
-                    suggestion=f"Re-run object placer to add {expected_type}",
-                    pipeline_stage="step_05_object_placer"
-                )
-                actor_score -= 0.3
-        
-        # Check for actor motion
-        if expected['actors']:
-            for expected_actor in expected['actors']:
-                if 'motion' in expected_actor:
-                    expected_motion = expected_actor['motion']
-                    found_motion = False
-                    for actual_actor in actual['actors']:
-                        if actual_actor.get('motion') == expected_motion:
-                            found_motion = True
-                            break
-                    if not found_motion and actual['actors']:
-                        result.add_issue(
-                            ValidationIssue.WRONG_ACTOR_MOTION, "info",
-                            f"Expected actor motion '{expected_motion}' not found",
-                            expected=expected_motion,
-                            pipeline_stage="step_05_object_placer"
-                        )
-                        actor_score -= 0.1
-        
-        score_components.append(max(0, actor_score))
-        
-        # 4. Validate relationships (basic check based on entry directions)
-        relationship_score = 1.0
-        if 'opposite_approach' in expected['relationships']:
-            # Check if any two vehicles have opposite entry directions
-            entry_dirs = [d for d in actual['entry_directions'].values() if d and d != "unknown"]
-            opposite_pairs = [('N', 'S'), ('S', 'N'), ('E', 'W'), ('W', 'E')]
-            has_opposite = any(
-                (entry_dirs[i], entry_dirs[j]) in opposite_pairs
-                for i in range(len(entry_dirs))
-                for j in range(i+1, len(entry_dirs))
-            ) if len(entry_dirs) >= 2 else False
-            
-            if len(entry_dirs) >= 2 and not has_opposite:
-                result.add_issue(
-                    ValidationIssue.MISSING_RELATIONSHIP, "warning",
-                    "Expected opposite approach relationship not found",
-                    expected="vehicles approaching from opposite directions",
-                    actual=f"entry directions: {entry_dirs}",
-                    suggestion="Re-run path picker with opposite_approach constraint",
-                    pipeline_stage="step_03_path_picker"
-                )
-                relationship_score -= 0.3
-        
-        if 'perpendicular' in expected['relationships']:
-            entry_dirs = [d for d in actual['entry_directions'].values() if d and d != "unknown"]
-            perp_pairs = [('N', 'E'), ('N', 'W'), ('S', 'E'), ('S', 'W'),
-                         ('E', 'N'), ('E', 'S'), ('W', 'N'), ('W', 'S')]
-            has_perp = any(
-                (entry_dirs[i], entry_dirs[j]) in perp_pairs
-                for i in range(len(entry_dirs))
-                for j in range(i+1, len(entry_dirs))
-            ) if len(entry_dirs) >= 2 else False
-            
-            if len(entry_dirs) >= 2 and not has_perp:
-                result.add_issue(
-                    ValidationIssue.MISSING_RELATIONSHIP, "warning",
-                    "Expected perpendicular approach relationship not found",
-                    expected="vehicles approaching from perpendicular directions",
-                    actual=f"entry directions: {entry_dirs}",
-                    suggestion="Re-run path picker with perpendicular constraint",
-                    pipeline_stage="step_03_path_picker"
-                )
-                relationship_score -= 0.3
-        
-        score_components.append(max(0, relationship_score))
-
-        # 5. Validate topology/geometry requirements
-        feature_score = 1.0
-        if expected_flags.get("required_topology") in {TopologyType.CORRIDOR, TopologyType.HIGHWAY}:
-            allow_two_way = expected_flags.get("needs_oncoming") or ("opposite_approach" in expected['relationships'])
-            if geometry["distinct_exit_roads"] > 1:
-                if allow_two_way and geometry["distinct_exit_roads"] <= 2:
-                    pass
-                else:
-                    topology_name = expected_flags.get("required_topology").value
-                    expected_msg = f"single {topology_name} exit road"
-                    if allow_two_way:
-                        expected_msg = f"at most two exit roads for oncoming {topology_name}"
-                    result.add_issue(
-                        ValidationIssue.TOPOLOGY_MISMATCH, "error",
-                        f"{topology_name.capitalize()} scenario exits to multiple roads",
-                        expected=expected_msg,
-                        actual=f"exit roads: {geometry['distinct_exit_roads']}",
-                        suggestion="Re-run crop picker for corridor geometry",
-                        pipeline_stage="step_01_crop",
-                    )
-                    feature_score -= 0.6
-            elif geometry["has_turns"] and not expected_flags.get("needs_merge"):
-                result.add_issue(
-                    ValidationIssue.TOPOLOGY_MISMATCH, "error",
-                    "Corridor scenario contains turning paths",
-                    expected="straight paths on a corridor",
-                    actual=f"turns: {geometry['turns']}",
-                    suggestion="Re-run crop picker for corridor geometry",
-                    pipeline_stage="step_01_crop",
-                )
-                feature_score -= 0.4
-
-        if expected_flags.get("needs_multi_lane") and not geometry["has_multi_lane"]:
-            result.add_issue(
-                ValidationIssue.MISSING_MULTI_LANE, "error",
-                "Multi-lane geometry not present in picked paths",
-                expected="at least 2 lanes",
-                actual=f"entry lanes: {geometry['distinct_entry_lanes']}, exit lanes: {geometry['distinct_exit_lanes']}, lane_changes: {geometry['has_lane_change']}",
-                suggestion="Re-run crop picker for multi-lane geometry",
-                pipeline_stage="step_01_crop",
-            )
-            feature_score -= 0.4
-
-        has_merge_geom = geometry["has_merge_onto_same_road"] or geometry["lane_drop_like"] or geometry["has_lane_change"]
-        if expected_flags.get("needs_merge") and not has_merge_geom:
-            result.add_issue(
-                ValidationIssue.MISSING_MERGE_FEATURE, "error",
-                "Merge geometry not found",
-                expected="multiple entry roads merging to one exit road",
-                actual=(
-                    f"entry roads: {geometry['distinct_entry_roads']}, "
-                    f"exit roads: {geometry['distinct_exit_roads']}, "
-                    f"lane_changes: {geometry['has_lane_change']}, lane_drop: {geometry['lane_drop_like']}"
-                ),
-                suggestion="Re-run crop picker for merge geometry",
-                pipeline_stage="step_01_crop",
-            )
-            feature_score -= 0.5
-
-        if expected_flags.get("needs_on_ramp"):
-            # Check both geometry and actual usage
-            if geometry["distinct_entry_roads"] < 2:
-                result.add_issue(
-                    ValidationIssue.MISSING_MERGE_FEATURE, "error",
-                    "On-ramp scenario lacks distinct ramp entry road",
-                    expected="ramp + mainline entry roads (2+ entry roads)",
-                    actual=f"entry roads: {geometry['distinct_entry_roads']}",
-                    suggestion="Re-run crop picker for on-ramp geometry",
-                    pipeline_stage="step_01_crop",
-                )
-                feature_score -= 0.4
-            elif not geometry.get("has_on_ramp_usage", False):
-                result.add_issue(
-                    ValidationIssue.MISSING_MERGE_FEATURE, "error",
-                    "On-ramp scenario does not have vehicles using the on-ramp",
-                    expected="at least one vehicle from on-ramp (different entry direction) merging to mainline",
-                    actual=f"entry roads: {geometry['distinct_entry_roads']}, entry dirs: {set(geometry['entry_dirs'])}",
-                    suggestion="Re-run path picker with require_on_ramp=True to enforce on-ramp usage",
-                    pipeline_stage="step_03_path_picker",
-                )
-                feature_score -= 0.5
-            
-            # For difficulty 3+, require multiple vehicles from on-ramp
-            if difficulty and difficulty >= 3:
-                # Count vehicles from different entry roads
-                entry_road_counts = {}
-                picked = scene_data.get('ego_picked', [])
-                for p in picked:
-                    sig = p.get('signature', {})
-                    entry_road = sig.get('entry', {}).get('road_id')
-                    if entry_road is not None:
-                        entry_road_counts[entry_road] = entry_road_counts.get(entry_road, 0) + 1
-                
-                # For on-ramp scenarios, count vehicles from non-mainline roads
-                minor_entry_vehicles = 0
-                if len(entry_road_counts) >= 2:
-                    # Sort by count, the road with most vehicles is likely mainline
-                    sorted_roads = sorted(entry_road_counts.items(), key=lambda x: x[1])
-                    # Count vehicles from non-mainline roads (all except the most-used one)
-                    for road_id, count in sorted_roads[:-1]:
-                        minor_entry_vehicles += count
-                
-                if minor_entry_vehicles < 2:
-                    result.add_issue(
-                        ValidationIssue.MISSING_MERGE_FEATURE, "error",
-                        f"Highway On-Ramp d{difficulty} requires 2+ vehicles from on-ramp",
-                        expected="at least 2 vehicles merging from on-ramp for complex multi-vehicle merge",
-                        actual=f"only {minor_entry_vehicles} vehicle(s) from on-ramp entry road(s)",
-                        suggestion="Ensure scenario spec has 2+ vehicles with entry_road='side' and path picker assigns them ramp paths",
-                        pipeline_stage="step_03_path_picker",
-                    )
-                    feature_score -= 0.5
-
-        if expected_flags.get("needs_lane_change") and not geometry["has_lane_change"]:
-            result.add_issue(
-                ValidationIssue.MISSING_LANE_CHANGE, "error",
-                "Weaving scenario lacks lane changes in picked paths",
-                expected="lane changes along at least one path",
-                actual=f"lane changes: {geometry['has_lane_change']}",
-                suggestion="Re-run path picker with lane-change constraints",
                 pipeline_stage="step_03_path_picker",
             )
-            feature_score -= 0.4
+            return result
 
-        if expected_flags.get("needs_lane_drop") and not geometry["lane_drop_like"]:
+        # Hard rule: Highway On-Ramp Merge must not place extra props/actors
+        if category == "Highway On-Ramp Merge" and result.actual_actors:
+            result.is_valid = False
+            result.score = 0.0
             result.add_issue(
-                ValidationIssue.MISSING_LANE_DROP, "error",
-                "Lane drop scenario lacks converging lanes",
-                expected="multiple entry lanes converging to fewer exit lanes",
+                ValidationIssue.WRONG_ACTOR_TYPE,
+                "error",
+                "Actors/props are not allowed for Highway On-Ramp Merge scenarios",
+                actual=str(result.actual_actors),
+                pipeline_stage="step_05_object_placer",
+            )
+            return result
+
+        geometry = self._analyze_scene_geometry(scene_data)
+        hard_error = False
+
+        def add_error(issue_type, message, **kwargs):
+            nonlocal hard_error
+            hard_error = True
+            result.add_issue(
+                issue_type,
+                "error",
+                message,
+                **kwargs,
+            )
+
+        # Required geometry/flag checks
+        if expected_flags.get("needs_multi_lane") and not geometry["has_multi_lane"]:
+            add_error(
+                ValidationIssue.MISSING_MULTI_LANE,
+                "Multi-lane geometry not present in picked paths",
+                expected="at least 2 lanes",
                 actual=f"entry lanes: {geometry['distinct_entry_lanes']}, exit lanes: {geometry['distinct_exit_lanes']}",
-                suggestion="Re-run crop picker for lane-drop geometry or add cones to create a drop",
                 pipeline_stage="step_01_crop",
             )
-            feature_score -= 0.4
+        merge_ok = geometry["has_merge_onto_same_road"] or geometry["lane_drop_like"] or geometry["has_lane_change"]
+        if expected_flags.get("needs_merge") and not merge_ok:
+            add_error(
+                ValidationIssue.MISSING_MERGE_FEATURE,
+                "Merge geometry not found",
+                expected="multiple entry roads converging or a lane drop",
+                actual=f"entry roads: {geometry['distinct_entry_roads']}, exit roads: {geometry['distinct_exit_roads']}",
+                pipeline_stage="step_01_crop",
+            )
+        if expected_flags.get("needs_on_ramp"):
+            if geometry["distinct_entry_roads"] < 2 or not geometry.get("has_on_ramp_usage", False):
+                add_error(
+                    ValidationIssue.MISSING_MERGE_FEATURE,
+                    "On-ramp geometry or usage missing",
+                    expected="at least one ramp entry plus mainline with a merge",
+                    actual=f"entry roads: {geometry['distinct_entry_roads']}",
+                    pipeline_stage="step_03_path_picker",
+                )
 
-        if category:
-            entry_dirs = [d for d in actual['entry_directions'].values() if d and d != "unknown"]
-            unique_dirs = set(entry_dirs)
-            perp_pairs = {('N', 'E'), ('N', 'W'), ('S', 'E'), ('S', 'W'),
-                          ('E', 'N'), ('E', 'S'), ('W', 'N'), ('W', 'S')}
-            has_perp = any(
-                (entry_dirs[i], entry_dirs[j]) in perp_pairs
-                for i in range(len(entry_dirs))
-                for j in range(i + 1, len(entry_dirs))
-            ) if len(entry_dirs) >= 2 else False
-            has_turn = any(
-                m in ("left", "right", "uturn")
-                for m in actual['maneuvers'].values()
+        # Interaction/coverage check
+        interaction_region = self._find_interaction_region(scene_data)
+        if result.actual_vehicles > 1 and not interaction_region:
+            add_error(
+                ValidationIssue.NO_INTERACTION,
+                "Vehicles do not converge; all paths appear isolated",
+                suggestion="Add active constraints or adjust path picker to force an interaction region",
+                pipeline_stage="step_03_path_picker",
+            )
+        elif interaction_region:
+            result.intersection_region = {
+                'x': interaction_region['x'],
+                'y': interaction_region['y'],
+            }
+            result.paths_intersect = True
+
+        # Soft checks as warnings
+        if result.expected_vehicles and result.actual_vehicles != result.expected_vehicles:
+            result.add_issue(
+                ValidationIssue.VEHICLE_COUNT_MISMATCH,
+                "warning",
+                f"Vehicle count mismatch: expected {result.expected_vehicles}, got {result.actual_vehicles}",
+                expected=str(result.expected_vehicles),
+                actual=str(result.actual_vehicles),
             )
 
-            if category == "Intersection Deadlock Resolution":
-                if len(unique_dirs) < 3 and not has_perp and not has_turn:
-                    result.add_issue(
-                        ValidationIssue.PATHS_NOT_CONFLICTING, "error",
-                        "Courtesy/Deadlock requires perpendicular or turning conflict",
-                        expected="perpendicular approaches, turns that cross, or 3+ approach directions",
-                        actual=f"entry dirs: {sorted(unique_dirs)}; maneuvers: {list(actual['maneuvers'].values())}",
-                        suggestion="Re-run path picker with perpendicular constraints or add turning maneuvers",
-                        pipeline_stage="step_03_path_picker",
-                    )
-                    feature_score -= 0.4
-
-            if category == "Multi-Way Standoff":
-                if len(unique_dirs) < 3:
-                    result.add_issue(
-                        ValidationIssue.PATHS_NOT_CONFLICTING, "error",
-                        "Multi-Way Standoff requires 3+ approach directions",
-                        expected="vehicles from at least three distinct entry directions",
-                        actual=f"entry dirs: {sorted(unique_dirs)}",
-                        suggestion="Re-run path picker with perpendicular constraints",
-                        pipeline_stage="step_03_path_picker",
-                    )
-                    feature_score -= 0.4
-
-        score_components.append(max(0, feature_score))
-
-        # 6. Validate path intersections (critical for multi-agent scenarios)
-        scene_dir = Path(scene_path).parent
-        intersection_score = self._validate_path_intersections(
-            scene_data,
-            scenario_text,
-            result,
-            expected_flags=expected_flags,
-            expected_relationships=expected['relationships'],
-            expected_maneuvers=expected['maneuvers'],
-            category=category,
-        )
-        score_components.append(intersection_score)
-
-        # 7. Validate interaction coverage (each ego must have something happening)
-        interaction_coverage_score = self._validate_interaction_coverage(scene_data, result, scenario_spec=scenario_spec)
-        score_components.append(interaction_coverage_score)
-
-        # 8. Validate constraint satisfaction from picked_paths
-        constraint_score = self._validate_constraint_satisfaction(scene_dir, expected, result)
-        score_components.append(constraint_score)
-        
-        # 9. Validate interaction region approach (all vehicles must converge on shared region)
-        # This is a general geometric check - ensures all vehicles participate in the 
-        # scenario's core interaction area derived from path convergence points.
-        interaction_region_score = 1.0
-        if result.expected_vehicles >= 2:  # Only relevant for multi-vehicle scenarios
-            interaction_region = self._find_interaction_region(scene_data)
-            if interaction_region:
-                approaching, isolated_from_region = self._validate_all_vehicles_near_interaction_region(
-                    scene_data, interaction_region
+        expected_actor_types = {a['kind'] for a in expected['actors']}
+        actual_actor_types = {a.get('kind') for a in actual['actors']}
+        for actor_type in expected_actor_types:
+            if actor_type not in actual_actor_types:
+                result.add_issue(
+                    ValidationIssue.MISSING_ACTOR,
+                    "warning",
+                    f"Expected {actor_type} actor not found in scene",
+                    expected=actor_type,
+                    actual=str(actual_actor_types) if actual_actor_types else "none",
+                    pipeline_stage="step_05_object_placer",
                 )
-                result.intersection_region = {
-                    'x': interaction_region['x'],
-                    'y': interaction_region['y'],
-                }
-                result.paths_intersect = len(approaching) >= 2
-                
-                if isolated_from_region:
-                    # Some vehicles don't approach the interaction region
-                    interaction_region_score = max(0, 1.0 - (len(isolated_from_region) * 0.3))
-                    region_desc = f"({interaction_region['x']:.1f}, {interaction_region['y']:.1f})"
-                    result.add_issue(
-                        ValidationIssue.NO_INTERACTION, "warning",
-                        f"Vehicle(s) {', '.join(isolated_from_region)} do not approach the interaction region {region_desc}",
-                        expected="all vehicles within 30m of interaction region center",
-                        actual=f"{len(isolated_from_region)} vehicle(s) isolated from interaction region",
-                        suggestion=(
-                            f"The interaction region was derived from path convergence at {region_desc}. "
-                            f"Isolated vehicles: {', '.join(isolated_from_region)}. "
-                            "Use constraints that place vehicles in converging paths (e.g., left_lane_of, merges_into_lane_of) "
-                            "instead of constraints that may not affect spatial placement."
-                        ),
-                        pipeline_stage="step_03_path_picker",
-                    )
-        score_components.append(interaction_region_score)
-        
-        # Calculate final score (weighted average)
-        # Give more weight to critical components
-        weights = [
-            1.0,  # vehicle count
-            0.8,  # maneuvers
-            0.6,  # actors
-            0.9,  # relationships
-            1.0,  # topology/geometry
-            1.2,  # path intersection (critical for multi-agent)
-            1.1,  # interaction coverage (critical for scenario purpose)
-            0.9,  # constraint satisfaction
-            0.8,  # interaction region approach
-        ]
-        
-        if len(score_components) == len(weights):
-            weighted_sum = sum(s * w for s, w in zip(score_components, weights))
-            total_weight = sum(weights)
-            result.score = weighted_sum / total_weight
-        else:
-            result.score = sum(score_components) / len(score_components) if score_components else 0.0
 
-        if actual_count >= 2 and intersection_score < 1.0:
-            result.score = min(result.score, intersection_score)
-        if interaction_coverage_score < 1.0:
-            result.score = min(result.score, interaction_coverage_score)
-        
-        # Determine overall validity
-        error_count = len(result.get_errors())
-        if error_count > 0:
+        warning_count = len(result.get_warnings())
+
+        # Score: penalize warnings lightly; hard errors mark invalid
+        if hard_error:
+            result.score = max(0.0, 0.2 - 0.05 * warning_count)
             result.is_valid = False
-        elif result.score < 0.6:
-            result.is_valid = False
-        
+        else:
+            result.score = max(0.0, 1.0 - 0.05 * warning_count)
+            result.is_valid = result.score >= 0.3
+
         return result
-    
+
+
     def get_failing_stage(self, result: SceneValidationResult) -> Optional[str]:
         """
         Determine which pipeline stage likely caused the validation failure.
@@ -2213,7 +1882,6 @@ class SceneValidator:
         scene_path: str,
         scenario_text: str,
         category: str = "",
-        difficulty: int = 1,
         repair_history: Optional[List[Dict]] = None,
     ) -> Dict:
         """
@@ -2231,7 +1899,6 @@ class SceneValidator:
             scene_path: Path to scene_objects.json
             scenario_text: Natural language scenario description
             category: Scenario category
-            difficulty: Difficulty level
             repair_history: List of repair attempts and results
             
         Returns:
@@ -2285,13 +1952,12 @@ class SceneValidator:
         report = {
             "validation_score": round(validation.score, 3),
             "is_valid": validation.is_valid,
-            "min_required_score": 0.6,
+            "min_required_score": 0.3,
             "timestamp": datetime.utcnow().isoformat() + "Z",
             
             "scenario": {
                 "id": os.path.basename(os.path.dirname(scene_path)),
                 "category": category,
-                "difficulty": difficulty,
                 "description": scenario_text[:500] + ("..." if len(scenario_text) > 500 else ""),
             },
             

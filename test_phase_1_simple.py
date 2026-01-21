@@ -18,9 +18,9 @@ try:
         SchemaScenarioGenerator,
         SchemaGenerationConfig,
         build_schema_generation_prompt,
-        _conflict_errors,
         ConstraintType,
     )
+    from scenario_generator.scenario_generator.capabilities import CATEGORY_DEFINITIONS
     print("  ✓ Successfully imported SchemaScenarioGenerator and utilities")
 except Exception as e:
     print(f"  ✗ Import failed: {e}")
@@ -30,17 +30,17 @@ except Exception as e:
 print("\n[Test 2] Checking constraint semantics in prompt...")
 try:
     config = SchemaGenerationConfig()
+    category = next(iter(CATEGORY_DEFINITIONS.keys()))
+    cat_info = CATEGORY_DEFINITIONS[category]
     prompt = build_schema_generation_prompt(
-        category='highway',
-        difficulty=2,
-        cat_info=config.get_category_config('highway'),
+        category=category,
+        cat_info=cat_info,
         forced_variations=None
     )
     
     # Check for key components
     checks = [
         ("Constraint Semantics section", "PASSIVE CONSTRAINTS" in prompt and "ACTIVE CONSTRAINTS" in prompt),
-        ("Difficulty Requirements", "Difficulty 2" in prompt),
         ("Reasoning template", "reasoning_template" in prompt.lower() or '"reasoning"' in prompt),
         ("Anti-patterns section", "ANTI-PATTERNS" in prompt),
     ]
@@ -119,7 +119,6 @@ print("\nAll infrastructure checks passed!")
 print("\nKey Phase 1 Components Verified:")
 print("  ✓ Constraint semantics added to prompt (~1,650 tokens)")
 print("  ✓ Passive vs active constraint distinction defined")
-print("  ✓ Difficulty-specific requirements documented")
 print("  ✓ Reasoning template included in prompt")
 print("  ✓ Anti-patterns section present")
 print("  ✓ SchemaScenarioGenerator initialized")

@@ -125,7 +125,6 @@ class PipelineRunner:
         self,
         scenario_text: str,
         category: str,
-        difficulty: int,
         scenario_id: str,
         town: str = "Town05",
         mute: bool = True,
@@ -147,7 +146,6 @@ class PipelineRunner:
 
         with open(out_dir / "scenario_input.txt", "w") as f:
             f.write(f"Category: {category}\n")
-            f.write(f"Difficulty: {difficulty}\n")
             f.write(f"Town: {town}\n")
             f.write(f"Text: {scenario_text}\n")
 
@@ -295,7 +293,8 @@ class PipelineRunner:
 
         assignments = res.detailed.get("assignments", {})
         if scenario_id not in assignments:
-            if not any(crop_satisfies_spec(spec, c) for c in crops):
+            satisfying = [c for c in crops if crop_satisfies_spec(spec, c)]
+            if not satisfying:
                 return False, None, (
                     f"No crops satisfy geometry spec; "
                     f"needs_on_ramp={spec.needs_on_ramp}, "
@@ -303,36 +302,7 @@ class PipelineRunner:
                     f"needs_multi_lane={spec.needs_multi_lane}, "
                     f"needs_oncoming={spec.needs_oncoming}"
                 )
-            relaxed_spec = crop_picker.GeometrySpec(
-                topology="unknown",
-                degree=0,
-                required_maneuvers={"straight": 0, "left": 0, "right": 0},
-                needs_oncoming=False,
-                needs_merge_onto_same_road=False,
-                needs_on_ramp=False,
-                needs_multi_lane=False,
-                min_lane_count=1,
-                min_entry_runup_m=0.0,
-                min_exit_runout_m=0.0,
-                preferred_entry_cardinals=[],
-                avoid_extra_intersections=False,
-                confidence=0.0,
-                notes="relaxed_fallback",
-            )
-            relaxed = crop_picker.solve_assignment(
-                scenarios=[scenario],
-                specs={scenario_id: relaxed_spec},
-                crops=crops,
-                domain_k=50,
-                capacity_per_crop=10,
-                reuse_weight=4000.0,
-                junction_penalty=25000.0,
-                log_every=0,
-            )
-            assignments = relaxed.detailed.get("assignments", {})
-
-        if scenario_id not in assignments:
-            cand = min(crops, key=lambda c: c.area)
+            cand = min(satisfying, key=lambda c: c.area)
             crop_vals = [cand.crop.xmin, cand.crop.xmax, cand.crop.ymin, cand.crop.ymax]
         else:
             crop_vals = assignments[scenario_id]["crop"]

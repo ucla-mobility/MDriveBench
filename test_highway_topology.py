@@ -69,7 +69,6 @@ def test_highway_topology():
     
     test_spec = ScenarioSpec(
         category="Highway On-Ramp Merge",
-        difficulty=3,
         topology=TopologyType.HIGHWAY,
         needs_oncoming=False,
         needs_multi_lane=True,

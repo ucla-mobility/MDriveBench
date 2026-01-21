@@ -276,15 +276,11 @@ class CategoryDefinition:
     needs_on_ramp: bool = False
     needs_merge: bool = False
     
-    # Non-ego actors usage (now difficulty-dependent)
+    # Non-ego actors usage
     uses_non_ego_actors: bool = False
-    non_ego_actors_min_difficulty: int = 1  # Minimum difficulty to include non-ego actors (1-5, default 1 = always)
     
     # Conflict creation mechanisms
     conflict_via: List[str] = field(default_factory=list)
-    
-    # Difficulty scaling mechanisms that actually work
-    difficulty_knobs: List[str] = field(default_factory=list)
     
     # Creative variation axes for diverse scenario generation
     variation_axes: List[str] = field(default_factory=list)
@@ -292,66 +288,6 @@ class CategoryDefinition:
 
 # Honest assessment of each category
 CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
-    
-    "Highway On-Ramp Merge": CategoryDefinition(
-        name="Highway On-Ramp Merge",
-        notes="Multi-lane highway with on-ramp merge points. Requires highway geometry with 3+ lanes and merge capabilities.",
-        required_topology=TopologyType.HIGHWAY,
-        needs_on_ramp=True,
-        needs_merge=True,
-        uses_non_ego_actors=False,
-        non_ego_actors_min_difficulty=999,
-        conflict_via=[
-            "Multiple ego vehicles with paths converging at merge",
-            "follow_route_of constraint for queued vehicles",
-            "same_road_as constraint for merge target",
-            "Parked vehicle or obstacle blocking lanes increases merge difficulty",
-        ],
-        difficulty_knobs=[
-            "Number of ego vehicles",
-            "Constraint combinations",
-            "Obstacle placement severity",
-        ],
-        variation_axes=[
-            "ego_count: 3 vs 4 vs 5 vs 6+ vehicles",
-            "ramp_queue: single merging vehicle vs follow_route_of chain of 2-3",
-            "highway_queue: single mainline vehicle vs follow_route_of chain of 2-4",
-            "lane_positions: same lane competition vs adjacent lanes (left_lane_of/right_lane_of)",
-            "merge_type: single merges_into_lane_of vs multiple competing merges",
-            "obstacle: none vs parked_vehicle vs static_prop on merge approach",
-            "obstacle_position: entrance vs merge point vs exit",
-        ],
-    ),
-    
-    "Lane Drop / Alternating Merge": CategoryDefinition(
-        name="Lane Drop / Alternating Merge",
-        notes="Works if map has lane drop region with multi-lane approach. Can include construction cones or parked vehicles to further constrict lanes.",
-        required_topology=TopologyType.CORRIDOR,
-        needs_multi_lane=True,
-        needs_merge=True,
-        uses_non_ego_actors=True,
-        non_ego_actors_min_difficulty=1,  # Lane drops require obstacles at all difficulties.
-        conflict_via=[
-            "Ego vehicles in adjacent lanes reaching taper",
-            "left_lane_of / right_lane_of constraints",
-            "merges_into_lane_of for lane change intent",
-            "Static props (cones) narrowing available merge space",
-        ],
-        difficulty_knobs=[
-            "Number of vehicles per lane",
-            "Taper severity from props",
-        ],
-        variation_axes=[
-            "ego_count: 2-8 vehicles",
-            "lane_distribution: all in one lane vs spread across lanes",
-            "constraint_pattern: alternating left_lane_of/right_lane_of vs chains",
-            "merge_targets: single merges_into_lane_of vs multiple",
-            "work_zone_complexity: none vs single_side_channelization vs dual_side_bottleneck",
-            "  single_side_channelization: cones create 3-4 cone line on left edge narrowing left lane to 50%",
-            "  dual_side_bottleneck (harder): cones on BOTH sides (left edge AND right edge of roadway) creating 1-lane bottleneck forcing extreme merging",
-            "parked_vehicle: none vs parked_vehicle in work zone (blocks one merge gap)",
-        ],
-    ),
     
     "Intersection Deadlock Resolution": CategoryDefinition(
         name="Intersection Deadlock Resolution",
@@ -363,11 +299,6 @@ CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
             "opposite_approach_of for oncoming standoff",
             "Paths crossing at junction center with no clear priority",
             "Multiple approach directions creating deadlock potential",
-        ],
-        difficulty_knobs=[
-            "Number of approach directions with vehicles",
-            "Number of inter-vehicle constraints",
-            "Mix of maneuvers creating crossing conflicts",
         ],
         variation_axes=[
             "ego_count: 3 vs 4 vs 5 vs 6 vehicles from different approaches",
@@ -390,11 +321,6 @@ CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
             "Pedestrian actor crossing exit segment creates additional conflict",
             "Opposing left turners (same_exit_as) blocking each other",
         ],
-        difficulty_knobs=[
-            "Number of oncoming vehicles",
-            "Number of left turners",
-            "Actor combinations",
-        ],
         variation_axes=[
             "ego_count: 3 vs 4 vs 5 vs 6 vehicles",
             "oncoming_depth: single oncoming vs follow_route_of chain of 3-4",
@@ -406,51 +332,40 @@ CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
         ],
     ),
     
-    "Interactive Lane Change": CategoryDefinition(
-        name="Interactive Lane Change",
-        notes="Works on multi-lane corridors - multiple vehicles competing for same lane. Can include occlusions to block visibility of neighboring vehicles.",
-        required_topology=TopologyType.CORRIDOR,
-        needs_multi_lane=True,
-        uses_non_ego_actors=True,
+    "Highway On-Ramp Merge": CategoryDefinition(
+        name="Highway On-Ramp Merge",
+        notes="Multi-lane highway with on-ramp merge points. Requires highway geometry with 3+ lanes and merge capabilities.",
+        required_topology=TopologyType.HIGHWAY,
+        needs_on_ramp=True,
+        needs_merge=True,
+        uses_non_ego_actors=False,
         conflict_via=[
-            "left_lane_of / right_lane_of constraints positioning vehicles",
-            "merges_into_lane_of creating lane change intent conflict",
-            "Multiple vehicles trying to merge into same target lane",
-            "follow_route_of chains in each lane creating queues",
-            "Parked vehicle or obstacle blocking a lane creates forced merge",
-        ],
-        difficulty_knobs=[
-            "Vehicles in target lane",
-            "Simultaneous lane change intentions",
-            "Occlusion/prop placement limiting visibility",
+            "Multiple ego vehicles with paths converging at merge",
+            "follow_route_of constraint for queued vehicles",
+            "same_road_as constraint for merge target",
+            "Parked vehicle or obstacle blocking lanes increases merge complexity",
         ],
         variation_axes=[
-            "ego_count: 3 vs 4 vs 5 vs 6 vehicles",
-            "lane_layout: 2-lane vs 3-lane (more lanes = more conflict)",
-            "merge_conflict: one merges_into_lane_of vs 2 competing merges vs 3-way merge race",
-            "queue_depth: no follow_route_of vs chains of 2-3 in each lane",
-            "merge_direction: all merging same direction vs opposing merges (left meets right)",
-            "occlusion: none vs parked_vehicle blocking view of adjacent vehicle",
-            "obstacle: none vs static_prop in one lane forcing swerve",
+            "ego_count: 3 vs 4 vs 5 vs 6+ vehicles",
+            "ramp_queue: single merging vehicle vs follow_route_of chain of 2-3",
+            "highway_queue: single mainline vehicle vs follow_route_of chain of 2-4",
+            "lane_positions: same lane competition vs adjacent lanes (left_lane_of/right_lane_of)",
+            "merge_type: single merges_into_lane_of vs multiple competing merges",
+            "obstacle: none vs parked_vehicle vs static_prop on merge approach",
+            "obstacle_position: entrance vs merge point vs exit",
         ],
     ),
     
-    "Weaving Section": CategoryDefinition(
-        name="Weaving Section",
+    "Interactive Lane Change": CategoryDefinition(
+        name="Interactive Lane Change",
         notes="Lane weaving on multi-lane highways/corridors. Vehicles in adjacent lanes constantly change lanes, crossing into each other's lanes. Pure vehicle-to-vehicle interaction, no props.",
         required_topology=TopologyType.HIGHWAY,
         needs_multi_lane=True,
         uses_non_ego_actors=False,  # NO props - pure vehicle weaving
-        non_ego_actors_min_difficulty=999,  # Never add props
         conflict_via=[
             "Multiple MERGES_INTO_LANE_OF constraints (vehicles weaving into each other's lanes)",
             "LEFT_LANE_OF and RIGHT_LANE_OF to establish adjacent starting positions",
             "All vehicles perform active lane changes throughout the scenario",
-        ],
-        difficulty_knobs=[
-            "Number of vehicles (d1=2, d2=3, d3=4, d4=4, d5=5)",
-            "Number of lane change constraints (d1=1, d2=2, d3=3, d4=4, d5=5+)",
-            "Frequency and density of lane changes",
         ],
         variation_axes=[
             "ego_count_d1: 2 vehicles side-by-side with 1 lane change",
@@ -459,60 +374,95 @@ CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
             "ego_count_d4: 4 vehicles with 4 lane changes (dense weaving)",
             "ego_count_d5: 5 vehicles with 5+ lane changes (maximum density weaving)",
             "lane_span: 2-lane vs 3-lane corridor",
-            "constraint_density: increases with difficulty",
+            "constraint_density: increases across variants",
             "weave_pattern: simple adjacent swaps vs complex multi-vehicle weaving",
             "spatial_coupling: all vehicles start in adjacent lanes (LEFT_LANE_OF/RIGHT_LANE_OF)",
         ],
     ),
     
-    "Overtaking on Two-Lane Road": CategoryDefinition(
-        name="Overtaking on Two-Lane Road",
-        notes="Works on multi-lane same-direction roads. Can include oncoming vehicles, obstacles, and pedestrians to increase complexity.",
+    "Blocked Lane (Obstacle)": CategoryDefinition(
+        name="Blocked Lane (Obstacle)",
+        notes="Works with parked_vehicle actor blocking lane",
         required_topology=TopologyType.CORRIDOR,
         needs_multi_lane=True,
         uses_non_ego_actors=True,
         conflict_via=[
-            "follow_route_of for following vehicle",
-            "left_lane_of for passing lane vehicle",
-            "Oncoming traffic limits overtaking windows",
-            "Obstacles in passing lane block overtake attempt",
-        ],
-        difficulty_knobs=[
-            "Number of vehicles in each lane",
-            "Oncoming traffic density",
-            "Obstacle placement",
+            "parked_vehicle actor blocking ego's lane",
+            "Adjacent lane ego via left_lane_of / right_lane_of",
         ],
         variation_axes=[
             "ego_count: 2-5 vehicles",
-            "follow_depth: single follow_route_of vs chain",
-            "lane_occupancy: left_lane_of single vs multiple",
-            "maneuver: lane_change included or not",
-            "oncoming: none vs opposite_approach_of vehicle",
-            "obstacle: none vs parked_vehicle blocking pass lane",
-            "pedestrian: none vs walker crossing",
+            "blockage_count: 1 vs 2-3 parked_vehicles",
+            "blockage_lateral: center vs half_right",
+            "blockage_s_along: spread along route",
+            "lane_constraints: left_lane_of vs right_lane_of for adjacent traffic",
         ],
     ),
     
-    "Narrow Passage Encounter": CategoryDefinition(
-        name="Narrow Passage Encounter",
-        notes="Works with oncoming traffic detection",
+    "Lane Drop / Alternating Merge": CategoryDefinition(
+        name="Lane Drop / Alternating Merge",
+        notes="Works if map has lane drop region with multi-lane approach. Can include construction cones or parked vehicles to further constrict lanes.",
         required_topology=TopologyType.CORRIDOR,
-        needs_oncoming=True,
+        needs_multi_lane=True,
+        needs_merge=True,
         uses_non_ego_actors=True,
         conflict_via=[
-            "opposite_approach_of for oncoming ego vehicles",
-            "parked_vehicle actor to create constriction",
+            "Ego vehicles in adjacent lanes reaching taper",
+            "left_lane_of / right_lane_of constraints",
+            "merges_into_lane_of for lane change intent",
+            "Static props (cones) narrowing available merge space",
         ],
-        difficulty_knobs=[
-            "Queue depth each direction",
-            "Parked vehicle placement",
+        variation_axes=[
+            "ego_count: 2-8 vehicles",
+            "lane_distribution: all in one lane vs spread across lanes",
+            "constraint_pattern: alternating left_lane_of/right_lane_of vs chains",
+            "merge_targets: single merges_into_lane_of vs multiple",
+            "work_zone_complexity: none vs single_side_channelization vs dual_side_bottleneck",
+            "  single_side_channelization: cones create 3-4 cone line on left edge narrowing left lane to 50%",
+            "  dual_side_bottleneck (harder): cones on BOTH sides (left edge AND right edge of roadway) creating 1-lane bottleneck forcing extreme merging",
+            "parked_vehicle: none vs parked_vehicle in work zone (blocks one merge gap)",
+        ],
+    ),
+    
+    "Major/Minor Unsignalized Entry": CategoryDefinition(
+        name="Major/Minor Unsignalized Entry",
+        notes="Works at T-junctions - classic yield scenario with queue. Parked vehicles can block view of oncoming traffic or limit merge space.",
+        required_topology=TopologyType.T_JUNCTION,
+        uses_non_ego_actors=True,
+        conflict_via=[
+            "Side street ego turning onto main road full of traffic",
+            "Main road follow_route_of chains creating gaps and queue",
+            "Parked vehicles limiting visibility of main road traffic",
+            "Pedestrians crossing exit path",
+        ],
+        variation_axes=[
+            "ego_count: 3 vs 4 vs 5 vehicles",
+            "main_road_queue: single vs follow_route_of chain of 2-4",
+            "side_street_queue: single vs follow_route_of chain of 2",
+            "side_maneuver: left turn (harder gap) vs right turn",
+            "constraint: same_road_as vs perpendicular_right_of",
+            "parked_vehicle: none vs parked_vehicle at corner blocking sight",
+            "pedestrian: none vs walker crossing exit path",
+        ],
+    ),
+    
+    "Construction Zone": CategoryDefinition(
+        name="Construction Zone",
+        notes="Works with static_prop actors (cones) creating taper",
+        required_topology=TopologyType.CORRIDOR,
+        needs_multi_lane=True,
+        uses_non_ego_actors=True,
+        conflict_via=[
+            "static_prop actors in diagonal pattern",
+            "Lane merge constraints between ego vehicles",
         ],
         variation_axes=[
             "ego_count: 2-6 vehicles",
-            "direction_split: 1v1 vs 2v1 vs 3v2 etc",
-            "follow_chains: none vs follow_route_of on each side",
-            "parked_lateral: half_right vs right_edge vs offroad_right",
-            "parked_s_along: 0.3 vs 0.5 vs 0.7 positioning",
+            "cone_count: 3 vs 6 vs 10 static_props",
+            "cone_pattern: along_lane vs diagonal",
+            "cone_lateral: series from center to right_edge",
+            "lane_constraints: merges_into_lane_of for forced merge",
+            "work_vehicle: none vs parked_vehicle",
         ],
     ),
     
@@ -521,18 +471,11 @@ CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
         notes="D1-D3: Focus on vehicle count (2/3/4 cars), single pedestrian. D4-D5: Focus on pedestrian count (2/3 pedestrians) spawning behind parked vehicle occlusions. NO moving NPC vehicles or cyclists.",
         required_topology=TopologyType.CORRIDOR,
         uses_non_ego_actors=True,
-        non_ego_actors_min_difficulty=1,
         conflict_via=[
             "walker actor with cross_perpendicular motion",
             "Timing via when=on_approach",
             "Multiple vehicles encountering the same pedestrian crossing",
             "Occlusion hiding pedestrian from oncoming vehicles (d4-d5)",
-        ],
-        difficulty_knobs=[
-            "D1-D3: Vehicle count (2/3/4 cars)",
-            "D4-D5: Pedestrian count (2/3 pedestrians)",
-            "Occlusion actors (required d4-d5, pedestrians spawn behind)",
-            "Trigger distance variation",
         ],
         variation_axes=[
             "ego_count: d1=2, d2=3, d3=4 vehicles (linear scaling for d1-d3)",
@@ -548,249 +491,26 @@ CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
         ],
     ),
     
-    "Occluded Hazard": CategoryDefinition(
-        name="Occluded Hazard",
-        notes="Large occluder hides a pedestrian/cyclist crossing until late",
-        required_topology=TopologyType.INTERSECTION,
-        uses_non_ego_actors=True,
-        conflict_via=[
-            "large parked_vehicle or static_prop positioned to occlude",
-            "Pedestrian/cyclist revealed late from behind occluder",
-        ],
-        difficulty_knobs=[
-            "Occluder size/position",
-        ],
-        variation_axes=[
-            "ego_count: 2-4 vehicles",
-            "occluder_type: parked_vehicle vs large static_prop",
-            "occluder_lateral: half_right vs right_edge vs offroad_right",
-            "hazard_type: pedestrian vs cyclist",
-            "crossing_direction: left vs right",
-            "hazard_motion: cross_perpendicular",
-        ],
-    ),
-    
-    "Blocked Lane (Obstacle)": CategoryDefinition(
-        name="Blocked Lane (Obstacle)",
-        notes="Works with parked_vehicle actor blocking lane",
+    "Overtaking on Two-Lane Road": CategoryDefinition(
+        name="Overtaking on Two-Lane Road",
+        notes="Works on multi-lane same-direction roads. Can include oncoming vehicles, obstacles, and pedestrians to increase complexity.",
         required_topology=TopologyType.CORRIDOR,
         needs_multi_lane=True,
         uses_non_ego_actors=True,
         conflict_via=[
-            "parked_vehicle actor blocking ego's lane",
-            "Adjacent lane ego via left_lane_of / right_lane_of",
-        ],
-        difficulty_knobs=[
-            "Number of blockages",
-            "Adjacent lane vehicles",
+            "follow_route_of for following vehicle",
+            "left_lane_of for passing lane vehicle",
+            "Oncoming traffic limits overtaking windows",
+            "Obstacles in passing lane block overtake attempt",
         ],
         variation_axes=[
             "ego_count: 2-5 vehicles",
-            "blockage_count: 1 vs 2-3 parked_vehicles",
-            "blockage_lateral: center vs half_right",
-            "blockage_s_along: spread along route",
-            "lane_constraints: left_lane_of vs right_lane_of for adjacent traffic",
-        ],
-    ),
-    
-    "Construction Zone": CategoryDefinition(
-        name="Construction Zone",
-        notes="Works with static_prop actors (cones) creating taper",
-        required_topology=TopologyType.CORRIDOR,
-        needs_multi_lane=True,
-        uses_non_ego_actors=True,
-        conflict_via=[
-            "static_prop actors in diagonal pattern",
-            "Lane merge constraints between ego vehicles",
-        ],
-        difficulty_knobs=[
-            "Cone count and pattern",
-            "Vehicles per lane",
-        ],
-        variation_axes=[
-            "ego_count: 2-6 vehicles",
-            "cone_count: 3 vs 6 vs 10 static_props",
-            "cone_pattern: along_lane vs diagonal",
-            "cone_lateral: series from center to right_edge",
-            "lane_constraints: merges_into_lane_of for forced merge",
-            "work_vehicle: none vs parked_vehicle",
-        ],
-    ),
-    
-    "Multi-Conflict Scenarios": CategoryDefinition(
-        name="Multi-Conflict Scenarios",
-        notes="HIGHLY MULTI-AGENT: Combines multiple conflict types - the most challenging scenarios",
-        required_topology=TopologyType.INTERSECTION,
-        needs_oncoming=True,
-        uses_non_ego_actors=True,
-        conflict_via=[
-            "Left turn + oncoming queue + crosswalk pedestrian simultaneously",
-            "Occlusion blocks visibility of crossing traffic",
-            "Multiple vehicles from perpendicular approaches + conflicting turns",
-            "Pedestrian crossing adds third axis of conflict to vehicle negotiations",
-        ],
-        difficulty_knobs=[
-            "Number of conflict types combined",
-            "Depth of each conflict (queue lengths)",
-        ],
-        variation_axes=[
-            "ego_count: 4 vs 5 vs 6 vehicles from multiple approaches",
-            "conflict_layers: 2 conflict types vs 3 vs 4 overlapping conflicts",
-            "constraint_web: perpendicular + opposite_approach + same_exit all present",
-            "maneuver_chaos: left turners meeting right turners meeting straight-through",
-            "actor_complication: walker crossing + parked_vehicle occlusion together",
-            "pedestrian_timing: on_approach vs in_intersection creates different conflicts",
-        ],
-    ),
-    
-    "Major/Minor Unsignalized Entry": CategoryDefinition(
-        name="Major/Minor Unsignalized Entry",
-        notes="Works at T-junctions - classic yield scenario with queue. Parked vehicles can block view of oncoming traffic or limit merge space.",
-        required_topology=TopologyType.T_JUNCTION,
-        uses_non_ego_actors=True,
-        conflict_via=[
-            "Side street ego turning onto main road full of traffic",
-            "Main road follow_route_of chains creating gaps and queue",
-            "Parked vehicles limiting visibility of main road traffic",
-            "Pedestrians crossing exit path",
-        ],
-        difficulty_knobs=[
-            "Main road traffic count",
-            "Number of side street vehicles",
-            "Occlusion/pedestrian complexity",
-        ],
-        variation_axes=[
-            "ego_count: 3 vs 4 vs 5 vehicles",
-            "main_road_queue: single vs follow_route_of chain of 2-4",
-            "side_street_queue: single vs follow_route_of chain of 2",
-            "side_maneuver: left turn (harder gap) vs right turn",
-            "constraint: same_road_as vs perpendicular_right_of",
-            "parked_vehicle: none vs parked_vehicle at corner blocking sight",
-            "pedestrian: none vs walker crossing exit path",
-        ],
-    ),
-    
-    "Wide Turn Negotiation": CategoryDefinition(
-        name="Wide Turn Negotiation",
-        notes="Can specify turn maneuver for ego vehicles. Parked vehicles or pedestrians can complicate turn paths and sight lines.",
-        required_topology=TopologyType.INTERSECTION,
-        uses_non_ego_actors=True,
-        conflict_via=[
-            "Ego with turn maneuver",
-            "Adjacent lane ego constraints",
-            "Parked vehicles blocking turning paths",
-            "Pedestrians crossing turn destination",
-        ],
-        difficulty_knobs=[
-            "Adjacent traffic count",
-            "Occlusion/pedestrian complexity",
-        ],
-        variation_axes=[
-            "ego_count: 2-4 vehicles",
-            "turn_type: left vs right maneuver",
-            "lane_constraints: left_lane_of vs right_lane_of for adjacent",
-            "approach_constraints: same_approach_as vs perpendicular",
-            "parked_vehicle: none vs parked_vehicle at corner reducing sight lines",
-            "pedestrian: none vs walker crossing turn destination",
-        ],
-    ),
-    
-    "Multi Left Turn Conflict": CategoryDefinition(
-        name="Multi Left Turn Conflict",
-        notes="Multi Left Turn Conflict: 2+ vehicles making left turns from different approaches (main road and side road) with INTERSECTING turn paths. NOT opposing left turns.",
-        required_topology=TopologyType.INTERSECTION,
-        needs_oncoming=False,
-        uses_non_ego_actors=True,
-        conflict_via=[
-            "2+ ego vehicles EACH with left maneuver",
-            "perpendicular_left_of or perpendicular_right_of constraint (NOT opposite_approach_of)",
-            "Left turn paths MUST intersect (vehicles from main and side roads both turning left)",
-            "Conflict occurs when turning paths cross in the intersection",
-        ],
-        difficulty_knobs=[
-            "Number of left-turning vehicles",
-            "Queue depth behind each turner",
-            "Actor complexity",
-        ],
-        variation_axes=[
-            "ego_count: 2-6 vehicles (at least 2 must have left maneuver)",
-            "left_turner_count: 2 vs 3 vehicles with left maneuver from different approaches",
-            "approach_relation: perpendicular_left_of vs perpendicular_right_of (NOT opposite)",
-            "queue_pattern: single turners vs follow_route_of chains behind each turner",
-            "additional_traffic: none vs straight-through vehicles on other approaches",
-            "actor: none vs walker crossing turn destination",
-            "walker_timing: on_approach vs in_intersection vs after_turn",
-        ],
-    ),
-    
-    "Multi-Way Standoff": CategoryDefinition(
-        name="Multi-Way Standoff",
-        notes="HIGHLY MULTI-AGENT: 4+ vehicles arriving at intersection simultaneously with no clear priority",
-        required_topology=TopologyType.INTERSECTION,
-        uses_non_ego_actors=True,
-        conflict_via=[
-            "4-6 vehicles approaching from all directions simultaneously",
-            "perpendicular_right_of/left_of creating circular priority ambiguity",
-            "Multiple maneuvers that would cross each other's paths",
-        ],
-        difficulty_knobs=[
-            "Number of vehicles (4-6)",
-            "Maneuver conflicts (crossing paths)",
-        ],
-        variation_axes=[
-            "ego_count: 4 vs 5 vs 6 vehicles",
-            "approach_coverage: vehicles from 3 directions vs all 4 directions",
-            "maneuver_conflict: all straight (crossing) vs mix of turns (complex crossing)",
-            "constraint_pattern: chain of perpendicular_right_of vs mixed constraints",
-            "complication: none vs walker in center vs parked_vehicle occlusion",
-        ],
-    ),
-    
-    "Platoon Merge Conflict": CategoryDefinition(
-        name="Platoon Merge Conflict",
-        notes="HIGHLY MULTI-AGENT: Two chains of following vehicles must merge into single lane",
-        required_topology=TopologyType.CORRIDOR,
-        needs_multi_lane=True,
-        needs_merge=True,
-        uses_non_ego_actors=False,
-        conflict_via=[
-            "Two follow_route_of chains in adjacent lanes",
-            "merges_into_lane_of from both chains competing",
-            "Lane drop forces interleaving of platoons",
-        ],
-        difficulty_knobs=[
-            "Platoon length per lane",
-            "Number of vehicles trying to merge",
-        ],
-        variation_axes=[
-            "ego_count: 4 vs 5 vs 6 vs 7 vehicles total",
-            "platoon_size: 2+2 vs 3+2 vs 3+3 split between lanes",
-            "merge_pattern: leader merges vs follower merges vs both try",
-            "lane_relationship: left_lane_of chain vs right_lane_of chain",
-        ],
-    ),
-    
-    "Narrow Passage Negotiation": CategoryDefinition(
-        name="Narrow Passage Negotiation",
-        notes="HIGHLY MULTI-AGENT: Opposing traffic queues must negotiate through single-lane bottleneck",
-        required_topology=TopologyType.CORRIDOR,
-        needs_oncoming=True,
-        uses_non_ego_actors=True,
-        conflict_via=[
-            "parked_vehicle creating single-lane constriction",
-            "opposite_approach_of queues on each side",
-            "follow_route_of chains creating depth",
-        ],
-        difficulty_knobs=[
-            "Queue depth on each side",
-            "Number of constrictions",
-        ],
-        variation_axes=[
-            "ego_count: 4 vs 5 vs 6 vehicles",
-            "queue_asymmetry: 2v2 vs 3v2 vs 3v3",
-            "constriction: single parked_vehicle vs double parked_vehicles",
-            "parked_position: same side vs alternating sides",
-            "pedestrian: none vs walker crossing at constriction",
+            "follow_depth: single follow_route_of vs chain",
+            "lane_occupancy: left_lane_of single vs multiple",
+            "maneuver: lane_change included or not",
+            "oncoming: none vs opposite_approach_of vehicle",
+            "obstacle: none vs parked_vehicle blocking pass lane",
+            "pedestrian: none vs walker crossing",
         ],
     ),
     
