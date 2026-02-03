@@ -31,6 +31,7 @@ def pick_paths_with_model(
     require_straight: bool = False,
     require_on_ramp: bool = False,
     schema_constraints: Optional[Dict[str, Any]] = None,
+    required_relations: Optional[List[Dict[str, Any]]] = None,
 ):
     """
     Run the path picker using a provided model/tokenizer if given.
@@ -119,10 +120,13 @@ def pick_paths_with_model(
                 lane_counts_by_road=agg.get("lane_counts_by_road") if isinstance(agg, dict) else None,
                 skip_evidence_filter=True,
                 crop_region=agg.get("crop_region") if isinstance(agg, dict) else None,
+                required_relations=required_relations,
             )
             parsed = {"vehicles": csp_items}
             print(f"[TIMING] path_picker schema CSP solve: {time_module.time() - t0_csp_stage:.2f}s", flush=True)
         except Exception as e:
+            if required_relations:
+                raise
             print(f"[WARNING] Schema constraints CSP solve failed; falling back to LLM. Reason: {e}")
 
     if parsed is None and description:
@@ -156,6 +160,7 @@ def pick_paths_with_model(
                     require_on_ramp=require_on_ramp,
                     lane_counts_by_road=agg.get("lane_counts_by_road") if isinstance(agg, dict) else None,
                     crop_region=agg.get("crop_region") if isinstance(agg, dict) else None,
+                    required_relations=required_relations,
                 )
                 print(f"[TIMING] path_picker CSP solve: {time_module.time() - t0_csp_solve:.2f}s", flush=True)
                 parsed = {"vehicles": csp_items}

@@ -687,6 +687,7 @@ def _compute_near_miss(
 
 def _run_baseline_constant_velocity(
     carla_module,
+    client,
     world,
     routes_dir: Path,
     args: argparse.Namespace,
@@ -898,30 +899,44 @@ def _run_baseline_constant_velocity(
         use_autopilot = getattr(args, "baseline_use_autopilot", True)
         if use_autopilot:
             try:
-                tm_port = getattr(args, "traffic_manager_port", 8000)
-                traffic_manager = world.client.get_trafficmanager(tm_port)
+                tm_port = getattr(args, "traffic_manager_port", None)
+                tm_port = int(tm_port) if tm_port is not None else 8000
+                traffic_manager = client.get_trafficmanager(tm_port)
                 traffic_manager.set_synchronous_mode(True)
                 traffic_manager.set_random_device_seed(0)
                 log_fn(f"[BASELINE] using CARLA traffic manager autopilot on port {tm_port}")
+
+                def tm_call(name, *call_args):
+                    fn = getattr(traffic_manager, name, None)
+                    if not fn:
+                        return
+                    try:
+                        fn(*call_args)
+                    except TypeError:
+                        # API signature mismatch (e.g., version differences) – skip quietly
+                        return
                 
                 for ego_idx, ego in enumerate(ego_actors):
                     # Enable autopilot for this vehicle
                     ego.set_autopilot(True, tm_port)
                     # Configure traffic manager for "ghost mode" - ignore everything, follow route exactly
-                    traffic_manager.ignore_lights_percentage(ego, 100.0)  # Ignore all traffic lights
-                    traffic_manager.ignore_walkers_percentage(ego, 100.0)  # Ignore all pedestrians
-                    traffic_manager.ignore_vehicles_percentage(ego, 100.0)  # Ignore all vehicles
-                    traffic_manager.ignore_signs_percentage(ego, 100.0)  # Ignore all traffic signs
-                    traffic_manager.distance_to_leading_vehicle(ego, 0.0)  # No following distance
-                    traffic_manager.collision_detection(ego, other_actor=None, detect_collision=False)  # Disable collision avoidance
+                    tm_call("ignore_lights_percentage", ego, 100.0)
+                    tm_call("ignore_walkers_percentage", ego, 100.0)
+                    tm_call("ignore_vehicles_percentage", ego, 100.0)
+                    tm_call("ignore_signs_percentage", ego, 100.0)
+                    tm_call("distance_to_leading_vehicle", ego, 0.0)
+                    # Disable collision avoidance: 0.9.12 expects (actor, other_actor, bool); we skip to avoid signature issues.
+                    # tm_call("collision_detection", ego, ego, False)
                     # Set constant speed (convert from m/s to % over speed limit)
                     target_speed_ms = args.baseline_target_speed  # e.g., 8.0 m/s
-                    # Negative percentage means go slower than speed limit
-                    # We want constant speed, so set based on target
-                    speed_diff = -20.0  # This will be overridden by auto_lane_change=False behavior
-                    traffic_manager.vehicle_percentage_speed_difference(ego, speed_diff)
-                    traffic_manager.auto_lane_change(ego, False)  # Never change lanes
-                    traffic_manager.keep_right_rule_percentage(ego, 100.0)  # Don't follow lane rules
+                    speed_diff = -20.0  # Negative = slower than speed limit (placeholder, overridden by lane_change settings)
+                    tm_call("vehicle_percentage_speed_difference", ego, speed_diff)
+                    tm_call("auto_lane_change", ego, False)
+                    # In 0.9.12+ the API is set_percentage_keep_right_rule
+                    if hasattr(traffic_manager, "set_percentage_keep_right_rule"):
+                        tm_call("set_percentage_keep_right_rule", ego, 100.0)
+                    else:
+                        tm_call("keep_right_rule_percentage", ego, 100.0)
                     log_fn(f"[BASELINE] enabled ghost-mode autopilot for ego {ego_idx}")
             except Exception as exc:
                 log_fn(f"[BASELINE] failed to setup traffic manager autopilot: {exc}")
@@ -1190,6 +1205,7 @@ def _run_baseline_validation(args: argparse.Namespace, routes_dir: Path, log_fn)
 
         result = _run_baseline_constant_velocity(
             carla_module=carla_module,
+            client=client,
             world=world,
             routes_dir=routes_dir,
             args=args,

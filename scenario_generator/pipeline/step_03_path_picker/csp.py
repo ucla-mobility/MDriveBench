@@ -176,6 +176,7 @@ def _solve_paths_csp(
     lane_counts_by_road: Optional[Dict[int, int]] = None,
     skip_evidence_filter: bool = False,
     crop_region: Optional[Dict[str, Any]] = None,
+    required_relations: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Soft CSP/backtracking over candidate paths.
@@ -195,9 +196,55 @@ def _solve_paths_csp(
         # the crop aren’t dropped; corridor/on-ramp stays strict.
         margin = 10.0 if (not require_straight and not require_on_ramp) else 0.0
         original_count = len(candidates)
-        candidates = [c for c in candidates if _candidate_entry_in_crop(c, crop_region, margin=margin)]
+        inside = [c for c in candidates if _candidate_entry_in_crop(c, crop_region, margin=margin)]
+        inside_road_ids = {_candidate_entry_road_id(c) for c in inside}
+        inside_cardinals = {_candidate_entry_cardinal(c) for c in inside}
+
+        def _clamp_point_to_box(pt: Optional[tuple], box: Dict[str, Any], m: float) -> Optional[tuple]:
+            if pt is None or not box:
+                return pt
+            try:
+                x, y = pt
+                xmin = float(box["xmin"]) - m
+                xmax = float(box["xmax"]) + m
+                ymin = float(box["ymin"]) - m
+                ymax = float(box["ymax"]) + m
+                cx = min(max(x, xmin), xmax)
+                cy = min(max(y, ymin), ymax)
+                return (cx, cy)
+            except Exception:
+                return pt
+
+        # Allow candidates whose entry road_id matches any kept road_id OR whose entry cardinal
+        # is an opposite direction of a kept cardinal; clamp entry point to box+margin.
+        extras = []
+        for c in candidates:
+            if c in inside:
+                continue
+            rid = _candidate_entry_road_id(c)
+            ent_card = _candidate_entry_cardinal(c)
+            is_same_road = rid is not None and rid in inside_road_ids
+            opp_map = {"N": "S", "S": "N", "E": "W", "W": "E"}
+            is_opposite_card = ent_card and opp_map.get(ent_card) in inside_cardinals
+            if not (is_same_road or is_opposite_card):
+                continue
+            sig = c.get("signature", {})
+            ent = sig.get("entry", {})
+            pt = ent.get("point")
+            clamped = _clamp_point_to_box(
+                (pt.get("x"), pt.get("y")) if isinstance(pt, dict) else None,
+                crop_region,
+                margin,
+            )
+            if clamped:
+                ent["point"] = {"x": clamped[0], "y": clamped[1]}
+                sig["entry"] = ent
+                c["signature"] = sig
+            extras.append(c)
+
+        candidates = inside + extras
         filtered_count = len(candidates)
-        print(f"[INFO] CSP: Crop region filter: {original_count} -> {filtered_count} candidates (margin={margin}, strict=True)")
+        print(f"[INFO] CSP: Crop region filter: {original_count} -> {filtered_count} candidates (margin={margin}, strict=True, kept_same_road_extras={len(extras)})")
         if not candidates:
             raise ValueError("No candidates have entry points inside the crop region.")
     
@@ -830,10 +877,105 @@ def _solve_paths_csp(
     best_assignment: Optional[Dict[str, Dict[str, Any]]] = None
     best_score = -1e18
 
+    # Required relations helpers (pair-agnostic, orientation-aware)
+    def _cardinal_relation(a: str, b: str) -> str:
+        if a == b and a != "unknown":
+            return "same"
+        opposite = {("N", "S"), ("S", "N"), ("E", "W"), ("W", "E")}
+        if (a, b) in opposite:
+            return "opposite"
+        perpendicular = {
+            ("N", "E"), ("N", "W"),
+            ("S", "E"), ("S", "W"),
+            ("E", "N"), ("W", "N"),
+            ("E", "S"), ("W", "S"),
+        }
+        if (a, b) in perpendicular:
+            return "perpendicular"
+        return "any"
+
+    def _lane_relation(lid_a: Optional[int], lid_b: Optional[int]) -> str:
+        if lid_a is None or lid_b is None:
+            return "any"
+        if lid_a == lid_b:
+            return "same_lane"
+        if abs(lid_a - lid_b) == 1:
+            return "adjacent_lane"
+        return "any"
+
+    def _relation_ok_oriented(rel: Dict[str, Any], cand_a: Dict[str, Any], cand_b: Dict[str, Any]) -> bool:
+        sig_a = cand_a.get("signature", {})
+        sig_b = cand_b.get("signature", {})
+        man_a = str(sig_a.get("entry_to_exit_turn", "unknown")).lower()
+        man_b = str(sig_b.get("entry_to_exit_turn", "unknown")).lower()
+        rm1 = str(rel.get("first_maneuver", "unknown")).lower()
+        rm2 = str(rel.get("second_maneuver", "unknown")).lower()
+        if rm1 != "unknown" and man_a != rm1:
+            return False
+        if rm2 != "unknown" and man_b != rm2:
+            return False
+
+        ent_a = _candidate_entry_cardinal(cand_a)
+        ent_b = _candidate_entry_cardinal(cand_b)
+        if ent_a and ent_b:
+            cr = _cardinal_relation(ent_a, ent_b)
+            erel = rel.get("entry_relation", "any")
+            if erel != "any" and cr != erel:
+                return False
+
+        ex_road_a = _candidate_exit_road_id(cand_a)
+        ex_road_b = _candidate_exit_road_id(cand_b)
+        ex_rel = rel.get("exit_relation", "any")
+        if ex_rel == "same_exit":
+            if ex_road_a is None or ex_road_b is None or ex_road_a != ex_road_b:
+                return False
+        elif ex_rel == "different_exit":
+            if ex_road_a is not None and ex_road_b is not None and ex_road_a == ex_road_b:
+                return False
+
+        ent_lane_a = _candidate_entry_lane_id(cand_a)
+        ent_lane_b = _candidate_entry_lane_id(cand_b)
+        elr = rel.get("entry_lane_relation", "any")
+        if elr != "any" and _lane_relation(ent_lane_a, ent_lane_b) != elr:
+            return False
+
+        exit_lane_a = _candidate_exit_lane_id(cand_a)
+        exit_lane_b = _candidate_exit_lane_id(cand_b)
+        xlr = rel.get("exit_lane_relation", "any")
+        if xlr == "merge_into":
+            if exit_lane_a is None or exit_lane_b is None or exit_lane_a != exit_lane_b:
+                return False
+        elif xlr != "any" and _lane_relation(exit_lane_a, exit_lane_b) != xlr:
+            return False
+
+        return True
+
+    def _assignment_satisfies_required_relations(asn: Dict[str, Dict[str, Any]]) -> bool:
+        if not required_relations:
+            return True
+        names = list(asn.keys())
+        n = len(names)
+        for rel in required_relations:
+            satisfied = False
+            for i in range(n):
+                for j in range(i + 1, n):
+                    a = asn[names[i]]
+                    b = asn[names[j]]
+                    if _relation_ok_oriented(rel, a, b) or _relation_ok_oriented(rel, b, a):
+                        satisfied = True
+                        break
+                if satisfied:
+                    break
+            if not satisfied:
+                return False
+        return True
+
     def backtrack(i: int, asn: Dict[str, Dict[str, Any]], cur_len: float, cur_pen: float, has_ramp: bool):
         nonlocal best_assignment, best_score
         if i >= len(order):
             if require_on_ramp and ramp_candidates and not has_ramp:
+                return
+            if not _assignment_satisfies_required_relations(asn):
                 return
             score = cur_len - penalty_weight * cur_pen
             if score > best_score:

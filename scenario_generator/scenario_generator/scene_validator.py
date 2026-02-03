@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
 from enum import Enum
 
-from .capabilities import CATEGORY_DEFINITIONS, TopologyType
+from .capabilities import CATEGORY_DEFINITIONS, TopologyType, RequiredRelation, EgoManeuver
 
 class ValidationIssue(Enum):
     """Types of validation issues that can occur."""
@@ -48,6 +48,7 @@ class ValidationIssue(Enum):
     MISSING_MULTI_LANE = "missing_multi_lane"
     MISSING_LANE_CHANGE = "missing_lane_change"
     MISSING_LANE_DROP = "missing_lane_drop"
+    MISSING_REQUIRED_RELATION = "missing_required_relation"
     
     # Actor issues
     MISSING_ACTOR = "missing_actor"
@@ -1493,6 +1494,111 @@ class SceneValidator:
             "lane_drop_like": lane_drop_like,
             "has_on_ramp_usage": has_on_ramp_usage,
         }
+
+    # ------------------------------------------------------------------ #
+    # Required relation checks (pair-agnostic)
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _cardinal_relation(entry_a: str, entry_b: str) -> str:
+        a = (entry_a or "unknown").lower()
+        b = (entry_b or "unknown").lower()
+        if a == b and a != "unknown":
+            return "same"
+        opposite_pairs = {("north", "south"), ("south", "north"), ("east", "west"), ("west", "east")}
+        if (a, b) in opposite_pairs:
+            return "opposite"
+        perp_pairs = {
+            ("north", "east"), ("north", "west"),
+            ("south", "east"), ("south", "west"),
+            ("east", "north"), ("west", "north"),
+            ("east", "south"), ("west", "south"),
+        }
+        if (a, b) in perp_pairs:
+            return "perpendicular"
+        return "any"
+
+    @staticmethod
+    def _lane_relation(lane_a: Optional[int], lane_b: Optional[int]) -> str:
+        if lane_a is None or lane_b is None:
+            return "any"
+        if lane_a == lane_b:
+            return "same_lane"
+        if abs(lane_a - lane_b) == 1:
+            return "adjacent_lane"
+        return "any"
+
+    def _relation_satisfied_oriented(self, rel: RequiredRelation, a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+        # Maneuvers
+        if rel.first_maneuver != EgoManeuver.UNKNOWN and str(a["maneuver"]).lower() != rel.first_maneuver.value:
+            return False
+        if rel.second_maneuver != EgoManeuver.UNKNOWN and str(b["maneuver"]).lower() != rel.second_maneuver.value:
+            return False
+
+        # Entry relation
+        entry_rel = self._cardinal_relation(a["entry_dir"], b["entry_dir"])
+        if rel.entry_relation != "any" and entry_rel != rel.entry_relation:
+            return False
+
+        # Exit relation
+        if rel.exit_relation == "same_exit":
+            if a["exit_road"] is None or b["exit_road"] is None or a["exit_road"] != b["exit_road"]:
+                return False
+        elif rel.exit_relation == "different_exit":
+            if a["exit_road"] is None or b["exit_road"] is None or a["exit_road"] == b["exit_road"]:
+                return False
+
+        # Entry lane relation
+        entry_lane_rel = self._lane_relation(a["entry_lane"], b["entry_lane"])
+        if rel.entry_lane_relation != "any" and entry_lane_rel != rel.entry_lane_relation:
+            return False
+
+        # Exit lane relation
+        exit_lane_rel = self._lane_relation(a["exit_lane"], b["exit_lane"])
+        if rel.exit_lane_relation == "merge_into":
+            if a["exit_lane"] is None or b["exit_lane"] is None or a["exit_lane"] != b["exit_lane"]:
+                return False
+        elif rel.exit_lane_relation != "any" and exit_lane_rel != rel.exit_lane_relation:
+            return False
+
+        return True
+
+    def _check_required_relations(self, scene_data: Dict[str, Any], relations: List[RequiredRelation]) -> Tuple[bool, List[str]]:
+        """Return (passed, missing_descriptions)."""
+        egos = []
+        for ego in scene_data.get("ego_picked", []):
+            sig = ego.get("signature", {})
+            egos.append({
+                "name": ego.get("vehicle", ""),
+                "maneuver": sig.get("entry_to_exit_turn", "unknown"),
+                "entry_dir": sig.get("entry", {}).get("cardinal4", "unknown"),
+                "exit_dir": sig.get("exit", {}).get("cardinal4", "unknown"),
+                "entry_road": sig.get("entry", {}).get("road_id"),
+                "exit_road": sig.get("exit", {}).get("road_id"),
+                "entry_lane": sig.get("entry", {}).get("lane_id"),
+                "exit_lane": sig.get("exit", {}).get("lane_id"),
+            })
+
+        if not relations or len(egos) < 2:
+            return True, []
+
+        missing: List[str] = []
+        for rel in relations:
+            satisfied = False
+            n = len(egos)
+            for i in range(n):
+                for j in range(i + 1, n):
+                    a, b = egos[i], egos[j]
+                    if self._relation_satisfied_oriented(rel, a, b) or self._relation_satisfied_oriented(rel, b, a):
+                        satisfied = True
+                        break
+                if satisfied:
+                    break
+            if not satisfied:
+                missing.append(
+                    f"entry={rel.entry_relation}, maneuvers=({rel.first_maneuver.value},{rel.second_maneuver.value}), "
+                    f"exit={rel.exit_relation}, entry_lane={rel.entry_lane_relation}, exit_lane={rel.exit_lane_relation}"
+                )
+        return len(missing) == 0, missing
 
     def _get_spec_value(self, spec: Any, key: str, default: Any = None) -> Any:
         if isinstance(spec, dict):

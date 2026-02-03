@@ -397,6 +397,18 @@ class PipelineRunner:
 
         schema_constraints = _constraints_from_schema(scenario_schema)
         schema_entities = _entities_from_schema(scenario_schema)
+        required_relations = []
+        if cat_info and getattr(cat_info.rules, "required_relations", None):
+            # Serialize RequiredRelation objects into plain dicts for path picker
+            for rel in cat_info.rules.required_relations:
+                required_relations.append({
+                    "entry_relation": rel.entry_relation,
+                    "first_maneuver": getattr(rel.first_maneuver, "value", rel.first_maneuver),
+                    "second_maneuver": getattr(rel.second_maneuver, "value", rel.second_maneuver),
+                    "exit_relation": rel.exit_relation,
+                    "entry_lane_relation": rel.entry_lane_relation,
+                    "exit_lane_relation": rel.exit_lane_relation,
+                })
 
         if geometry_spec is None:
             extractor = crop_picker.LLMGeometryExtractor(model_name="", device="cuda")
@@ -671,6 +683,7 @@ class PipelineRunner:
             require_straight=require_straight,
             require_on_ramp=require_on_ramp,
             schema_constraints=schema_constraints,
+            required_relations=required_relations,
         )
 
         # Skip refiner for roundabouts to avoid fabricated lane-change cuts; use picked paths directly.

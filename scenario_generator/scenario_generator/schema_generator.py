@@ -51,6 +51,20 @@ _MOTION_VALUES = [m.value for m in MotionType]
 _SPEED_VALUES = [s.value for s in SpeedHint]
 
 
+_NONE_SENTINELS = {"none", "false", "no", "null"}
+
+
+def _is_none_like(val: Any) -> bool:
+    """
+    Treat common 'none/false' strings (or None) as a signal to suppress a variation axis.
+    """
+    if val is None:
+        return True
+    if isinstance(val, str):
+        return val.strip().lower() in _NONE_SENTINELS
+    return False
+
+
 def select_variation_values(
     cat_info: Any,
     used_combinations: Optional[Set[str]] = None,
@@ -62,11 +76,15 @@ def select_variation_values(
 
     for _ in range(50):
         selections = {axis.name: random.choice(axis.options) for axis in axes if axis.options}
+        # Drop axes whose chosen value is a 'none' sentinel
+        selections = {k: v for k, v in selections.items() if not _is_none_like(v)}
         combo_key = "|".join(f"{k}={v}" for k, v in sorted(selections.items()))
         if combo_key not in used_combinations:
             return selections
 
-    return {axis.name: random.choice(axis.options) for axis in axes if axis.options}
+    # Fallback: return filtered selections even if already used
+    selections = {axis.name: random.choice(axis.options) for axis in axes if axis.options}
+    return {k: v for k, v in selections.items() if not _is_none_like(v)}
 
 
 def _enum_list(values: List[str]) -> str:
@@ -112,9 +130,16 @@ def build_schema_generation_prompt(
         required_flags.append("needs_merge=true")
     required_flags_str = ", ".join(required_flags) if required_flags else "none"
 
+    # Normalize forced variations and drop any 'none'-like selections
+    if forced_variations:
+        forced_variations = {k: v for k, v in forced_variations.items() if not _is_none_like(v)}
+
     variation_lines = []
     axes = getattr(cat_info, "vary", []) or []
     for axis in axes:
+        if forced_variations is not None and axis.name not in forced_variations:
+            # Axis was intentionally suppressed (e.g., selected 'none'); skip it.
+            continue
         opts = ", ".join(axis.options)
         why = f" (why: {axis.why})" if getattr(axis, "why", "") else ""
         variation_lines.append(f"- {axis.name}: options = {opts}{why}")

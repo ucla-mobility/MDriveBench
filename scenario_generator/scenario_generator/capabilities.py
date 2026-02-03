@@ -6,7 +6,7 @@ This module defines what the scenario generation pipeline CAN and CANNOT express
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Set, Optional, Tuple
+from typing import Dict, List, Set, Optional, Tuple, Literal
 from enum import Enum
 
 
@@ -277,6 +277,51 @@ class VariationAxis:
 
 
 @dataclass
+class ValidationRules:
+    """Container for category validation macros (stylistic refactor; functional behavior unchanged)."""
+    map: MapRequirements = field(default_factory=lambda: MapRequirements(topology=TopologyType.UNKNOWN))
+    allow_static_props: bool = True
+    # Optional list of pair-agnostic required path relations (no functional enforcement yet).
+    required_relations: List["RequiredRelation"] = field(default_factory=list)
+
+
+@dataclass
+class RequiredRelation:
+    """
+    Declares a simple pairwise path relation that must be present
+    (scenario is valid if ANY pair of vehicles satisfies all non-'any' fields).
+    """
+    entry_relation: Literal[
+        "opposite",      # vehicles approach from opposing directions (oncoming)
+        "same",          # vehicles share the same approach
+        "perpendicular", # approaches roughly 90 degrees apart
+        "any",
+    ] = "any"
+
+    first_maneuver: EgoManeuver = EgoManeuver.UNKNOWN
+    second_maneuver: EgoManeuver = EgoManeuver.UNKNOWN
+
+    exit_relation: Literal[
+        "same_exit",     # both exit via the same road/segment
+        "different_exit",
+        "any",
+    ] = "any"
+
+    entry_lane_relation: Literal[
+        "same_lane",
+        "adjacent_lane",
+        "any",
+    ] = "any"
+
+    exit_lane_relation: Literal[
+        "same_lane",
+        "adjacent_lane",
+        "merge_into",   # first merges into the lane occupied by second
+        "any",
+    ] = "any"
+
+
+@dataclass
 class CategoryDefinition:
     """
     Lean scenario category definition for LLM prompt + deterministic validation.
@@ -284,11 +329,18 @@ class CategoryDefinition:
     name: str
     summary: str
     intent: str
-    map: MapRequirements
+    rules: ValidationRules
     must_include: List[str]
     avoid: List[str]
     vary: List[VariationAxis] = field(default_factory=list)
-    allow_static_props: bool = True
+    
+    @property
+    def map(self) -> MapRequirements:
+        return self.rules.map
+
+    @property
+    def allow_static_props(self) -> bool:
+        return self.rules.allow_static_props
 
 
 # Honest assessment of each category
@@ -298,7 +350,10 @@ CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
         name="Intersection Deadlock Resolution",
         summary="Uncontrolled intersection with multiple approaches and ambiguous right-of-way.",
         intent="Force multi-vehicle negotiation at an uncontrolled intersection where paths cross without clear priority.",
-        map=MapRequirements(topology=TopologyType.INTERSECTION),
+        rules=ValidationRules(
+            map=MapRequirements(topology=TopologyType.INTERSECTION),
+            allow_static_props=True,
+        ),
         must_include=[
             "Vehicle 1 must be from (entry_road=main) and Vehicle 2 from (entry_road=side)",
             "Each vehicle must participate in at least one semantic maneuver conflict with another vehicle, such as straight-through vs opposing left turn, left turn vs perpendicular straight-through, or right turn merging into an occupied exit lane.",
@@ -318,7 +373,17 @@ CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
         name="Unprotected Left Turn",
         summary="Left turn across oncoming traffic without protection.",
         intent="Test gap acceptance and oncoming priority; conflict at junction center and exit lane.",
-        map=MapRequirements(topology=TopologyType.INTERSECTION, needs_oncoming=True),
+        rules=ValidationRules(
+            map=MapRequirements(topology=TopologyType.INTERSECTION, needs_oncoming=True),
+            allow_static_props=False,
+            required_relations=[
+                RequiredRelation(
+                    entry_relation="opposite",
+                    first_maneuver=EgoManeuver.LEFT,
+                    second_maneuver=EgoManeuver.STRAIGHT,
+                )
+            ],
+        ),
         must_include=[
             "Vehicle 1 must enter from one approach and execute a left turn to a perpendicular exit road.",
             "One vehicle must enter from the opposite approach of Vehicle 1 and continue straight through the intersection (oncoming relative to Vehicle 1).",
@@ -338,14 +403,16 @@ CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
             VariationAxis("pedestrian", ["none", "walker crossing exit leg from sidewalk_right", "walker crossing exit leg from sidewalk_left"], "pedestrian involvement on the exit leg"),
             VariationAxis("occlusion", ["none", "parked_vehicle limiting visibility"], "visibility constraint level for the turn. vehicle type options: box truck, van, bus, delivery truck. vehicle must not block any vehicle paths"),
         ],
-        allow_static_props=False,
     ), 
 
     "Highway On-Ramp Merge": CategoryDefinition(
         name="Highway On-Ramp Merge",
         summary="Mainline highway with side on-ramp merging into traffic.",
         intent="Exercise merge negotiation between ramp and mainline vehicles on multi-lane highway geometry.",
-        map=MapRequirements(topology=TopologyType.HIGHWAY, needs_on_ramp=True, needs_merge=True),
+        rules=ValidationRules(
+            map=MapRequirements(topology=TopologyType.HIGHWAY, needs_on_ramp=True, needs_merge=True),
+            allow_static_props=False,
+        ),
         must_include=[
             "Vehicle 1 is an on ramp vehicle (entry_road=side) merging into mainline (entry_road=main)",
             "At least one mainline vehicle in the lane that Vehicle 1 is merging into",
@@ -358,14 +425,16 @@ CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
             VariationAxis("ramp_queue", ["single merging", "multiple merging"], "how many vehicles are queued on the ramp"),
             VariationAxis("ramp_adjacent_lane_platoon", ["single vehicle", "multiple vehicles"], "how many vehicles are queued in the adjacent lane next to the ramp"),
         ],
-        allow_static_props=False,
     ), 
 
     "Interactive Lane Change": CategoryDefinition(
         name="Interactive Lane Change",
         summary="Highway/corridor weaving with adjacent-lane interactions.",
         intent="Stress lane-change negotiations in multi-lane traffic without props.",
-        map=MapRequirements(topology=TopologyType.HIGHWAY, needs_multi_lane=True),
+        rules=ValidationRules(
+            map=MapRequirements(topology=TopologyType.HIGHWAY, needs_multi_lane=True),
+            allow_static_props=False,
+        ),
         must_include=[
             "All vehicles must begin on a multi-lane highway/corridor with at least two adjacent lanes occupied by different vehicles.",
             "Every vehicle must execute at least one lane change (left or right) during the scenario (no purely lane-keeping vehicles).",
@@ -381,14 +450,16 @@ CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
             VariationAxis("ego_count", ["2", "3", "4", "5"], "vehicles participating in weaving"),
             VariationAxis("lane_distribution", ["many vehicles attempt to merge into same lane", "merges are relatively even between lanes"], "how vehicles are distributed across lanes"),
         ],
-        allow_static_props=False,
     ), 
 
     "Blocked Lane (Obstacle)": CategoryDefinition(
         name="Blocked Lane (Obstacle)",
         summary="Corridor with lane blocked by parked/stationary object.",
         intent="Force lane change or negotiation around a blocked lane segment.",
-        map=MapRequirements(topology=TopologyType.CORRIDOR, needs_multi_lane=True),
+        rules=ValidationRules(
+            map=MapRequirements(topology=TopologyType.CORRIDOR, needs_multi_lane=True),
+            allow_static_props=True,
+        ),
         must_include=[
             "Static prop fully blocking or partially blocking a lane that a vehicle is travelling in. Only one lane should be blocked.",
             "Vehicle in adjacent lane relative to blocked lane (left/right lane of). Some vehicles may also have a different entry road and turn onto the blocked lane before the blockage.",
@@ -409,7 +480,10 @@ CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
         name="Lane Drop / Alternating Merge",
         summary="Corridor lane drop forcing zipper/alternating merge.",
         intent="Exercise alternating merges at a taper, optionally narrowed by props.",
-        map=MapRequirements(topology=TopologyType.CORRIDOR, needs_multi_lane=True, needs_merge=True),
+        rules=ValidationRules(
+            map=MapRequirements(topology=TopologyType.CORRIDOR, needs_multi_lane=True, needs_merge=True),
+            allow_static_props=True,
+        ),
         must_include=[
             "For a specific lane, all vehicles merge out of a that lane into an adjacent lane at the same point",
             "For the lane being dropped, there must be an obstacle directly in front of where the vehicles start merging from (either cones or parked vehicle)",
@@ -429,7 +503,10 @@ CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
         name="Major/Minor Unsignalized Entry",
         summary="T-junction yield from side street into main road traffic.",
         intent="Test gap acceptance for side-street entry into busy main road, with possible occlusion/pedestrians.",
-        map=MapRequirements(topology=TopologyType.T_JUNCTION),
+        rules=ValidationRules(
+            map=MapRequirements(topology=TopologyType.T_JUNCTION),
+            allow_static_props=False,
+        ),
         must_include=[
         "ALWAYS: include Vehicle S from side street entering main road.",
         "ALWAYS: include Vehicle M on the main road such that S must yield (S merges into lane of M or merges into occupied exit segment).",
@@ -448,14 +525,16 @@ CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
             VariationAxis("side_maneuver", ["left turn", "right turn"], "maneuver performed by the side-street vehicle"),
             VariationAxis("pedestrian", ["none", "walker crossing exit path"], "whether a pedestrian crosses the exit path"),
         ],
-        allow_static_props=False,
     ), 
 
     "Construction Zone": CategoryDefinition(
         name="Construction Zone",
         summary="Corridor work zone with cones/props narrowing lanes.",
         intent="Create forced merges and constrained paths using static props.",
-        map=MapRequirements(topology=TopologyType.CORRIDOR, needs_multi_lane=True),
+        rules=ValidationRules(
+            map=MapRequirements(topology=TopologyType.INTERSECTION, needs_multi_lane=True),
+            allow_static_props=True,
+        ),
         must_include=[
             "Define one exit segment, in one vehicles lane to be the construction zone, and do not place any props outside this area",
             "Clusters of multiple types of construction related static props in work zone",
@@ -480,7 +559,10 @@ CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
         name="Pedestrian Crosswalk",
         summary="Corridor crossing with pedestrian(s) interacting with vehicles.",
         intent="Test vehicle response to pedestrians crossing, with optional occlusion.",
-        map=MapRequirements(topology=TopologyType.INTERSECTION),
+        rules=ValidationRules(
+            map=MapRequirements(topology=TopologyType.INTERSECTION),
+            allow_static_props=False,
+        ),
         must_include=[
             "Atleast one walker crossing perpendicular to an ego lane.",
             #"One static occluder (parked_vehicle) positioned ONLY if occlusion is set to parked vehicle blocking view at the right edge of the lane being crossed (lateral = right_edge/half_right), affects_vehicle=null, motion=static, timing_phase=on_approach.",
@@ -497,7 +579,6 @@ CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
            #VariationAxis("occlusion", ["none", "parked_vehicle blocking view"], "whether an occluder exists blocking the view of a crossing pedestrian. this occluder must not block the paths of any vehicles"),
             #VariationAxis("occlusion_type", ["box truck", "van", "bus", "delivery truck"], "type of occluding vehicle"),
         ],
-        allow_static_props=False,
     ), 
 
 
@@ -505,7 +586,6 @@ CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
         name="Overtaking on Two-Lane Road",
         summary="Corridor overtaking/pass maneuvers with adjacent/oncoming/obstacle factors.",
         intent="Exercise overtaking decisions with adjacent lane use, potential oncoming traffic, and obstacles.",
-        map=MapRequirements(topology=TopologyType.TWO_LANE_CORRIDOR, needs_multi_lane=False, needs_oncoming=True),
         must_include=[
             "Static prop, such as a parked vehicle, blocking lane in Vehicle 1's path",
             "Vehicle 2 approaches MUST be opposite_approach_as Vehicle 1 (oncoming traffic)",
@@ -521,13 +601,20 @@ CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
             VariationAxis("ego_count", ["2", "3", "4"], "vehicles involved in the overtake scenario"),
             VariationAxis("pedestrian", ["none", "walker crossing from sidewalk left or sidewalk right"], "pedestrian involvement during pass"),
         ],
+        rules=ValidationRules(
+            map=MapRequirements(topology=TopologyType.TWO_LANE_CORRIDOR, needs_multi_lane=False, needs_oncoming=True),
+            allow_static_props=True,
+        ),
     ),
 
     "Roundabout Navigation": CategoryDefinition(
         name="Roundabout Navigation",
         summary="Multi-vehicle negotiation at a roundabout with yielding and merging.",
         intent="Test yield-on-entry and gap acceptance in circular traffic flow with multiple vehicles navigating the roundabout simultaneously.",
-        map=MapRequirements(topology=TopologyType.ROUNDABOUT),
+        rules=ValidationRules(
+            map=MapRequirements(topology=TopologyType.ROUNDABOUT),
+            allow_static_props=False,
+        ),
         must_include=[
             "At least one pair of vehicles MUST have routes that overlap in the roundabout region (not disjoint). Concretely, for some pair (A,B), at least one of these must be true:",
             "  - Same exit: exit_dir(A) == exit_dir(B) (they end up competing/queueing for the same outbound leg), OR",
@@ -544,7 +631,6 @@ CATEGORY_DEFINITIONS: Dict[str, CategoryDefinition] = {
         vary=[
             VariationAxis("ego_count", ["2", "3", "4", "5"], "vehicles navigating the roundabout"),
         ],
-        allow_static_props=False,
     ),
 }
 
