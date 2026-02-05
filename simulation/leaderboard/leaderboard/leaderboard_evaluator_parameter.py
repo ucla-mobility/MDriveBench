@@ -309,7 +309,8 @@ class LeaderboardEvaluator(object):
         # CARLA 9.12 compatibility: map name might include full path like "/Game/Carla/Maps/Town05"
         current_map_name = CarlaDataProvider.get_map().name
         if town not in current_map_name:
-            print(f"[DEBUG] Current map: {current_map_name}, Required: {town}")
+            if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
+                print(f"[DEBUG FINISH] Current map: {current_map_name}, Required: {town}")
             raise Exception("The CARLA server uses the wrong map!"
                             "This scenario requires to use map {}".format(town))
 
@@ -327,7 +328,10 @@ class LeaderboardEvaluator(object):
                 config,
                 self.manager.scenario_duration_system,
                 self.manager.scenario_duration_game,
-                crash_message
+                crash_message,
+                pdm_trace=self.manager.pdm_traces[i] if hasattr(self.manager, "pdm_traces") else None,
+                pdm_world_trace=getattr(self.manager, "pdm_world_trace", None),
+                pdm_tl_polygons=getattr(self.manager, "pdm_tl_polygons", None),
             )
 
             print("\033[1m> Registering the route statistics\033[0m")
@@ -558,6 +562,12 @@ class LeaderboardEvaluator(object):
         # This handles nested scenario directories (e.g., routes/Scenario_Name/vehicle_*.xml)
         import glob
         xml_files = glob.glob(os.path.join(args.routes_dir, '**', '*.xml'), recursive=True)
+
+        # Ignore custom actor XMLs (they live under actors/); only keep ego route files
+        xml_files = [
+            x for x in xml_files
+            if "actors" not in os.path.normpath(x).split(os.sep)
+        ]
         
         for xml_path in xml_files:
             # Extract the ego_id from the filename (last part before .xml)

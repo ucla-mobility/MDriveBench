@@ -1,0 +1,398 @@
+{
+  "ego": [
+    {
+      "file": "ucla_v2_custom_ego_vehicle_0.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_ego_vehicle_0",
+      "kind": "ego",
+      "model": "vehicle.lincoln.mkz2017"
+    }
+  ],
+  "npc": [
+    {
+      "file": "actors/npc/ucla_v2_custom_Car_17_npc.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Car_17_npc",
+      "kind": "npc",
+      "model": "vehicle.tesla.model3",
+      "speed": 7.3953368260303955,
+      "length": "4.556331899928291",
+      "width": "2.050758865278066"
+    },
+    {
+      "file": "actors/npc/ucla_v2_custom_Car_31_npc.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Car_31_npc",
+      "kind": "npc",
+      "model": "vehicle.tesla.model3",
+      "speed": 5.272330434428971,
+      "length": "4.587314243637829",
+      "width": "1.875653271810568"
+    },
+    {
+      "file": "actors/npc/ucla_v2_custom_Car_33_npc.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Car_33_npc",
+      "kind": "npc",
+      "model": "vehicle.tesla.model3",
+      "speed": 8.451023529298924,
+      "length": "4.559136871088327",
+      "width": "2.220651765573345"
+    },
+    {
+      "file": "actors/npc/ucla_v2_custom_Car_35_npc.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Car_35_npc",
+      "kind": "npc",
+      "model": "vehicle.tesla.model3",
+      "speed": 11.590025794156382,
+      "length": "4.433047047308636",
+      "width": "1.8911411078169853"
+    },
+    {
+      "file": "actors/npc/ucla_v2_custom_Vehicle_107_npc.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Vehicle_107_npc",
+      "kind": "npc",
+      "model": "vehicle.tesla.model3",
+      "speed": 1.0101304918031275
+    },
+    {
+      "file": "actors/npc/ucla_v2_custom_Vehicle_48_npc.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Vehicle_48_npc",
+      "kind": "npc",
+      "model": "vehicle.tesla.model3",
+      "speed": 1.034433800225882
+    },
+    {
+      "file": "actors/npc/ucla_v2_custom_Vehicle_103_npc.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Vehicle_103_npc",
+      "kind": "npc",
+      "model": "vehicle.tesla.model3",
+      "speed": 1.7491121005415808
+    },
+    {
+      "file": "actors/npc/ucla_v2_custom_Vehicle_110_npc.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Vehicle_110_npc",
+      "kind": "npc",
+      "model": "vehicle.tesla.model3",
+      "speed": 2.4526975040791754
+    },
+    {
+      "file": "actors/npc/ucla_v2_custom_Vehicle_112_npc.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Vehicle_112_npc",
+      "kind": "npc",
+      "model": "vehicle.tesla.model3",
+      "speed": 4.900905557395628
+    },
+    {
+      "file": "actors/npc/ucla_v2_custom_Vehicle_16_npc.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Vehicle_16_npc",
+      "kind": "npc",
+      "model": "vehicle.tesla.model3",
+      "speed": 5.930627402641173
+    }
+  ],
+  "static": [
+    {
+      "file": "actors/static/ucla_v2_custom_Car_1_static.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Car_1_static",
+      "kind": "static",
+      "model": "vehicle.tesla.model3",
+      "length": "4.6586228795313405",
+      "width": "2.2251417253353165"
+    },
+    {
+      "file": "actors/static/ucla_v2_custom_Car_3_static.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Car_3_static",
+      "kind": "static",
+      "model": "vehicle.tesla.model3",
+      "length": "4.5359398572957605",
+      "width": "2.2119293340487043"
+    },
+    {
+      "file": "actors/static/ucla_v2_custom_Car_6_static.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Car_6_static",
+      "kind": "static",
+      "model": "vehicle.tesla.model3",
+      "speed": 1.1842378929335002e-14,
+      "length": "5.785469700441071",
+      "width": "2.7661410654816505"
+    },
+    {
+      "file": "actors/static/ucla_v2_custom_Car_8_static.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Car_8_static",
+      "kind": "static",
+      "model": "vehicle.tesla.model3",
+      "speed": 5.921189464667501e-15,
+      "length": "4.492870522404665",
+      "width": "2.201901673023708"
+    },
+    {
+      "file": "actors/static/ucla_v2_custom_Car_10_static.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Car_10_static",
+      "kind": "static",
+      "model": "vehicle.tesla.model3",
+      "length": "4.731751171715048",
+      "width": "2.2684626728289072"
+    },
+    {
+      "file": "actors/static/ucla_v2_custom_Car_14_static.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Car_14_static",
+      "kind": "static",
+      "model": "vehicle.tesla.model3",
+      "length": "5.964612899810902",
+      "width": "2.6659705247783467"
+    },
+    {
+      "file": "actors/static/ucla_v2_custom_Bicyclerider_43_static.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Bicyclerider_43_static",
+      "kind": "static",
+      "model": "vehicle.diamondback.century",
+      "length": "2.0367675530008014",
+      "width": "0.9891184397870215"
+    },
+    {
+      "file": "actors/static/ucla_v2_custom_Vehicle_66_static.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Vehicle_66_static",
+      "kind": "static",
+      "model": "vehicle.tesla.model3"
+    },
+    {
+      "file": "actors/static/ucla_v2_custom_Vehicle_95_static.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Vehicle_95_static",
+      "kind": "static",
+      "model": "vehicle.tesla.model3",
+      "speed": 0.20099945231416108
+    },
+    {
+      "file": "actors/static/ucla_v2_custom_Vehicle_18_static.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Vehicle_18_static",
+      "kind": "static",
+      "model": "vehicle.tesla.model3"
+    },
+    {
+      "file": "actors/static/ucla_v2_custom_Vehicle_79_static.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Vehicle_79_static",
+      "kind": "static",
+      "model": "vehicle.tesla.model3",
+      "speed": 1.4093153013049566
+    }
+  ],
+  "walker": [
+    {
+      "file": "actors/walker/ucla_v2_custom_Pedestrian_45_walker.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Pedestrian_45_walker",
+      "kind": "walker",
+      "model": "walker.pedestrian.0001",
+      "speed": 1.8280446850311594,
+      "length": "0.6842517026234187",
+      "width": "0.6431607535419778"
+    },
+    {
+      "file": "actors/walker/ucla_v2_custom_Pedestrian_51_walker.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Pedestrian_51_walker",
+      "kind": "walker",
+      "model": "walker.pedestrian.0001",
+      "speed": 0.5866532693694206,
+      "length": "0.6179643484222843",
+      "width": "0.9211561151451433"
+    },
+    {
+      "file": "actors/walker/ucla_v2_custom_Pedestrian_56_walker.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Pedestrian_56_walker",
+      "kind": "walker",
+      "model": "walker.pedestrian.0001",
+      "speed": 1.2769549108264349,
+      "length": "0.9223634472350342",
+      "width": "0.7900030268826141"
+    },
+    {
+      "file": "actors/walker/ucla_v2_custom_Pedestrian_58_walker.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Pedestrian_58_walker",
+      "kind": "walker",
+      "model": "walker.pedestrian.0001",
+      "speed": 0.9836018574167971,
+      "length": "0.8085260886699666",
+      "width": "0.5969801808988224"
+    },
+    {
+      "file": "actors/walker/ucla_v2_custom_Pedestrian_61_walker.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Pedestrian_61_walker",
+      "kind": "walker",
+      "model": "walker.pedestrian.0001",
+      "speed": 1.4637758391758788,
+      "length": "0.8469984356464617",
+      "width": "0.8827927589704863"
+    },
+    {
+      "file": "actors/walker/ucla_v2_custom_Pedestrian_64_walker.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Pedestrian_64_walker",
+      "kind": "walker",
+      "model": "walker.pedestrian.0001",
+      "speed": 3.869050291396183,
+      "length": "0.8845034350009991",
+      "width": "0.8535513145871212"
+    },
+    {
+      "file": "actors/walker/ucla_v2_custom_Pedestrian_67_walker.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Pedestrian_67_walker",
+      "kind": "walker",
+      "model": "walker.pedestrian.0001",
+      "speed": 1.1464899345103212,
+      "length": "0.7245594606116059",
+      "width": "0.64269783030181"
+    },
+    {
+      "file": "actors/walker/ucla_v2_custom_Pedestrian_69_walker.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Pedestrian_69_walker",
+      "kind": "walker",
+      "model": "walker.pedestrian.0001",
+      "speed": 1.5892707487792852,
+      "length": "0.7346566284516701",
+      "width": "0.6598107636728007"
+    },
+    {
+      "file": "actors/walker/ucla_v2_custom_Pedestrian_72_walker.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Pedestrian_72_walker",
+      "kind": "walker",
+      "model": "walker.pedestrian.0001",
+      "speed": 1.6123401527026608,
+      "length": "0.7779462529349496",
+      "width": "0.5576454069288006"
+    },
+    {
+      "file": "actors/walker/ucla_v2_custom_Pedestrian_82_walker.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Pedestrian_82_walker",
+      "kind": "walker",
+      "model": "walker.pedestrian.0001",
+      "speed": 2.2123448451376087,
+      "length": "0.5753927079444039",
+      "width": "0.7427082259502499"
+    },
+    {
+      "file": "actors/walker/ucla_v2_custom_Pedestrian_84_walker.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Pedestrian_84_walker",
+      "kind": "walker",
+      "model": "walker.pedestrian.0001",
+      "speed": 1.4947449902257084,
+      "length": "0.5934216155041014",
+      "width": "0.6479988234490004"
+    },
+    {
+      "file": "actors/walker/ucla_v2_custom_Pedestrian_86_walker.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Pedestrian_86_walker",
+      "kind": "walker",
+      "model": "walker.pedestrian.0001",
+      "speed": 1.0685489737414602,
+      "length": "0.6997414346464998",
+      "width": "0.6550965026607363"
+    },
+    {
+      "file": "actors/walker/ucla_v2_custom_Pedestrian_97_walker.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Pedestrian_97_walker",
+      "kind": "walker",
+      "model": "walker.pedestrian.0001",
+      "speed": 3.8135510534441024,
+      "length": "0.7962007045241304",
+      "width": "0.895949895849514"
+    },
+    {
+      "file": "actors/walker/ucla_v2_custom_Pedestrian_99_walker.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Pedestrian_99_walker",
+      "kind": "walker",
+      "model": "walker.pedestrian.0001",
+      "speed": 2.738338459563202,
+      "length": "0.7421277604688439",
+      "width": "0.8784612450937734"
+    },
+    {
+      "file": "actors/walker/ucla_v2_custom_Pedestrian_118_walker.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Pedestrian_118_walker",
+      "kind": "walker",
+      "model": "walker.pedestrian.0001",
+      "speed": 1.6098970009267233,
+      "length": "0.8782330466332773",
+      "width": "0.8940446469954186"
+    },
+    {
+      "file": "actors/walker/ucla_v2_custom_Pedestrian_125_walker.xml",
+      "route_id": "0",
+      "town": "ucla_v2",
+      "name": "ucla_v2_custom_Pedestrian_125_walker",
+      "kind": "walker",
+      "model": "walker.pedestrian.0001",
+      "speed": 1.531609729635876,
+      "length": "0.985942780109903",
+      "width": "0.5147750199898397"
+    }
+  ]
+}

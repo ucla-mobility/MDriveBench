@@ -1083,7 +1083,11 @@ class RouteScenario(BasicScenario):
                 ),
             )
 
-            should_snap_to_road = role not in ("static", "static_prop", "pedestrian", "walker", "bicycle", "cyclist")  # keep static props and pedestrians at their authored pose
+            snap_pref = actor_cfg.get("snap_to_road", True)
+            should_snap_to_road = (
+                snap_pref
+                and role not in ("static", "static_prop", "pedestrian", "walker", "bicycle", "cyclist")
+            )  # keep static props and pedestrians at their authored pose
             if world_map is not None and should_snap_to_road:
                 snapped_wp = world_map.get_waypoint(
                     spawn_tf.location,
@@ -1129,10 +1133,11 @@ class RouteScenario(BasicScenario):
 
             # For pedestrians and cyclists, use the authored plan directly without road snapping
             is_non_vehicle = role in ("pedestrian", "walker", "bicycle", "cyclist")
+            snap_plan = should_snap_to_road and not is_non_vehicle
 
             plan_locations = []
             for loc in actor_cfg["plan"]:
-                if is_non_vehicle:
+                if not snap_plan:
                     # Keep original waypoint for pedestrians/cyclists
                     plan_locations.append(carla.Location(x=loc.x, y=loc.y, z=loc.z))
                 else:
@@ -1148,7 +1153,7 @@ class RouteScenario(BasicScenario):
                     plan_locations.append(snapped_loc)
 
             dense_plan = []
-            if not is_non_vehicle and planner is not None and len(plan_locations) >= 2:
+            if snap_plan and planner is not None and len(plan_locations) >= 2:
                 route_plan = []
                 for idx in range(len(plan_locations) - 1):
                     start_loc = plan_locations[idx]
@@ -1168,7 +1173,7 @@ class RouteScenario(BasicScenario):
                             route_plan[0] = (spawn_wp, first_option)
                     dense_plan = route_plan
             if not dense_plan:
-                if plan_locations:
+                if plan_locations and snap_plan:
                     plan_locations[0] = carla.Location(
                         x=spawn_tf.location.x,
                         y=spawn_tf.location.y,
@@ -1251,15 +1256,18 @@ class RouteScenario(BasicScenario):
     def _build_custom_actor_behavior(self, actor_plan: dict):
         behavior_spec = actor_plan.get("behavior")
         if not isinstance(behavior_spec, dict):
-            print(f"[DEBUG] _build_custom_actor_behavior: No behavior_spec for {actor_plan.get('name')}")
+            if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
+                print(f"[DEBUG FINISH] _build_custom_actor_behavior: No behavior_spec for {actor_plan.get('name')}")
             return None
         trigger_spec = behavior_spec.get("trigger")
         action_spec = behavior_spec.get("action") or behavior_spec.get("behavior")
-        print(f"[DEBUG] _build_custom_actor_behavior: trigger_spec={trigger_spec}, action_spec={action_spec}")
+        if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
+            print(f"[DEBUG FINISH] _build_custom_actor_behavior: trigger_spec={trigger_spec}, action_spec={action_spec}")
 
         actor = actor_plan.get("actor")
         if actor is None:
-            print(f"[DEBUG] _build_custom_actor_behavior: No actor")
+            if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
+                print(f"[DEBUG FINISH] _build_custom_actor_behavior: No actor")
             return None
 
         trigger_cond = None
@@ -1267,7 +1275,8 @@ class RouteScenario(BasicScenario):
         trigger_distance = None
         if isinstance(trigger_spec, dict):
             trigger_cond = self._build_trigger_condition(trigger_spec, actor)
-            print(f"[DEBUG] _build_custom_actor_behavior: trigger_cond={trigger_cond}")
+            if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
+                print(f"[DEBUG FINISH] _build_custom_actor_behavior: trigger_cond={trigger_cond}")
             # Get ego actor and trigger distance for smart speed calculation
             if trigger_spec.get("type") == "distance_to_vehicle":
                 ego_actor = self._resolve_ego_vehicle(trigger_spec.get("vehicle"))
@@ -1553,13 +1562,15 @@ class RouteScenario(BasicScenario):
 
             if ego_vehicle_id == 0 and self._custom_actor_plans:
                 for actor_plan in self._custom_actor_plans:
-                    print(f"[DEBUG] Building behavior for actor: {actor_plan.get('name')}")
-                    print(f"[DEBUG]   behavior spec: {actor_plan.get('behavior')}")
-                    print(f"[DEBUG]   target_speed: {actor_plan.get('target_speed')}")
-                    print(f"[DEBUG]   plan length: {len(actor_plan.get('plan') or [])}")
+                    if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
+                        print(f"[DEBUG FINISH] Building behavior for actor: {actor_plan.get('name')}")
+                        print(f"[DEBUG FINISH]   behavior spec: {actor_plan.get('behavior')}")
+                        print(f"[DEBUG FINISH]   target_speed: {actor_plan.get('target_speed')}")
+                        print(f"[DEBUG FINISH]   plan length: {len(actor_plan.get('plan') or [])}")
                     custom_behavior = self._build_custom_actor_behavior(actor_plan)
                     if custom_behavior is None:
-                        print(f"[DEBUG]   -> Behavior is None, using default WaypointFollower")
+                        if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
+                            print(f"[DEBUG FINISH]   -> Behavior is None, using default WaypointFollower")
                         custom_behavior = WaypointFollower(
                             actor_plan["actor"],
                             target_speed=actor_plan["target_speed"],
@@ -1568,7 +1579,8 @@ class RouteScenario(BasicScenario):
                             name=f"FollowWaypoints-{actor_plan['name']}",
                         )
                     else:
-                        print(f"[DEBUG]   -> Built custom behavior: {type(custom_behavior).__name__}")
+                        if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
+                            print(f"[DEBUG FINISH]   -> Built custom behavior: {type(custom_behavior).__name__}")
                     subbehavior.add_child(custom_behavior)
 
             scenario_behaviors = []

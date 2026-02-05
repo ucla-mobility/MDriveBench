@@ -293,6 +293,10 @@ def _build_custom_actor_configs(route_id: str, town: str) -> List[Dict[str, obje
 
         plan_locations: List[carla.Location] = []
         spawn_transform = None
+        # Optional opt-out: route attribute snap_to_road="false" disables road snapping for this actor
+        snap_attr = str(route_node.attrib.get("snap_to_road", "true")).lower()
+        snap_to_road = snap_attr not in ("false", "0", "no", "off")
+
         for index, waypoint in enumerate(route_node.iter("waypoint")):
             try:
                 loc = carla.Location(
@@ -345,6 +349,7 @@ def _build_custom_actor_configs(route_id: str, town: str) -> List[Dict[str, obje
                 "plan": plan_locations,
                 "target_speed": target_speed,
                 "avoid_collision": entry.get("avoid_collision", False),
+                "snap_to_road": snap_to_road,
             }
         )
 

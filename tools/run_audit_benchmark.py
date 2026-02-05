@@ -645,13 +645,19 @@ def _compute_near_miss(
     ttc_thresh: float,
     ttc_severe: float,
     closing_min: float,
+    role_lookup: Optional[Dict[int, str]] = None,
+    debug_hits: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[bool, bool, float]:
     """
     Returns (hit_this_tick, severe_hit, min_ttc_local).
     hit_this_tick is True if any projected collision within ttc_thresh AND closing_speed>closing_min.
     severe_hit if any TTC <= ttc_severe with the same closing condition.
     """
-    ego_loc = ego_actor.get_location()
+    try:
+        ego_loc = ego_actor.get_location()
+    except Exception:
+        # Actor was destroyed or unavailable; skip collision checks this tick.
+        return False, False, float("inf")
     ego_vel = _actor_velocity(ego_actor)
     ego_r = _actor_radius(ego_actor)
 
@@ -660,9 +666,16 @@ def _compute_near_miss(
     severe = False
 
     for other in other_actors:
-        if other.id == ego_actor.id:
+        try:
+            other_id = other.id
+        except Exception:
             continue
-        other_loc = other.get_location()
+        if other_id == ego_actor.id:
+            continue
+        try:
+            other_loc = other.get_location()
+        except Exception:
+            continue
         other_vel = _actor_velocity(other)
         closing = _closing_speed(ego_loc, ego_vel, other_loc, other_vel)
         if closing <= closing_min:
@@ -677,6 +690,18 @@ def _compute_near_miss(
             dist = p_ego.distance(p_other)
             if dist <= r_sum:
                 min_ttc = min(min_ttc, t)
+                if debug_hits is not None:
+                    debug_hits.append({
+                        "ego_id": getattr(ego_actor, "id", None),
+                        "other_id": other_id,
+                        "other_role": role_lookup.get(other_id) if role_lookup else "",
+                        "t": t,
+                        "dist": dist,
+                        "r_sum": r_sum,
+                        "closing": closing,
+                        "hit": t <= ttc_thresh,
+                        "severe": t <= ttc_severe,
+                    })
                 if t <= ttc_thresh:
                     hit = True
                 if t <= ttc_severe:
@@ -706,6 +731,8 @@ def _run_baseline_constant_velocity(
     sensors: List[Any] = []
     expected_ids: List[int] = []
     ego_actors: List[Any] = []
+    role_lookup: Dict[int, str] = {}
+    event_log: List[Dict[str, Any]] = []
 
     def pick_blueprint(role: str, model: Optional[str] = None):
         """
@@ -831,6 +858,10 @@ def _run_baseline_constant_velocity(
                     return {"status": "reject", "reason": f"spawn_failed_{role_group}_{idx}"}
                 spawned.append(actor)
                 expected_ids.append(actor.id)
+                try:
+                    role_lookup[actor.id] = actor.attributes.get("role_name", role_name) if hasattr(actor, "attributes") else role_name
+                except Exception:
+                    role_lookup[actor.id] = role_name
                 if role_group == "ego":
                     ego_actors.append(actor)
 
@@ -881,6 +912,7 @@ def _run_baseline_constant_velocity(
             route_lengths[idx] = max(1.0, float(len(waypoints)))
             collisions[idx] = False
             consecutive_hits[idx] = 0
+        near_miss_log: List[Dict[str, Any]] = []
 
         # Attach collision sensors to egos
         for ego_idx, ego in enumerate(ego_actors):
@@ -891,6 +923,26 @@ def _run_baseline_constant_velocity(
             def _make_cb(ei):
                 def _on_col(event):
                     collisions[ei] = True
+                    try:
+                        other_id = event.other_actor.id if getattr(event, "other_actor", None) else None
+                        impulse = None
+                        if hasattr(event, "normal_impulse"):
+                            ni = event.normal_impulse
+                            try:
+                                impulse = math.sqrt(ni.x ** 2 + ni.y ** 2 + ni.z ** 2)
+                            except Exception:
+                                impulse = None
+                        event_log.append({
+                            "type": "collision",
+                            "ego_index": ei,
+                            "ego_id": ego_actors[ei].id if ei < len(ego_actors) else None,
+                            "other_id": other_id,
+                            "other_role": role_lookup.get(other_id, ""),
+                            "frame": getattr(event, "frame", None),
+                            "impulse": impulse,
+                        })
+                    except Exception:
+                        pass
                 return _on_col
 
             sensor.listen(_make_cb(ego_idx))
@@ -1018,15 +1070,25 @@ def _run_baseline_constant_velocity(
             # Only apply manual controls if not using autopilot
             if not use_autopilot:
                 for ego_idx, ego in enumerate(ego_actors):
+                    if hasattr(ego, "is_alive") and not ego.is_alive:
+                        continue
                     ctrl = compute_control(ego, ego_idx)
                     if ctrl:
                         ego.apply_control(ctrl)
 
-            world.tick()
+            try:
+                world.tick()
+            except RuntimeError as exc:
+                if "destroyed actor" in str(exc).lower():
+                    log_fn("[BASELINE] world.tick failed due to destroyed actor; aborting baseline early.")
+                    return {"status": "reject", "reason": "destroyed_actor_tick"}
+                raise
             
             # Save camera frames with event labels
             if baseline_image_dir and HAS_IMAGE_SUPPORT and (tick_idx % save_interval == 0 or tick_idx < 5):
                 for ego_idx, ego in enumerate(ego_actors):
+                    if hasattr(ego, "is_alive") and not ego.is_alive:
+                        continue
                     if ego_idx not in camera_data:
                         continue
                     img = camera_data[ego_idx]["latest_image"]
@@ -1074,14 +1136,25 @@ def _run_baseline_constant_velocity(
 
             # update progress + near miss
             for ego_idx, ego in enumerate(ego_actors):
-                others = [a for a in spawned if a.id != ego.id]
+                if hasattr(ego, "is_alive") and not ego.is_alive:
+                    continue
+                others = []
+                for a in spawned:
+                    try:
+                        if a.id != ego.id:
+                            others.append(a)
+                    except Exception:
+                        continue
                 waypoints = waypoint_cache[ego_idx]
                 if not waypoints:
                     continue
                 next_idx = wp_reached[ego_idx]
                 next_idx = min(next_idx, len(waypoints) - 1)
-                if ego.get_location().distance(waypoints[next_idx].location) < waypoint_thresh:
-                    wp_reached[ego_idx] = min(len(waypoints) - 1, next_idx + 1)
+                try:
+                    if ego.get_location().distance(waypoints[next_idx].location) < waypoint_thresh:
+                        wp_reached[ego_idx] = min(len(waypoints) - 1, next_idx + 1)
+                except Exception:
+                    continue
 
                 hit, severe, ttc = _compute_near_miss(
                     ego,
@@ -1092,6 +1165,8 @@ def _run_baseline_constant_velocity(
                     args.baseline_ttc_thresh,
                     ttc_severe,
                     closing_min,
+                    role_lookup=role_lookup,
+                    debug_hits=near_miss_log,
                 )
                 if hit:
                     consecutive_hits[ego_idx] += 1
@@ -1146,7 +1221,7 @@ def _run_baseline_constant_velocity(
         else:
             tags.append("baseline_ok")
 
-        return {
+        result = {
             "status": status,
             "reason": reason or ("accepted_due_to_ttc_nearmiss" if near_miss_triggered and easy else ""),
             "rc": rc_min,
@@ -1155,6 +1230,23 @@ def _run_baseline_constant_velocity(
             "min_ttc": min_ttc if near_miss_triggered else float("inf"),
             "tags": tags,
         }
+        # Persist detailed per-tick/debug info for postmortem analysis.
+        try:
+            log_dir = Path(getattr(args, "baseline_image_dir", "") or routes_dir)
+            log_dir.mkdir(parents=True, exist_ok=True)
+            with open(log_dir / "baseline_events.json", "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "collisions": event_log,
+                        "near_miss_hits": near_miss_log,
+                    },
+                    f,
+                    indent=2,
+                )
+        except Exception as exc:
+            log_fn(f"[BASELINE] failed to write baseline_events.json: {exc}")
+
+        return result
     finally:
         _destroy_actors(sensors + spawned)
 
@@ -1727,6 +1819,14 @@ def _run_single(
                 baseline_image_dir = run_root / run_key / "baseline_images"
                 args.baseline_image_dir = str(baseline_image_dir)
                 status["baseline_image_dir"] = str(baseline_image_dir)
+                # Add a symlink inside the current pipeline attempt for quick access
+                attempt_link = scenario_dir / "baseline_images"
+                try:
+                    if attempt_link.exists() or attempt_link.is_symlink():
+                        attempt_link.unlink()
+                    attempt_link.symlink_to(baseline_image_dir, target_is_directory=True)
+                except Exception:
+                    pass
             baseline_result = _run_baseline_validation(args, routes_dir, log)
             status.setdefault("metrics", {})["baseline"] = baseline_result
             try:

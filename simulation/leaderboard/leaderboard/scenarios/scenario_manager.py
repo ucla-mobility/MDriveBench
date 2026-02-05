@@ -14,10 +14,11 @@ from __future__ import print_function
 import signal
 import sys
 import time
+import math
 
 import py_trees
 import carla
-
+import os
 from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 from srunner.scenariomanager.timer import GameTime
 from srunner.scenariomanager.watchdog import Watchdog
@@ -93,6 +94,14 @@ class ScenarioManager(object):
         self._stall_threshold_time = 90.0  # 90 seconds of minimal movement = stall
         self._stall_min_distance = 0.5     # Must move at least 0.5 meters in threshold_time
 
+        # PDM trace logging (for navsim-style metrics)
+        self.pdm_traces = []
+        self._pdm_prev_ang_vel = []
+        self._pdm_prev_time = []
+        self.pdm_world_trace = []
+        self._pdm_last_world_time = None
+        self.pdm_tl_polygons = {}
+
         # record simulation time cost
         self.time_record = []
         self.c_time_record = []
@@ -152,6 +161,14 @@ class ScenarioManager(object):
         else:
             self.scenario.append(scenario.scenario)
             self.scenario_tree.append(self.scenario[0].scenario_tree)
+
+        # reset PDM traces for each ego
+        self.pdm_traces = [[] for _ in range(self.ego_vehicles_num)]
+        self._pdm_prev_ang_vel = [None for _ in range(self.ego_vehicles_num)]
+        self._pdm_prev_time = [None for _ in range(self.ego_vehicles_num)]
+        self.pdm_world_trace = []
+        self._pdm_last_world_time = None
+        self.pdm_tl_polygons = {}
 
         # To print the scenario tree uncomment the next line
         # py_trees.display.render_dot_tree(self.scenario_tree)
@@ -233,8 +250,11 @@ class ScenarioManager(object):
                     ego = CarlaDataProvider.get_hero_actor(hero_id=vehicle_num)
                     if ego:
                         if ego.is_alive:
-                            print(f"[DEBUG SCENARIO_MGR] Applying control to ego {vehicle_num}: throttle={ego_action[vehicle_num].throttle:.3f}, brake={ego_action[vehicle_num].brake:.3f}, steer={ego_action[vehicle_num].steer:.3f}")
+                            if os.environ.get('DEBUG_SCENARIOMGR', '').lower() in ('1', 'true', 'yes'):
+                                print(f"[DEBUG SCENARIO_MGR] Applying control to ego {vehicle_num}: throttle={ego_action[vehicle_num].throttle:.3f}, brake={ego_action[vehicle_num].brake:.3f}, steer={ego_action[vehicle_num].steer:.3f}")
                             self.ego_vehicles[vehicle_num].apply_control(ego_action[vehicle_num])
+                            # record trace for PDM metrics
+                            self._record_pdm_sample(vehicle_num, ego, timestamp)
                 except:
                     pass
 
@@ -312,7 +332,8 @@ class ScenarioManager(object):
                     continue
                 criteria = scenario_instance.get_criteria()
                 if not criteria:
-                    print(f"[DEBUG] Ego {idx}: No criteria found")
+                    if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
+                        print(f"[DEBUG FINISH] Ego {idx}: No criteria found")
                     all_egos_done = False
                     break
                 # Check if this ego is either completed (SUCCESS) or blocked (FAILURE)
@@ -323,26 +344,30 @@ class ScenarioManager(object):
                 if not hasattr(self, '_last_debug_time'):
                     self._last_debug_time = 0
                 if time.time() - self._last_debug_time > 10:
-                    print(f"[DEBUG] Ego {idx}: Found {len(criteria)} criteria: {[type(c).__name__ for c in criteria]}")
-                    for c in criteria:
-                        print(f"[DEBUG]   - {type(c).__name__}: status={getattr(c, 'test_status', 'N/A')}")
+                    if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
+                        print(f"[DEBUG FINISH] Ego {idx}: Found {len(criteria)} criteria: {[type(c).__name__ for c in criteria]}")
+                        for c in criteria:
+                            print(f"[DEBUG FINISH]   - {type(c).__name__}: status={getattr(c, 'test_status', 'N/A')}")
                     self._last_debug_time = time.time()
                 for criterion in criteria:
                     if isinstance(criterion, RouteCompletionTest):
                         if criterion.test_status == "SUCCESS":
                             ego_completed = True
-                            print(f"[DEBUG] Ego {idx}: RouteCompletionTest SUCCESS")
+                            if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
+                                print(f"[DEBUG FINISH] Ego {idx}: RouteCompletionTest SUCCESS")
                     elif isinstance(criterion, ActorSpeedAboveThresholdTest):
                         if criterion.test_status == "FAILURE":
                             ego_blocked = True
-                            print(f"[DEBUG] Ego {idx}: AgentBlockedTest FAILURE")
+                            if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
+                                print(f"[DEBUG FINISH] Ego {idx}: AgentBlockedTest FAILURE")
                 # Ego is "done" if it completed OR if it's blocked
                 if not (ego_completed or ego_blocked):
                     all_egos_done = False
                     break
 
             if all_egos_done and self._running:
-                print(f"[DEBUG] ALL EGOS DONE - setting _running = False")
+                if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
+                    print(f"[DEBUG FINISH] ALL EGOS DONE - setting _running = False")
                 self._running = False
 
             # Position-based stall detection (conservative fallback)
@@ -355,6 +380,170 @@ class ScenarioManager(object):
 
         if self._running and self.get_running_status():
             CarlaDataProvider.get_world().tick(self._timeout)
+
+    def _record_pdm_sample(self, vehicle_num, ego, timestamp):
+        """
+        Record per-tick kinematics for PDM-style metrics.
+        """
+        if vehicle_num >= len(self.pdm_traces):
+            return
+        try:
+            self._record_pdm_world(timestamp)
+            transform = ego.get_transform()
+            vel = ego.get_velocity()
+            acc = ego.get_acceleration()
+            ang_vel = ego.get_angular_velocity()
+            extent = ego.bounding_box.extent
+
+            current_time = timestamp.elapsed_seconds
+            prev_time = self._pdm_prev_time[vehicle_num]
+            dt = (
+                timestamp.delta_seconds
+                if hasattr(timestamp, "delta_seconds") and timestamp.delta_seconds
+                else (current_time - prev_time if prev_time is not None else 0.05)
+            )
+
+            prev_ang = self._pdm_prev_ang_vel[vehicle_num]
+            ang_acc = 0.0
+            if prev_ang is not None and dt and dt > 0:
+                ang_acc = (ang_vel.z - prev_ang) / dt
+
+            self._pdm_prev_ang_vel[vehicle_num] = ang_vel.z
+            self._pdm_prev_time[vehicle_num] = current_time
+
+            self.pdm_traces[vehicle_num].append(
+                {
+                    "t": current_time,
+                    "actor_id": ego.id,
+                    "x": transform.location.x,
+                    "y": transform.location.y,
+                    "yaw": math.radians(transform.rotation.yaw),
+                    "vel_x": vel.x,
+                    "vel_y": vel.y,
+                    "accel_x": acc.x,
+                    "accel_y": acc.y,
+                    "ang_vel": ang_vel.z,
+                    "ang_acc": ang_acc,
+                    "extent_x": extent.x,
+                    "extent_y": extent.y,
+                }
+            )
+        except Exception:
+            pass
+
+    def _record_pdm_world(self, timestamp):
+        """
+        Record world actors and traffic light states once per tick.
+        For each ego vehicle, we need separate world traces that exclude that specific ego
+        but include other egos as potential collision targets.
+        """
+        current_time = timestamp.elapsed_seconds
+        if self._pdm_last_world_time is not None and abs(current_time - self._pdm_last_world_time) < 1e-6:
+            return
+        self._pdm_last_world_time = current_time
+
+        world = CarlaDataProvider.get_world()
+        if world is None:
+            return
+
+        # Get all hero IDs
+        hero_actors = {}
+        for ego_id in range(self.ego_vehicles_num):
+            hero = CarlaDataProvider.get_hero_actor(hero_id=ego_id)
+            if hero is not None:
+                hero_actors[ego_id] = hero
+
+        all_actors = world.get_actors()
+        
+        if os.environ.get('DEBUG_PDM', '').lower() in ('1', 'true', 'yes'):
+            if len(self.pdm_world_trace) == 0:
+                print(f"[DEBUG PDM] _record_pdm_world first call: total world actors={len(all_actors)}, num_egos={len(hero_actors)}")
+                # Sample some non-vehicle/pedestrian actors to see what they are
+                other_types = {}
+                for actor in all_actors:
+                    if actor.id not in [h.id for h in hero_actors.values()] and not actor.type_id.startswith("vehicle.") and not actor.type_id.startswith("walker.pedestrian"):
+                        actor_type = actor.type_id.split('.')[0] if '.' in actor.type_id else actor.type_id
+                        other_types[actor_type] = other_types.get(actor_type, 0) + 1
+                if other_types:
+                    print(f"[DEBUG PDM] Non-vehicle/pedestrian actor types: {other_types}")
+        
+        # Collect all vehicles and pedestrians (including OTHER egos)
+        actors = []
+        vehicle_count = 0
+        pedestrian_count = 0
+        
+        for actor in all_actors:
+            try:
+                if actor.type_id.startswith("vehicle."):
+                    vehicle_count += 1
+                elif actor.type_id.startswith("walker.pedestrian"):
+                    pedestrian_count += 1
+                    
+                if actor.type_id.startswith("vehicle.") or actor.type_id.startswith("walker.pedestrian"):
+                    transform = actor.get_transform()
+                    vel = actor.get_velocity()
+                    extent = actor.bounding_box.extent
+                    actors.append(
+                        {
+                            "id": actor.id,
+                            "type": actor.type_id,
+                            "x": transform.location.x,
+                            "y": transform.location.y,
+                            "yaw": math.radians(transform.rotation.yaw),
+                            "vel_x": vel.x,
+                            "vel_y": vel.y,
+                            "extent_x": extent.x,
+                            "extent_y": extent.y,
+                        }
+                    )
+            except Exception as e:
+                if os.environ.get('DEBUG_PDM', '').lower() in ('1', 'true', 'yes') and len(self.pdm_world_trace) == 0:
+                    print(f"[DEBUG PDM] Exception processing actor: {e}")
+                continue
+        
+        if os.environ.get('DEBUG_PDM', '').lower() in ('1', 'true', 'yes'):
+            if len(self.pdm_world_trace) == 0:
+                print(f"[DEBUG PDM] After filtering: vehicles={vehicle_count} (including {len(hero_actors)} egos), pedestrians={pedestrian_count}, final_actors={len(actors)}")
+
+        # cache traffic light polygons (static)
+        if not self.pdm_tl_polygons:
+            for tl in world.get_actors().filter("*traffic_light*"):
+                try:
+                    trig = tl.trigger_volume
+                    tf = tl.get_transform()
+                    # trigger volume center in local space
+                    center = trig.location
+                    extent = trig.extent
+                    # build 4 corners in local frame
+                    corners = [
+                        carla.Location(x=center.x + extent.x, y=center.y + extent.y),
+                        carla.Location(x=center.x + extent.x, y=center.y - extent.y),
+                        carla.Location(x=center.x - extent.x, y=center.y - extent.y),
+                        carla.Location(x=center.x - extent.x, y=center.y + extent.y),
+                    ]
+                    world_corners = [tf.transform(loc) for loc in corners]
+                    self.pdm_tl_polygons[tl.id] = [(c.x, c.y) for c in world_corners]
+                except Exception:
+                    continue
+
+        tl_states = {}
+        for tl in world.get_actors().filter("*traffic_light*"):
+            try:
+                tl_states[tl.id] = int(tl.state)
+            except Exception:
+                continue
+
+        self.pdm_world_trace.append(
+            {
+                "t": current_time,
+                "actors": actors,
+                "traffic_lights": tl_states,
+            }
+        )
+        
+        if os.environ.get('DEBUG_PDM', '').lower() in ('1', 'true', 'yes'):
+            if len(self.pdm_world_trace) == 1 or len(self.pdm_world_trace) % 50 == 0:
+                print(f"[DEBUG PDM] pdm_world_trace length: {len(self.pdm_world_trace)}, actors in this frame: {len(actors)}")
 
     def get_running_status(self):
         """

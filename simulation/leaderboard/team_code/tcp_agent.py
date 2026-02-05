@@ -83,6 +83,8 @@ class TCPAgent(autonomous_agent.AutonomousAgent):
 
 		self.save_path = None
 		self._im_transform = T.Compose([T.ToTensor(), T.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])])
+		self.pid_metadata = {}
+		self._saved_first_tick = [False] * self.ego_vehicles_num
 
 		if SAVE_PATH is not None:
 			now = datetime.datetime.now()
@@ -208,6 +210,9 @@ class TCPAgent(autonomous_agent.AutonomousAgent):
 			self._init()
 		# print('input_data:', input_data.keys())
 		tick_data = self.tick(ego_id, input_data)
+		if SAVE_PATH is not None and not self._saved_first_tick[ego_id]:
+			self.save(ego_id, tick_data)
+			self._saved_first_tick[ego_id] = True
 		if self.step < self.config_TCP.seq_len:
 			rgb = self._im_transform(tick_data['rgb']).unsqueeze(0)
 
@@ -311,7 +316,8 @@ class TCPAgent(autonomous_agent.AutonomousAgent):
 		self.pid_metadata['status'] = self.status[ego_id]
 
 		if SAVE_PATH is not None and self.step % 4 == 0:
-			self.save(ego_id, tick_data)
+			if not (self.step == 0 and self._saved_first_tick[ego_id]):
+				self.save(ego_id, tick_data)
 
 		self.prev_control[ego_id] = control
 		end_time = time.time()

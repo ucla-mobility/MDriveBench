@@ -446,7 +446,15 @@ class LMDriveAgent(autonomous_agent.AutonomousAgent):
 		self.step[ego_id] += 1
 		print(f"[DEBUG LMDRIVE] ego={ego_id}, step={self.step[ego_id]}")
 		
-		tick_data = self.tick(ego_id, input_data)
+		try:
+			tick_data = self.tick(ego_id, input_data)
+		except KeyError as e:
+			print(f"[WARN LMDRIVE] Missing sensor data {e} for ego {ego_id}, sending full brake.")
+			control = carla.VehicleControl()
+			control.steer = 0.0
+			control.throttle = 0.0
+			control.brake = 1.0
+			return control
 
 		if self.step[ego_id] < 20:
 			control = carla.VehicleControl()

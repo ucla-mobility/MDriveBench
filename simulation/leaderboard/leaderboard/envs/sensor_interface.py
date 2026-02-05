@@ -248,7 +248,8 @@ class SensorInterface(object):
     def update_sensor(self, tag, data, timestamp):
         # print("Updating {} - {}".format(tag, timestamp))
         if tag not in self._sensors_objects:
-            raise SensorConfigurationInvalid("The sensor with tag [{}] has not been created!".format(tag))
+            # sensor may have been removed (e.g., ego destroyed); ignore late callbacks
+            return
 
         self._new_data_buffers.put((tag, timestamp, data))
 
@@ -264,7 +265,13 @@ class SensorInterface(object):
                     break
 
                 sensor_data = self._new_data_buffers.get(True, self._queue_timeout)
-                data_dict[sensor_data[0]] = ((sensor_data[1], sensor_data[2]))
+
+                # Drop stale data that belongs to sensors already removed (e.g., after an ego vehicle is destroyed)
+                tag = sensor_data[0]
+                if tag not in self._sensors_objects:
+                    continue
+
+                data_dict[tag] = ((sensor_data[1], sensor_data[2]))
 
         except Empty:
             raise SensorReceivedNoData("A sensor took too long to send their data")

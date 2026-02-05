@@ -35,6 +35,11 @@ try:
 except Exception:  # pragma: no cover
     imageio = None
 
+try:  # optional CARLA client for map overlay
+    import carla  # type: ignore
+except Exception:
+    carla = None
+
 try:
     import yaml
 except ImportError as exc:  # pragma: no cover
@@ -76,6 +81,11 @@ def parse_args() -> argparse.Namespace:
         help="Path for the GIF/animation (defaults to <base-dir>/vehicles_over_time.gif)",
     )
     parser.add_argument(
+        "--viz-video-full",
+        default=None,
+        help="Path for a second GIF zoomed out to include all map lines (defaults to <base-dir>/vehicles_over_time_full.gif)",
+    )
+    parser.add_argument(
         "--plot-ego",
         action="store_true",
         default=True,
@@ -91,6 +101,49 @@ def parse_args() -> argparse.Namespace:
         "--map-pkl",
         default=None,
         help="Optional PKL path with map polylines to overlay on visualization",
+    )
+    parser.add_argument(
+        "--map-color-pkl",
+        default="gray",
+        help="Color for PKL map overlay (default: gray)",
+    )
+    parser.add_argument(
+        "--use-carla-map",
+        action="store_true",
+        help="Fetch map polylines directly from a running CARLA server",
+    )
+    parser.add_argument("--carla-host", default="127.0.0.1", help="CARLA host (default: 127.0.0.1)")
+    parser.add_argument("--carla-port", type=int, default=2000, help="CARLA port (default: 2000)")
+    parser.add_argument(
+        "--carla-sample",
+        type=float,
+        default=2.0,
+        help="Waypoint sampling distance in meters when pulling map from CARLA (default: 2.0)",
+    )
+    parser.add_argument(
+        "--carla-cache",
+        default=None,
+        help="Cache file for CARLA map polylines (default: <base-dir>/carla_map_cache.pkl)",
+    )
+    parser.add_argument(
+        "--carla-map-offset-json",
+        default=None,
+        help="Optional JSON file with tx/ty to offset CARLA map overlay (fields: tx, ty)",
+    )
+    parser.add_argument(
+        "--carla-map-flip-y",
+        action="store_true",
+        help="Flip CARLA map Y coordinates before applying offset (useful if axis is inverted)",
+    )
+    parser.add_argument(
+        "--expected-town",
+        default=None,
+        help="If set, require CARLA map name to contain this substring (e.g., ucla_v2)",
+    )
+    parser.add_argument(
+        "--map-color-carla",
+        default="#cfa93a",
+        help="Color for CARLA/UCLA map overlay (default: #cfa93a)",
     )
     return parser.parse_args()
 
@@ -198,7 +251,11 @@ def plot_timestep(
     color_cycle: List[str],
     ego_pose: Any = None,
     axes_limits: Tuple[float, float, float, float] = None,
-    map_lines: List[List[Tuple[float, float]]] = None,
+    pkl_lines: List[List[Tuple[float, float]]] = None,
+    carla_lines: List[List[Tuple[float, float]]] = None,
+    map_color_pkl: str = "gray",
+    map_color_carla: str = "#cfa93a",
+    invert_plot_y: bool = False,
 ) -> None:
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.set_title(f"Timestep {timestep}")
@@ -267,15 +324,29 @@ def plot_timestep(
         if "ego" not in legend_handles:
             legend_handles["ego"] = patches.Patch(color=color, label="ego")
 
-    if map_lines:
-        for line in map_lines:
+    if pkl_lines:
+        for line in pkl_lines:
             if len(line) < 2:
                 continue
             lx = [p[0] for p in line]
             ly = [p[1] for p in line]
-            ax.plot(lx, ly, color="gray", linewidth=1.0, alpha=0.5)
+            ax.plot(lx, ly, color=map_color_pkl, linewidth=1.0, alpha=0.6, label="map_pkl" if "map_pkl" not in legend_handles else None)
             xs.extend(lx)
             ys.extend(ly)
+            if "map_pkl" not in legend_handles:
+                legend_handles["map_pkl"] = patches.Patch(color=map_color_pkl, label="map (PKL)")
+
+    if carla_lines:
+        for line in carla_lines:
+            if len(line) < 2:
+                continue
+            lx = [p[0] for p in line]
+            ly = [p[1] for p in line]
+            ax.plot(lx, ly, color=map_color_carla, linewidth=1.0, alpha=0.6, label="map_carla" if "map_carla" not in legend_handles else None)
+            xs.extend(lx)
+            ys.extend(ly)
+            if "map_carla" not in legend_handles:
+                legend_handles["map_carla"] = patches.Patch(color=map_color_carla, label="map (CARLA)")
 
     if axes_limits:
         minx, maxx, miny, maxy = axes_limits
@@ -285,6 +356,9 @@ def plot_timestep(
         pad = 10.0
         ax.set_xlim(min(xs) - pad, max(xs) + pad)
         ax.set_ylim(min(ys) - pad, max(ys) + pad)
+
+    if invert_plot_y:
+        ax.invert_yaxis()
     ax.grid(True, linestyle="--", alpha=0.4)
     if legend_handles:
         ax.legend(handles=list(legend_handles.values()), loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0)
@@ -300,6 +374,7 @@ def main() -> None:
     output_csv = args.output or os.path.join(base_dir, "vehicles_by_timestep.csv")
     viz_dir = args.viz_dir or os.path.join(base_dir, "viz")
     viz_video = args.viz_video or os.path.join(base_dir, "vehicles_over_time.gif")
+    viz_video_full = args.viz_video_full or os.path.join(base_dir, "vehicles_over_time_full.gif")
     subfolders = list_subfolders(base_dir)
     if not subfolders:
         raise SystemExit(f"No subfolders found in {base_dir}")
@@ -315,7 +390,9 @@ def main() -> None:
     vehicles: Dict[int, Dict[str, Any]] = {}
     ego_by_ts: Dict[str, Any] = {}
     warnings: List[str] = []
-    map_lines: List[List[Tuple[float, float]]] = []
+    pkl_lines: List[List[Tuple[float, float]]] = []
+    carla_lines: List[List[Tuple[float, float]]] = []
+    map_bounds = None
 
     if args.map_pkl:
         map_obj = None
@@ -351,7 +428,6 @@ def main() -> None:
                     map_obj = None
 
         if map_obj is not None:
-            map_lines = []
 
             def _extract_lines(obj, depth=0):
                 if obj is None or depth > 10:
@@ -389,7 +465,7 @@ def main() -> None:
                         if all(hasattr(item, "__len__") and len(item) >= 2 for item in obj[:3] if item is not None):
                             pts = [(float(p[0]), float(p[1])) for p in obj if p is not None and len(p) >= 2]
                             if len(pts) >= 2:
-                                map_lines.append(pts)
+                                pkl_lines.append(pts)
                                 return pts
                     except Exception:
                         pass
@@ -405,7 +481,7 @@ def main() -> None:
                             elif isinstance(item, dict) and "x" in item and "y" in item:
                                 pts.append((float(item["x"]), float(item["y"])))
                         if len(pts) >= 2:
-                            map_lines.append(pts)
+                            pkl_lines.append(pts)
                             return pts
                     except Exception:
                         pass
@@ -422,7 +498,7 @@ def main() -> None:
                             arr = np.asarray(obj)
                             if arr.shape[1] >= 2 and arr.shape[0] >= 2:
                                 pts = [(float(p[0]), float(p[1])) for p in arr]
-                                map_lines.append(pts)
+                                pkl_lines.append(pts)
                                 return pts
                     except Exception:
                         pass
@@ -435,8 +511,92 @@ def main() -> None:
                             pass
 
             _extract_lines(map_obj)
-            if not map_lines:
+            if not pkl_lines:
                 warnings.append(f"Map PKL {args.map_pkl} loaded but no polylines recognized; skipping map overlay")
+
+    if args.use_carla_map:
+        if carla is None:
+            warnings.append("carla module not available; cannot fetch map from CARLA")
+        else:
+            cache_path = args.carla_cache or os.path.join(base_dir, "carla_map_cache.pkl")
+            cache_loaded = False
+            tx_offset = 0.0
+            ty_offset = 0.0
+            if args.carla_map_offset_json and os.path.isfile(args.carla_map_offset_json):
+                try:
+                    with open(args.carla_map_offset_json, "r", encoding="utf-8") as jf:
+                        offset_cfg = json.load(jf) or {}
+                        tx_offset = float(offset_cfg.get("tx", 0.0))
+                        ty_offset = float(offset_cfg.get("ty", 0.0))
+                        warnings.append(f"Applied CARLA map offset tx={tx_offset}, ty={ty_offset} from {args.carla_map_offset_json}")
+                except Exception as exc:
+                    warnings.append(f"Failed to read carla_map_offset_json {args.carla_map_offset_json}: {exc}")
+            if cache_path and os.path.isfile(cache_path):
+                try:
+                    cached = pickle.load(open(cache_path, "rb"))
+                    if isinstance(cached, dict) and "lines" in cached:
+                        lines_cached = cached["lines"]
+                        # Apply optional flip then offset to cached lines
+                        offset_lines = []
+                        for line in lines_cached:
+                            new_line = []
+                            for (x, y) in line:
+                                y_flipped = -y if args.carla_map_flip_y else y
+                                new_line.append((x + tx_offset, y_flipped + ty_offset))
+                            offset_lines.append(new_line)
+                        carla_lines.extend(offset_lines)
+                        map_bounds = cached.get("bounds")
+                        cache_loaded = True
+                        warnings.append(f"Using cached CARLA map from {cache_path}")
+                except Exception:
+                    pass
+            if not cache_loaded:
+                try:
+                    client = carla.Client(args.carla_host, args.carla_port)
+                    client.set_timeout(10.0)
+                    world = client.get_world()
+                    cmap = world.get_map()
+                    if args.expected_town and args.expected_town not in (cmap.name or ""):
+                        candidates = [m for m in client.get_available_maps() if args.expected_town in m]
+                        if not candidates:
+                            warnings.append(
+                                f"CARLA map '{cmap.name}' does not match expected '{args.expected_town}' and no match found"
+                            )
+                        else:
+                            world = client.load_world(candidates[0])
+                            cmap = world.get_map()
+                    wps = cmap.generate_waypoints(distance=args.carla_sample)
+                    buckets: Dict[Tuple[int, int], List[Any]] = {}
+                    for wp in wps:
+                        buckets.setdefault((wp.road_id, wp.lane_id), []).append(wp)
+                    carla_lines_local: List[List[Tuple[float, float]]] = []
+                    bounds = [float("inf"), -float("inf"), float("inf"), -float("inf")]
+                    for _, seq in buckets.items():
+                        seq.sort(key=lambda w: w.s)
+                        pts = []
+                        for w in seq:
+                            x = float(w.transform.location.x)
+                            y = float(w.transform.location.y)
+                            if args.carla_map_flip_y:
+                                y = -y
+                            x += tx_offset
+                            y += ty_offset
+                            pts.append((x, y))
+                            bounds[0] = min(bounds[0], x)
+                            bounds[1] = max(bounds[1], x)
+                            bounds[2] = min(bounds[2], y)
+                            bounds[3] = max(bounds[3], y)
+                        if len(pts) >= 2:
+                            carla_lines_local.append(pts)
+                    map_bounds = None if bounds[0] == float("inf") else tuple(bounds)
+                    carla_lines.extend(carla_lines_local)
+                    if cache_path:
+                        try:
+                            pickle.dump({"lines": carla_lines_local, "bounds": map_bounds, "map_name": cmap.name}, open(cache_path, "wb"))
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    warnings.append(f"Failed to fetch map from CARLA: {exc}")
 
     for folder in subfolders:
         for timestep in timesteps:
@@ -474,7 +634,7 @@ def main() -> None:
 
                 merge_vehicle_entry(vehicles[vid], entry, args.tolerance, warnings, source=os.path.basename(folder), timestep=timestep)
 
-    # Compute global axes limits to keep GIF frames stable (based on vehicles + ego only)
+    # Compute axes limits (vehicle-centric) and full-map limits (vehicles + maps)
     all_points: List[Tuple[float, float]] = []
     for vdata in vehicles.values():
         for ts in timesteps:
@@ -490,13 +650,22 @@ def main() -> None:
                 all_points.append((float(pose[0]), float(pose[1])))
             except Exception:
                 pass
-    # Map lines are NOT included in axes limits computation (allows zoom to vehicles)
-
     axes_limits: Tuple[float, float, float, float] = None
     if all_points:
         xs, ys = zip(*all_points)
         pad = 10.0
         axes_limits = (min(xs) - pad, max(xs) + pad, min(ys) - pad, max(ys) + pad)
+
+    map_limits: Tuple[float, float, float, float] = axes_limits
+    if pkl_lines or carla_lines:
+        xs = []
+        ys = []
+        for line in pkl_lines + carla_lines:
+            xs.extend([p[0] for p in line])
+            ys.extend([p[1] for p in line])
+        if xs and ys:
+            pad = 10.0
+            map_limits = (min(xs) - pad, max(xs) + pad, min(ys) - pad, max(ys) + pad)
 
     # Write CSV
     header = ["vehicle_id", "obj_type"] + [f"t_{ts}" for ts in timesteps]
@@ -538,7 +707,11 @@ def main() -> None:
                 color_cycle,
                 ego_pose=ego_by_ts.get(ts) if args.plot_ego else None,
                 axes_limits=axes_limits,
-                map_lines=map_lines,
+                pkl_lines=pkl_lines,
+                carla_lines=carla_lines,
+                map_color_pkl=args.map_color_pkl,
+                map_color_carla=args.map_color_carla,
+                invert_plot_y=False,
             )
             generated_frames.append(out_path)
         if args.viz:
@@ -552,7 +725,20 @@ def main() -> None:
             color_cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0", "C1", "C2", "C3", "C4"])
             for ts in timesteps:
                 out_path = os.path.join(viz_dir, f"t_{ts}.png")
-                plot_timestep(ts, vehicles, out_path, palette, color_cycle)
+                plot_timestep(
+                    ts,
+                    vehicles,
+                    out_path,
+                    palette,
+                    color_cycle,
+                    ego_pose=ego_by_ts.get(ts) if args.plot_ego else None,
+                    axes_limits=axes_limits,
+                    pkl_lines=pkl_lines,
+                    carla_lines=carla_lines,
+                    map_color_pkl=args.map_color_pkl,
+                    map_color_carla=args.map_color_carla,
+                    invert_plot_y=False,
+                )
                 generated_frames.append(out_path)
 
         if imageio is None:
@@ -563,6 +749,30 @@ def main() -> None:
             frames = [imageio.imread(p) for p in generated_frames]
             imageio.mimsave(viz_video, frames, duration=0.5)
             print(f"GIF written: {viz_video}")
+
+        # Full-map GIF (zoomed out to include maps)
+        if imageio is not None and generated_frames:
+            tmp_full = []
+            for ts in timesteps:
+                out_path = os.path.join(viz_dir, f"t_{ts}_full.png")
+                plot_timestep(
+                    ts,
+                    vehicles,
+                    out_path,
+                    palette,
+                    color_cycle,
+                    ego_pose=ego_by_ts.get(ts) if args.plot_ego else None,
+                    axes_limits=map_limits or axes_limits,
+                    pkl_lines=pkl_lines,
+                    carla_lines=carla_lines,
+                    map_color_pkl=args.map_color_pkl,
+                    map_color_carla=args.map_color_carla,
+                    invert_plot_y=False,
+                )
+                tmp_full.append(out_path)
+            frames_full = [imageio.imread(p) for p in tmp_full]
+            imageio.mimsave(viz_video_full, frames_full, duration=0.5)
+            print(f"Full-map GIF written: {viz_video_full}")
 
     if warnings:
         print("Completed with warnings:")
