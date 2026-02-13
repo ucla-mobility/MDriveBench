@@ -1,3 +1,0 @@
-This is the sample data of V2XPnP, containing 7 scenarios - 10% data of the whole dataset. The two scenarios in '2023-04-07' are the V2V coordinate scenario, and the others are the V2X intersection scenarios. We provide the lidar data at each timestamp of each agent in each scenario and provide the camera data in the '2023-04-07-15-02-15_1_1' as an example. The ‘trajectory_database_sample.pkl’ is the sequential trajectory dataset of the sample dataset. 
-
-The ground truth format follows the Opencood and the trajectory dataset format is {scenario_id : {veh_id: {trajectory:np_trajectory(t,x,y,z), mask:mask_value}}}. 

@@ -15,6 +15,7 @@ import signal
 import sys
 import time
 import math
+from typing import Optional
 
 import py_trees
 import carla
@@ -107,12 +108,49 @@ class ScenarioManager(object):
         self.c_time_record = []
         self.a_time_record = []
         self.sc_time_record = []
+        self._reset_event_idx = 0
+        self._scenario_name = None
+        self._scenario_town = None
+        self._scenario_route = None
         
     def signal_handler(self, signum, frame):
         """
         Terminate scenario ticking when receiving a signal interrupt
         """
+        self._debug_reset(
+            "signal_interrupt",
+            details=f"signum={signum}",
+        )
         self._running = False
+
+    def _debug_reset(self, reason: str, details: Optional[str] = None) -> None:
+        if os.environ.get("CUSTOM_LOG_REPLAY_DEBUG", "").lower() not in ("1", "true", "yes"):
+            return
+        self._reset_event_idx += 1
+        try:
+            sim_time = float(GameTime.get_time())
+        except Exception:
+            sim_time = None
+        try:
+            carla_time = float(GameTime.get_carla_time())
+        except Exception:
+            carla_time = None
+        parts = [f"[LOG_REPLAY_DEBUG] RESET#{self._reset_event_idx} reason={reason}"]
+        if self._scenario_name:
+            parts.append(f"scenario={self._scenario_name}")
+        if self._scenario_town:
+            parts.append(f"town={self._scenario_town}")
+        if self._scenario_route is not None:
+            parts.append(f"route={self._scenario_route}")
+        if self.repetition_number is not None:
+            parts.append(f"rep={self.repetition_number}")
+        if sim_time is not None:
+            parts.append(f"sim_t={sim_time:.3f}")
+        if carla_time is not None:
+            parts.append(f"carla_t={carla_time:.3f}")
+        if details:
+            parts.append(details)
+        print(" ".join(parts))
 
     def cleanup(self):
         """
@@ -136,6 +174,14 @@ class ScenarioManager(object):
             save_root: root directory to save sensor data
         """
 
+        self._scenario_name = getattr(getattr(scenario, "config", None), "name", None)
+        self._scenario_town = getattr(getattr(scenario, "config", None), "town", None)
+        self._scenario_route = getattr(getattr(scenario, "config", None), "route_id", None)
+        self.repetition_number = rep_number
+        self._debug_reset(
+            "load_scenario",
+            details=f"ego_num={ego_vehicles_num}",
+        )
         GameTime.restart()
 
         agent.town_id = scenario.config.town # pass town id to agent
@@ -215,6 +261,73 @@ class ScenarioManager(object):
             GameTime.on_carla_tick(timestamp)
             CarlaDataProvider.on_carla_tick()
 
+            if os.environ.get("CUSTOM_LOG_REPLAY_DEBUG", "").lower() in ("1", "true", "yes"):
+                try:
+                    interval = float(os.environ.get("CUSTOM_LOG_REPLAY_DEBUG_INTERVAL", "2.0"))
+                except Exception:
+                    interval = 2.0
+                if not hasattr(self, "_log_replay_debug_last"):
+                    self._log_replay_debug_last = -1.0
+                    self._log_replay_prev_time = None
+                    self._log_replay_prev_locs = {}
+                if (
+                    self._log_replay_prev_time is not None
+                    and timestamp.elapsed_seconds + 1e-3 < self._log_replay_prev_time
+                ):
+                    print(
+                        f"[LOG_REPLAY_DEBUG] scenario time went backwards "
+                        f"({self._log_replay_prev_time:.3f} -> {timestamp.elapsed_seconds:.3f})"
+                    )
+                if (
+                    self._log_replay_debug_last < 0
+                    or timestamp.elapsed_seconds - self._log_replay_debug_last >= interval
+                ):
+                    for vehicle_num in range(self.ego_vehicles_num):
+                        ego = CarlaDataProvider.get_hero_actor(hero_id=vehicle_num)
+                        if ego is None:
+                            print(f"[LOG_REPLAY_DEBUG] ego{vehicle_num}: missing")
+                            continue
+                        try:
+                            loc = ego.get_location()
+                            vel = ego.get_velocity()
+                            speed = math.sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z)
+                        except Exception:
+                            loc = None
+                            speed = 0.0
+                        prev = self._log_replay_prev_locs.get(vehicle_num)
+                        jump = None
+                        if loc is not None and prev is not None:
+                            try:
+                                jump = loc.distance(prev)
+                            except Exception:
+                                jump = None
+                        status = None
+                        try:
+                            status = self.scenario_tree[vehicle_num].status
+                        except Exception:
+                            status = None
+                        if loc is None:
+                            loc_str = "n/a"
+                        else:
+                            loc_str = f"({loc.x:.2f},{loc.y:.2f},{loc.z:.2f})"
+                        print(
+                            f"[LOG_REPLAY_DEBUG] t={timestamp.elapsed_seconds:.3f} ego{vehicle_num} "
+                            f"loc={loc_str} spd={speed:.2f} "
+                            f"jump={jump if jump is not None else 'n/a'} status={status}"
+                        )
+                        if loc is not None:
+                            self._log_replay_prev_locs[vehicle_num] = loc
+                    if os.environ.get("CUSTOM_EGO_LOG_REPLAY", "").lower() in ("1", "true", "yes"):
+                        for idx in range(self.ego_vehicles_num):
+                            try:
+                                done_key = f"log_replay_done_ego_{idx}"
+                                replay_done = bool(py_trees.blackboard.Blackboard().get(done_key))
+                            except Exception:
+                                replay_done = False
+                            print(f"[LOG_REPLAY_DEBUG] ego{idx} replay_done={replay_done}")
+                    self._log_replay_debug_last = timestamp.elapsed_seconds
+                self._log_replay_prev_time = timestamp.elapsed_seconds
+
             # destroy ego if it is not alive
             for vehicle_num in range(self.ego_vehicles_num):
                 if  CarlaDataProvider.get_hero_actor(hero_id=vehicle_num) and not CarlaDataProvider.get_hero_actor(hero_id=vehicle_num).is_alive:
@@ -284,8 +397,13 @@ class ScenarioManager(object):
 
             # destroy ego if it is not in RUNNING status or not alive
             stop_flag = 0
+            log_replay_ego = os.environ.get("CUSTOM_EGO_LOG_REPLAY", "").lower() in ("1", "true", "yes")
+            missing_egos = []
+            nonrunning_egos = []
+            dead_egos = []
             for vehicle_num in range(self.ego_vehicles_num):
                 if CarlaDataProvider.get_hero_actor(hero_id=vehicle_num) is None:
+                    missing_egos.append(vehicle_num)
                     stop_flag += 1
                     if CarlaDataProvider.get_hero_actor(hero_id=vehicle_num):
                         self._agent.del_ego_sensor(vehicle_num)
@@ -294,9 +412,25 @@ class ScenarioManager(object):
                         print("destroy ego type 2 {}".format(vehicle_num))
                         CarlaDataProvider.remove_actor_by_id(CarlaDataProvider.get_hero_actor(hero_id=vehicle_num).id)
                     if stop_flag == self.ego_vehicles_num:
+                        self._debug_reset(
+                            "all_egos_missing",
+                            details=f"missing={missing_egos}",
+                        )
                         self._running = False
                 
                 elif self.scenario_tree[vehicle_num].status != py_trees.common.Status.RUNNING or not CarlaDataProvider.get_hero_actor(hero_id=vehicle_num).is_alive:
+                    nonrunning_egos.append(vehicle_num)
+                    if not CarlaDataProvider.get_hero_actor(hero_id=vehicle_num).is_alive:
+                        dead_egos.append(vehicle_num)
+                    if log_replay_ego:
+                        try:
+                            done_key = f"log_replay_done_ego_{vehicle_num}"
+                            replay_done = bool(py_trees.blackboard.Blackboard().get(done_key))
+                        except Exception:
+                            replay_done = False
+                        # In log replay mode, keep ego alive until replay has reached the end.
+                        if not replay_done and CarlaDataProvider.get_hero_actor(hero_id=vehicle_num) and CarlaDataProvider.get_hero_actor(hero_id=vehicle_num).is_alive:
+                            continue
                     stop_flag += 1
                     if CarlaDataProvider.get_hero_actor(hero_id=vehicle_num):
                         self._agent.del_ego_sensor(vehicle_num)
@@ -307,6 +441,16 @@ class ScenarioManager(object):
                         print('flag2:', not CarlaDataProvider.get_hero_actor(hero_id=vehicle_num).is_alive)
                         CarlaDataProvider.remove_actor_by_id(CarlaDataProvider.get_hero_actor(hero_id=vehicle_num).id)
                     if stop_flag == self.ego_vehicles_num:
+                        status_list = []
+                        for idx in range(self.ego_vehicles_num):
+                            try:
+                                status_list.append(str(self.scenario_tree[idx].status))
+                            except Exception:
+                                status_list.append("unknown")
+                        self._debug_reset(
+                            "all_egos_nonrunning_or_dead",
+                            details=f"nonrunning={nonrunning_egos} dead={dead_egos} statuses={status_list}",
+                        )
                         self._running = False
 
             # set spectator
@@ -326,46 +470,69 @@ class ScenarioManager(object):
                                                         carla.Rotation(pitch=-90)))
 
             # terminate route scenarios once all egos are either completed OR blocked
+            log_replay_ego = os.environ.get("CUSTOM_EGO_LOG_REPLAY", "").lower() in ("1", "true", "yes")
             all_egos_done = True
-            for idx, scenario_instance in enumerate(self.scenario):
-                if scenario_instance is None:
-                    continue
-                criteria = scenario_instance.get_criteria()
-                if not criteria:
-                    if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
-                        print(f"[DEBUG FINISH] Ego {idx}: No criteria found")
-                    all_egos_done = False
-                    break
-                # Check if this ego is either completed (SUCCESS) or blocked (FAILURE)
-                ego_completed = False
-                ego_blocked = False
-                # Debug: Show criterion types (every 10 seconds)
-                import time
-                if not hasattr(self, '_last_debug_time'):
-                    self._last_debug_time = 0
-                if time.time() - self._last_debug_time > 10:
-                    if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
-                        print(f"[DEBUG FINISH] Ego {idx}: Found {len(criteria)} criteria: {[type(c).__name__ for c in criteria]}")
-                        for c in criteria:
-                            print(f"[DEBUG FINISH]   - {type(c).__name__}: status={getattr(c, 'test_status', 'N/A')}")
-                    self._last_debug_time = time.time()
-                for criterion in criteria:
-                    if isinstance(criterion, RouteCompletionTest):
-                        if criterion.test_status == "SUCCESS":
-                            ego_completed = True
-                            if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
-                                print(f"[DEBUG FINISH] Ego {idx}: RouteCompletionTest SUCCESS")
-                    elif isinstance(criterion, ActorSpeedAboveThresholdTest):
-                        if criterion.test_status == "FAILURE":
-                            ego_blocked = True
-                            if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
-                                print(f"[DEBUG FINISH] Ego {idx}: AgentBlockedTest FAILURE")
-                # Ego is "done" if it completed OR if it's blocked
-                if not (ego_completed or ego_blocked):
-                    all_egos_done = False
-                    break
+            if log_replay_ego:
+                for idx in range(self.ego_vehicles_num):
+                    try:
+                        done_key = f"log_replay_done_ego_{idx}"
+                        replay_done = bool(py_trees.blackboard.Blackboard().get(done_key))
+                    except Exception:
+                        replay_done = False
+                    if not replay_done:
+                        all_egos_done = False
+                        break
+            else:
+                for idx, scenario_instance in enumerate(self.scenario):
+                    if scenario_instance is None:
+                        continue
+                    criteria = scenario_instance.get_criteria()
+                    if not criteria:
+                        if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
+                            print(f"[DEBUG FINISH] Ego {idx}: No criteria found")
+                        all_egos_done = False
+                        break
+                    # Check if this ego is either completed (SUCCESS) or blocked (FAILURE)
+                    ego_completed = False
+                    ego_blocked = False
+                    # Debug: Show criterion types (every 10 seconds)
+                    import time
+                    if not hasattr(self, '_last_debug_time'):
+                        self._last_debug_time = 0
+                    if time.time() - self._last_debug_time > 10:
+                        if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
+                            print(f"[DEBUG FINISH] Ego {idx}: Found {len(criteria)} criteria: {[type(c).__name__ for c in criteria]}")
+                            for c in criteria:
+                                print(f"[DEBUG FINISH]   - {type(c).__name__}: status={getattr(c, 'test_status', 'N/A')}")
+                        self._last_debug_time = time.time()
+                    for criterion in criteria:
+                        if isinstance(criterion, RouteCompletionTest):
+                            if criterion.test_status == "SUCCESS":
+                                ego_completed = True
+                                if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
+                                    print(f"[DEBUG FINISH] Ego {idx}: RouteCompletionTest SUCCESS")
+                        elif isinstance(criterion, ActorSpeedAboveThresholdTest):
+                            if criterion.test_status == "FAILURE":
+                                ego_blocked = True
+                                if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
+                                    print(f"[DEBUG FINISH] Ego {idx}: AgentBlockedTest FAILURE")
+                    # Ego is "done" if it completed OR if it's blocked
+                    if not (ego_completed or ego_blocked):
+                        all_egos_done = False
+                        break
 
             if all_egos_done and self._running:
+                done_details = None
+                if log_replay_ego:
+                    flags = []
+                    for idx in range(self.ego_vehicles_num):
+                        try:
+                            done_key = f"log_replay_done_ego_{idx}"
+                            flags.append(bool(py_trees.blackboard.Blackboard().get(done_key)))
+                        except Exception:
+                            flags.append(False)
+                    done_details = f"replay_done={flags}"
+                self._debug_reset("all_egos_done", details=done_details)
                 if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
                     print(f"[DEBUG FINISH] ALL EGOS DONE - setting _running = False")
                 self._running = False
@@ -375,6 +542,10 @@ class ScenarioManager(object):
             if self._running:
                 stall_detected = self._check_position_stall()
                 if stall_detected:
+                    self._debug_reset(
+                        "stall_detection",
+                        details=f"threshold_time={self._stall_threshold_time} min_dist={self._stall_min_distance}",
+                    )
                     print(f"\n[STALL DETECTION] All vehicles have been stationary for {self._stall_threshold_time}s - terminating scenario")
                     self._running = False
 
@@ -658,6 +829,7 @@ class ScenarioManager(object):
         """
         This function triggers a proper termination of a scenario
         """
+        self._debug_reset("stop_scenario_called")
         self._watchdog.stop()
 
         self.end_system_time = time.time()

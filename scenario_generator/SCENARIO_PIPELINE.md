@@ -1,10 +1,10 @@
-# Scenario Generator Pipeline (CoLMDriver)
+# Scenario Generator Pipeline (MDriveBench)
 
-This document onboards new contributors to the LLM-driven scenario pipeline used by CoLMDriver/MDriveBench. It combines a step-by-step flow with a file-by-file map of the codebase and shared assets.
+This document onboards new contributors to the LLM-driven scenario pipeline used by MDriveBench. It combines a step-by-step flow with a file-by-file map of the codebase and shared assets.
 
 ---
 
-## Pipeline Steps at a Glance (each in one sentence)
+## Pipeline Steps at a Glance
 1) **Crop selection** – Find a map crop in the chosen town that matches the requested topology/geometry for the scenario.  
 2) **Legal path enumeration** – Build lane connectivity inside that crop and enumerate boundary-crossing legal paths with signatures for every candidate ego route.  
 3) **Path picking** – Assign one legal path per ego using schema-driven CSP or LLM-extracted constraints from the description.  

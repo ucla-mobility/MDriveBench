@@ -1,4 +1,0 @@
-Category: Unprotected Left Turn
-Difficulty: 3
-Town: Town05
-Text: Vehicle 1 approaches the intersection and turns left at the intersection. Vehicle 2 approaches from the opposite direction of Vehicle 1 and goes straight through the intersection. Vehicle 3 approaches from a perpendicular road and goes straight through the intersection. 3 traffic cones on Vehicle 1's exit road at the right edge of the lane.

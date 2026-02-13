@@ -31,6 +31,21 @@ from team_code.planner import RoutePlanner
 SAVE_PATH = os.environ.get('SAVE_PATH', None)
 
 
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+	try:
+		value = int(os.environ.get(name, default))
+	except (TypeError, ValueError):
+		value = default
+	return max(minimum, value)
+
+
+def _env_float(name: str, default: float) -> float:
+	try:
+		return float(os.environ.get(name, default))
+	except (TypeError, ValueError):
+		return default
+
+
 def get_entry_point():
 	return 'TCPAgent'
 
@@ -85,6 +100,9 @@ class TCPAgent(autonomous_agent.AutonomousAgent):
 		self._im_transform = T.Compose([T.ToTensor(), T.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])])
 		self.pid_metadata = {}
 		self._saved_first_tick = [False] * self.ego_vehicles_num
+		self.save_interval = _env_int("TCP_SAVE_INTERVAL", 4, minimum=1)
+		self.model_rgb_width = _env_int("TCP_MODEL_RGB_WIDTH", 900, minimum=1)
+		self.model_rgb_height = _env_int("TCP_MODEL_RGB_HEIGHT", 256, minimum=1)
 
 		if SAVE_PATH is not None:
 			now = datetime.datetime.now()
@@ -116,19 +134,25 @@ class TCPAgent(autonomous_agent.AutonomousAgent):
 		return gps
 
 	def sensors(self):
+				rgb_w = _env_int("TCP_RGB_WIDTH", 900, minimum=1)
+				rgb_h = _env_int("TCP_RGB_HEIGHT", 256, minimum=1)
+				rgb_fov = _env_float("TCP_RGB_FOV", 100.0)
+				bev_w = _env_int("TCP_BEV_WIDTH", 256, minimum=1)
+				bev_h = _env_int("TCP_BEV_HEIGHT", 256, minimum=1)
+				bev_fov = _env_float("TCP_BEV_FOV", 120.0)
 				return [
 				{
 					'type': 'sensor.camera.rgb',
 					'x': -1.5, 'y': 0.0, 'z':2.0,
 					'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
-					'width': 900, 'height': 256, 'fov': 100,
+					'width': rgb_w, 'height': rgb_h, 'fov': rgb_fov,
 					'id': 'rgb'
 					},
 				{
 					'type': 'sensor.camera.rgb',
 					'x': 0.0, 'y': 0.0, 'z': 120.0,
 					'roll': 0.0, 'pitch': -90.0, 'yaw': 0.0,
-					'width': 256, 'height': 256, 'fov': 120, 
+					'width': bev_w, 'height': bev_h, 'fov': bev_fov, 
 					# 4096*4096 for visualization; 256*256 default
 					'id': 'bev'
 					},
@@ -210,11 +234,24 @@ class TCPAgent(autonomous_agent.AutonomousAgent):
 			self._init()
 		# print('input_data:', input_data.keys())
 		tick_data = self.tick(ego_id, input_data)
-		if SAVE_PATH is not None and not self._saved_first_tick[ego_id]:
-			self.save(ego_id, tick_data)
-			self._saved_first_tick[ego_id] = True
+		if SAVE_PATH is not None:
+			if not self._saved_first_tick[ego_id]:
+				self.save(ego_id, tick_data)
+				self._saved_first_tick[ego_id] = True
+			elif self.step % self.save_interval == 0:
+				self.save(ego_id, tick_data)
+		rgb_input = tick_data['rgb']
+		if rgb_input is not None and (
+			rgb_input.shape[1] != self.model_rgb_width
+			or rgb_input.shape[0] != self.model_rgb_height
+		):
+			rgb_input = cv2.resize(
+				rgb_input,
+				(self.model_rgb_width, self.model_rgb_height),
+				interpolation=cv2.INTER_AREA,
+			)
 		if self.step < self.config_TCP.seq_len:
-			rgb = self._im_transform(tick_data['rgb']).unsqueeze(0)
+			rgb = self._im_transform(rgb_input).unsqueeze(0)
 
 			control = carla.VehicleControl()
 			control.steer = 0.0
@@ -248,7 +285,7 @@ class TCPAgent(autonomous_agent.AutonomousAgent):
 		cmd_one_hot = torch.tensor(cmd_one_hot).view(1, 6).to('cuda', dtype=torch.float32)
 		speed = torch.FloatTensor([float(tick_data['speed'])]).view(1,1).to('cuda', dtype=torch.float32)
 		speed = speed / 12
-		rgb = self._im_transform(tick_data['rgb']).unsqueeze(0).to('cuda', dtype=torch.float32)
+		rgb = self._im_transform(rgb_input).unsqueeze(0).to('cuda', dtype=torch.float32)
 
 		tick_data['target_point'] = [torch.FloatTensor([tick_data['target_point'][0]]),
 										torch.FloatTensor([tick_data['target_point'][1]])]
@@ -314,10 +351,6 @@ class TCPAgent(autonomous_agent.AutonomousAgent):
 			self.status[ego_id] = 0
 
 		self.pid_metadata['status'] = self.status[ego_id]
-
-		if SAVE_PATH is not None and self.step % 4 == 0:
-			if not (self.step == 0 and self._saved_first_tick[ego_id]):
-				self.save(ego_id, tick_data)
 
 		self.prev_control[ego_id] = control
 		end_time = time.time()

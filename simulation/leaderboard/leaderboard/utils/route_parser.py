@@ -35,6 +35,13 @@ ROLE_DEFAULTS: Dict[str, Dict[str, object]] = {
 }
 
 
+def _safe_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _resolve_routes_dir(manifest_path: Path) -> Path:
     """
     Determine the base directory for custom actor files.
@@ -292,6 +299,8 @@ def _build_custom_actor_configs(route_id: str, town: str) -> List[Dict[str, obje
             continue
 
         plan_locations: List[carla.Location] = []
+        plan_transforms: List[carla.Transform] = []
+        plan_time_candidates: List[float | None] = []
         spawn_transform = None
         # Optional opt-out: route attribute snap_to_road="false" disables road snapping for this actor
         snap_attr = str(route_node.attrib.get("snap_to_road", "true")).lower()
@@ -308,27 +317,21 @@ def _build_custom_actor_configs(route_id: str, town: str) -> List[Dict[str, obje
                 continue
 
             plan_locations.append(loc)
+            yaw = _safe_float(waypoint.attrib.get("yaw")) or 0.0
+            pitch = _safe_float(waypoint.attrib.get("pitch")) or 0.0
+            roll = _safe_float(waypoint.attrib.get("roll")) or 0.0
+            plan_transforms.append(carla.Transform(loc, carla.Rotation(pitch=pitch, yaw=yaw, roll=roll)))
+            plan_time_candidates.append(_safe_float(waypoint.attrib.get("time") or waypoint.attrib.get("t")))
 
             if index == 0:
-                try:
-                    yaw = float(waypoint.attrib.get("yaw", 0.0))
-                except (TypeError, ValueError):
-                    yaw = 0.0
-                try:
-                    pitch = float(waypoint.attrib.get("pitch", 0.0))
-                except (TypeError, ValueError):
-                    pitch = 0.0
-                try:
-                    roll = float(waypoint.attrib.get("roll", 0.0))
-                except (TypeError, ValueError):
-                    roll = 0.0
-                spawn_transform = carla.Transform(
-                    loc,
-                    carla.Rotation(pitch=pitch, yaw=yaw, roll=roll),
-                )
+                spawn_transform = plan_transforms[-1]
 
         if not plan_locations or spawn_transform is None:
             continue
+
+        plan_times = None
+        if plan_time_candidates and all(t is not None for t in plan_time_candidates):
+            plan_times = [float(t) for t in plan_time_candidates]
 
         role = (entry.get("kind") or entry.get("role") or "npc").lower()
         role_defaults = ROLE_DEFAULTS.get(role, {})
@@ -347,6 +350,8 @@ def _build_custom_actor_configs(route_id: str, town: str) -> List[Dict[str, obje
                 "model": default_model,
                 "spawn_transform": spawn_transform,
                 "plan": plan_locations,
+                "plan_transforms": plan_transforms,
+                "plan_times": plan_times,
                 "target_speed": target_speed,
                 "avoid_collision": entry.get("avoid_collision", False),
                 "snap_to_road": snap_to_road,
@@ -421,12 +426,24 @@ class RouteParser(object):
             new_config.scenario_file = scenario_file
 
             waypoint_list = []  # the list of waypoints that can be found on this route
+            waypoint_yaws: List[float | None] = []
+            waypoint_pitches: List[float | None] = []
+            waypoint_rolls: List[float | None] = []
+            waypoint_times: List[float | None] = []
             for waypoint in route.iter('waypoint'):
                 waypoint_list.append(carla.Location(x=float(waypoint.attrib['x']),
                                                     y=float(waypoint.attrib['y']),
                                                     z=float(waypoint.attrib['z'])))
+                waypoint_yaws.append(_safe_float(waypoint.attrib.get('yaw')))
+                waypoint_pitches.append(_safe_float(waypoint.attrib.get('pitch')))
+                waypoint_rolls.append(_safe_float(waypoint.attrib.get('roll')))
+                waypoint_times.append(_safe_float(waypoint.attrib.get('time') or waypoint.attrib.get('t')))
 
             new_config.trajectory = waypoint_list
+            new_config.trajectory_yaws = waypoint_yaws
+            new_config.trajectory_pitches = waypoint_pitches
+            new_config.trajectory_rolls = waypoint_rolls
+            new_config.trajectory_times = waypoint_times
             new_config.custom_actors = _build_custom_actor_configs(route_id, new_config.town)
             behaviors_map = _load_custom_actor_behaviors()
             route_behaviors = list(behaviors_map.get(str(route_id), []))

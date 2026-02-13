@@ -1,4 +1,0 @@
-Category: Side Street Entry
-Difficulty: 2
-Town: Town05
-Text: Vehicle 1 approaches from the side road and turns right at the intersection. Vehicle 2 approaches from the opposite direction of Vehicle 1 and goes straight through the intersection.

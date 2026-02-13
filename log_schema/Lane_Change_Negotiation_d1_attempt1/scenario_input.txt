@@ -1,4 +1,0 @@
-Category: Lane Change Negotiation
-Difficulty: 1
-Town: Town05
-Text: Vehicle 1 travels and changes lanes. Vehicle 2 travels and continues straight. Vehicle 2 is in the lane to the left of Vehicle 1. 3 traffic cones on Vehicle 1's approach at the right edge of the lane.

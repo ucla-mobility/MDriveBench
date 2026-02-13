@@ -1,6 +1,0 @@
-Vehicle 1 goes straight through an intersection. After the intersection on Vehicle 1's exit road, a pedestrian waits on the right sidewalk. When Vehicle 1 gets within 8 meters, the pedestrian starts to cross from right to left.
-Vehicle 1 goes straight through an intersection. On Vehicle 1's exit road, an NPC vehicle travels ahead in the same lane. When Vehicle 1 gets within 10 meters, the NPC vehicle brakes hard to a stop.
-Vehicle 1 goes straight through an intersection. An NPC vehicle travels ahead of Vehicle 1 in the lane to the right of Vehicle 1. When Vehicle 1 gets within 25 meters, the NPC vehicle changes lanes to the left.
-Vehicle 1 goes straight through an intersection onto a two-lane exit road. An NPC vehicle travels ahead in the lane to the left of Vehicle 1. When Vehicle 1 gets within 12 meters, the NPC vehicle changes lanes into Vehicle 1's lane.
-Vehicle 1 goes straight through an intersection. On the exit road, an oncoming NPC vehicle travels in the opposite direction in its lane. Vehicle 1 continues straight.
-Vehicle 1 goes straight through an intersection. On the exit road, a cyclist waits at the left edge. When Vehicle 1 gets within 9 meters, the cyclist starts moving along the lane in the same direction as Vehicle 1.

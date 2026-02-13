@@ -619,11 +619,19 @@ class LeaderboardEvaluator(object):
                 config = route_indexer.next()
                 if args.ego_num > 1:
                     config.multi_traj = [config.trajectory]
+                    config.multi_traj_yaws = [getattr(config, "trajectory_yaws", None)]
+                    config.multi_traj_pitches = [getattr(config, "trajectory_pitches", None)]
+                    config.multi_traj_rolls = [getattr(config, "trajectory_rolls", None)]
+                    config.multi_traj_times = [getattr(config, "trajectory_times", None)]
                     for i in range(1,args.ego_num):
                         route_indexer_other = route_indexer_dict[i]
                         route_indexer_dict[i].peek()
                         config_other = route_indexer_dict[i].next()
                         config.multi_traj.append(config_other.trajectory)
+                        config.multi_traj_yaws.append(getattr(config_other, "trajectory_yaws", None))
+                        config.multi_traj_pitches.append(getattr(config_other, "trajectory_pitches", None))
+                        config.multi_traj_rolls.append(getattr(config_other, "trajectory_rolls", None))
+                        config.multi_traj_times.append(getattr(config_other, "trajectory_times", None))
 
                 # if route_indexer_1 is not None:
                 #     route_indexer_1.peek()

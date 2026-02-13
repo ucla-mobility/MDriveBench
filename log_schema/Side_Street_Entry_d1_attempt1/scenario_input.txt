@@ -1,4 +1,0 @@
-Category: Side Street Entry
-Difficulty: 1
-Town: Town05
-Text: Vehicle 1 approaches from a perpendicular road and goes straight through the intersection. Vehicle 2 approaches on the main road and goes straight through the intersection. 3 traffic cones on Vehicle 1's exit road at the right edge of the lane.

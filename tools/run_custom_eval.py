@@ -7,9 +7,12 @@ import argparse
 import json
 import os
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,9 +47,28 @@ CLOUDY_WEATHER = {
     "fog_falloff": 1.5,
 }
 
+OVERCAST_WEATHER = {
+    "cloudiness": 100.0,
+    "precipitation": 0.0,
+    "precipitation_deposits": 0.0,
+    "wind_intensity": 25.0,
+    "sun_azimuth_angle": 210.0,
+    "sun_altitude_angle": 45.0,
+    "wetness": 20.0,
+    "fog_distance": 60.0,
+    "fog_density": 20.0,
+    "fog_falloff": 1.5,
+}
+
 DEFAULT_NPC_PARAMETER = (
     "simulation/leaderboard/leaderboard/scenarios/scenario_parameter_Interdrive_npc.yaml"
 )
+
+CARLA_STARTUP_TIMEOUT = 60.0
+CARLA_RESTART_WAIT = 2.0
+CARLA_CRASH_MULTIPLIER = 2.0
+CARLA_PORT_TRIES = 8
+CARLA_PORT_STEP = 1
 
 
 @dataclass
@@ -90,6 +112,10 @@ PLANNER_SPECS: dict[str, PlannerSpec] = {
         agent_config="simulation/leaderboard/team_code/agent_config/pnp_config_codriving_5_10.yaml",
     ),
     "tcp": PlannerSpec(
+        agent="simulation/leaderboard/team_code/tcp_agent.py",
+        agent_config="simulation/leaderboard/team_code/agent_config/tcp_5_10_config.yaml",
+    ),
+    "log-replay": PlannerSpec(
         agent="simulation/leaderboard/team_code/tcp_agent.py",
         agent_config="simulation/leaderboard/team_code/agent_config/tcp_5_10_config.yaml",
     ),
@@ -142,6 +168,21 @@ def parse_args() -> argparse.Namespace:
         help="Folder tag under results/. Defaults to scenario name.",
     )
     parser.add_argument(
+        "--results-subdir",
+        help=(
+            "Optional subfolder appended under results tag. Useful for multi-scenario runs "
+            "to keep a shared results tag with per-scenario subfolders."
+        ),
+    )
+    parser.add_argument(
+        "--routes-leaf",
+        default=None,
+        help=(
+            "Optional leaf subfolder name to locate routes inside each scenario folder. "
+            "If set, will look for <routes-dir>/*/<routes-leaf> before falling back to <routes-dir>/*."
+        ),
+    )
+    parser.add_argument(
         "--ego-num",
         type=int,
         help="Override the number of ego vehicles (auto-detected otherwise).",
@@ -152,6 +193,44 @@ def parse_args() -> argparse.Namespace:
         type=int,
         dest="tm_port",
         help="Traffic Manager port (defaults to port + 5).",
+    )
+    parser.add_argument(
+        "--start-carla",
+        action="store_true",
+        help="Launch a local CARLA server from CARLA_ROOT/carla912 before evaluation.",
+    )
+    parser.add_argument(
+        "--carla-arg",
+        action="append",
+        default=[],
+        help="Extra arguments to pass to CarlaUE4.sh (repeatable).",
+    )
+    parser.add_argument(
+        "--carla-port-tries",
+        type=int,
+        default=CARLA_PORT_TRIES,
+        help="How many ports to try if the desired CARLA port is already in use.",
+    )
+    parser.add_argument(
+        "--carla-port-step",
+        type=int,
+        default=CARLA_PORT_STEP,
+        help="Port increment to use when searching for a free CARLA port.",
+    )
+    parser.add_argument(
+        "--carla-crash-multiplier",
+        type=float,
+        default=CARLA_CRASH_MULTIPLIER,
+        help=(
+            "If a scenario runs longer than timeout * multiplier (and other factors), "
+            "assume CARLA has crashed and restart it (multi-scenario runs only)."
+        ),
+    )
+    parser.add_argument(
+        "--carla-restart-wait",
+        type=float,
+        default=CARLA_RESTART_WAIT,
+        help="Seconds to wait after restarting CARLA before starting the next scenario.",
     )
     parser.add_argument(
         "--scenario-parameter",
@@ -185,6 +264,93 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--track", default="SENSORS", help="Leaderboard track name.")
     parser.add_argument("--timeout", type=float, default=600.0, help="Route timeout.")
     parser.add_argument("--debug", action="store_true", help="Enable debug output.")
+    parser.add_argument(
+        "--capture-actor-images",
+        action="store_true",
+        help="Save a snapshot image for each spawned custom actor.",
+    )
+    parser.add_argument(
+        "--normalize-actor-z",
+        action="store_true",
+        help="Adjust custom actor Z to nearest ground height without changing x/y or rotation.",
+    )
+    parser.add_argument(
+        "--image-save-interval",
+        type=int,
+        default=None,
+        help="Frames between saved images for TCP/log-replay (env: TCP_SAVE_INTERVAL).",
+    )
+    parser.add_argument(
+        "--rgb-width",
+        type=int,
+        default=None,
+        help="Override TCP front RGB width (env: TCP_RGB_WIDTH).",
+    )
+    parser.add_argument(
+        "--rgb-height",
+        type=int,
+        default=None,
+        help="Override TCP front RGB height (env: TCP_RGB_HEIGHT).",
+    )
+    parser.add_argument(
+        "--rgb-fov",
+        type=float,
+        default=None,
+        help="Override TCP front RGB FOV (env: TCP_RGB_FOV).",
+    )
+    parser.add_argument(
+        "--bev-width",
+        type=int,
+        default=None,
+        help="Override TCP BEV camera width (env: TCP_BEV_WIDTH).",
+    )
+    parser.add_argument(
+        "--bev-height",
+        type=int,
+        default=None,
+        help="Override TCP BEV camera height (env: TCP_BEV_HEIGHT).",
+    )
+    parser.add_argument(
+        "--bev-fov",
+        type=float,
+        default=None,
+        help="Override TCP BEV camera FOV (env: TCP_BEV_FOV).",
+    )
+    parser.add_argument(
+        "--log-replay-actors",
+        action="store_true",
+        help="Replay custom actors using per-waypoint timing if present in XML.",
+    )
+    parser.add_argument(
+        "--normalize-ego-z",
+        action="store_true",
+        help="Snap ego vehicle Z to nearest driving road height before spawning.",
+    )
+    parser.add_argument(
+        "--align-ego-routes",
+        action="store_true",
+        help=(
+            "Align ego route waypoints to the CARLA map using the scenario_generator "
+            "route alignment module (uses CARLA GRP to snap headings/lanes)."
+        ),
+    )
+    parser.add_argument(
+        "--align-ego-host",
+        default="127.0.0.1",
+        help="CARLA host for ego route alignment (default: 127.0.0.1).",
+    )
+    parser.add_argument(
+        "--align-ego-port",
+        type=int,
+        default=None,
+        help="CARLA port for ego route alignment (default: --port).",
+    )
+    parser.add_argument(
+        "--align-ego-sampling-resolution",
+        type=float,
+        default=2.0,
+        help="GRP sampling resolution (meters) used for ego route alignment.",
+    )
     parser.add_argument(
         "--llm-port",
         type=int,
@@ -244,6 +410,12 @@ def parse_args() -> argparse.Namespace:
         help="Also evaluate the same scenario under heavy-cloud conditions.",
     )
     parser.add_argument(
+        "--weather",
+        choices=["clear", "cloudy", "overcast", "night"],
+        default=None,
+        help="Run a single weather variant and tag results with the weather name.",
+    )
+    parser.add_argument(
         "--add-npcs",
         action="store_true",
         help="Also evaluate with CARLA's random traffic/pedestrians enabled.",
@@ -264,6 +436,181 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     return parser.parse_args()
+
+
+def is_port_open(host: str, port: int, timeout: float = 1.0) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def wait_for_port(host: str, port: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if is_port_open(host, port, timeout=1.0):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def wait_for_port_close(host: str, port: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not is_port_open(host, port, timeout=1.0):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def find_available_port(host: str, preferred_port: int, tries: int, step: int) -> int:
+    attempts = max(1, tries)
+    step = max(1, step)
+    for idx in range(attempts):
+        port = preferred_port + idx * step
+        if port > 65535:
+            break
+        if not is_port_open(host, port, timeout=1.0):
+            return port
+    raise RuntimeError(
+        f"No free CARLA port found starting at {preferred_port} "
+        f"(tries={attempts}, step={step})."
+    )
+
+
+def should_add_offscreen(extra_args: List[str]) -> bool:
+    if os.environ.get("DISPLAY"):
+        return False
+    lowered = {arg.lower() for arg in extra_args}
+    if any("renderoffscreen" in arg for arg in lowered):
+        return False
+    if any("windowed" in arg for arg in lowered):
+        return False
+    return True
+
+
+class CarlaProcessManager:
+    def __init__(
+        self,
+        carla_root: Path,
+        host: str,
+        port: int,
+        extra_args: List[str],
+        env: Dict[str, str],
+        port_tries: int,
+        port_step: int,
+    ) -> None:
+        self.carla_root = carla_root
+        self.host = host
+        self.port = port
+        self.extra_args = list(extra_args)
+        self.env = env
+        self.port_tries = port_tries
+        self.port_step = port_step
+        self.process: subprocess.Popen | None = None
+
+    def is_running(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def start(self) -> int:
+        if self.is_running():
+            return self.port
+        carla_script = self.carla_root / "CarlaUE4.sh"
+        if not carla_script.exists():
+            raise FileNotFoundError(carla_script)
+        if is_port_open(self.host, self.port):
+            new_port = find_available_port(
+                self.host,
+                self.port,
+                tries=self.port_tries,
+                step=self.port_step,
+            )
+            if new_port != self.port:
+                print(
+                    f"[INFO] Port {self.port} is busy. Switching CARLA to port {new_port}."
+                )
+                self.port = new_port
+        cmd = [str(carla_script), f"--world-port={self.port}"]
+        if should_add_offscreen(self.extra_args):
+            cmd.append("-RenderOffScreen")
+        cmd.extend(self.extra_args)
+        print(f"[INFO] Starting CARLA: {' '.join(cmd)}")
+        self.process = subprocess.Popen(
+            cmd,
+            cwd=str(self.carla_root),
+            env=self.env,
+        )
+        if not wait_for_port(self.host, self.port, CARLA_STARTUP_TIMEOUT):
+            print(
+                f"[WARN] CARLA port {self.port} did not open within {CARLA_STARTUP_TIMEOUT:.0f}s."
+            )
+        return self.port
+
+    def stop(self, timeout: float = 15.0) -> None:
+        if self.process is None:
+            return
+        if self.process.poll() is None:
+            print("[INFO] Stopping CARLA...")
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=timeout)
+        self.process = None
+
+    def restart(self, wait_seconds: float) -> int:
+        self.stop()
+        wait_for_port_close(self.host, self.port, timeout=10.0)
+        time.sleep(max(0.0, wait_seconds))
+        return self.start()
+
+
+_active_carla_manager: CarlaProcessManager | None = None
+_signal_handlers_installed = False
+
+
+def _install_signal_handlers() -> None:
+    global _signal_handlers_installed
+    if _signal_handlers_installed:
+        return
+
+    def _handler(signum: int, frame: object | None) -> None:
+        if _active_carla_manager is not None:
+            _active_carla_manager.stop()
+        if signum == signal.SIGINT:
+            raise KeyboardInterrupt
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _handler)
+    signal.signal(signal.SIGTERM, _handler)
+    _signal_handlers_installed = True
+
+
+def count_variants(args: argparse.Namespace) -> int:
+    if args.weather:
+        return 1
+    count = 1
+    if args.add_night:
+        count += 1
+    if args.add_cloudy:
+        count += 1
+    if args.add_npcs:
+        count += 1
+    return count
+
+
+def count_negotiation_modes(args: argparse.Namespace) -> int:
+    return 2 if args.add_no_negotiation else 1
+
+
+def estimate_scenario_timeout(args: argparse.Namespace, routes_dir: Path) -> float:
+    ego_routes = detect_ego_routes(routes_dir)
+    route_count = max(1, ego_routes)
+    expected_runs = max(1, args.repetitions) * count_variants(args) * count_negotiation_modes(args)
+    base = float(args.timeout) * route_count * expected_runs
+    return base * float(args.carla_crash_multiplier)
 
 
 def append_pythonpath(env: Dict[str, str], path: Path) -> None:
@@ -328,7 +675,7 @@ def detect_ego_routes(routes_dir: Path) -> int:
     return count
 
 
-def detect_scenario_subfolders(routes_dir: Path) -> List[Path]:
+def detect_scenario_subfolders(routes_dir: Path, routes_leaf: str | None = None) -> List[tuple[Path, str]]:
     """
     Check if routes_dir contains multiple scenario subfolders (each with their own ego routes).
     
@@ -346,22 +693,36 @@ def detect_scenario_subfolders(routes_dir: Path) -> List[Path]:
             continue
     
     # Check subfolders for ego routes
-    scenario_folders = []
+    scenario_folders: list[tuple[Path, str]] = []
     for subdir in sorted(routes_dir.iterdir()):
         if not subdir.is_dir():
             continue
-        # Check if this subfolder has ego routes
-        has_ego = False
-        for xml_path in subdir.rglob("*.xml"):
-            try:
-                _, _, role = parse_route_metadata(xml_path.read_bytes())
-                if role == "ego":
-                    has_ego = True
-                    break
-            except Exception:
-                continue
-        if has_ego:
-            scenario_folders.append(subdir)
+        candidates = []
+        if routes_leaf:
+            leaf = subdir / routes_leaf
+            if leaf.is_dir():
+                candidates.append(leaf)
+        candidates.append(subdir)
+
+        selected = None
+        selected_name = None
+        for candidate in candidates:
+            has_ego = False
+            for xml_path in candidate.rglob("*.xml"):
+                try:
+                    _, _, role = parse_route_metadata(xml_path.read_bytes())
+                    if role == "ego":
+                        has_ego = True
+                        break
+                except Exception:
+                    continue
+            if has_ego:
+                selected = candidate
+                selected_name = subdir.name
+                break
+
+        if selected is not None and selected_name is not None:
+            scenario_folders.append((selected, selected_name))
     
     return scenario_folders
 
@@ -410,7 +771,79 @@ def clone_routes_with_weather_override(
     return clone_root, temp_dir
 
 
+def align_ego_routes_in_directory(
+    routes_dir: Path,
+    town: str,
+    carla_host: str,
+    carla_port: int,
+    sampling_resolution: float,
+) -> None:
+    """
+    Align only ego route XMLs in routes_dir using the scenario_generator alignment module.
+    """
+    try:
+        from scenario_generator.pipeline.step_07_route_alignment import align_route_file
+        from scenario_generator.pipeline.step_07_route_alignment import main as align_mod
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"[WARN] Ego route alignment unavailable (import failed): {exc}")
+        return
+
+    try:
+        carla, GlobalRoutePlanner, GlobalRoutePlannerDAO = align_mod._ensure_carla()
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"[WARN] Ego route alignment unavailable (CARLA import failed): {exc}")
+        return
+
+    try:
+        print(f"[INFO] Aligning ego routes with CARLA at {carla_host}:{carla_port} (town={town})...")
+        client = carla.Client(carla_host, carla_port)
+        client.set_timeout(30.0)
+        world = client.get_world()
+        current_map = world.get_map().name
+        current_map_base = current_map.split("/")[-1] if "/" in current_map else current_map
+        if current_map_base != town:
+            world = client.load_world(town)
+        carla_map = world.get_map()
+
+        try:
+            grp = GlobalRoutePlanner(carla_map, sampling_resolution)
+        except TypeError:
+            grp = GlobalRoutePlanner(GlobalRoutePlannerDAO(carla_map, sampling_resolution))
+        if hasattr(grp, "setup"):
+            grp.setup()
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"[WARN] Ego route alignment failed to initialize CARLA/GRP: {exc}")
+        return
+
+    ego_xmls: List[Path] = []
+    for xml_path in routes_dir.glob("*.xml"):
+        try:
+            _, _, role = parse_route_metadata(xml_path.read_bytes())
+        except Exception:
+            continue
+        if role == "ego":
+            ego_xmls.append(xml_path)
+
+    if not ego_xmls:
+        print(f"[WARN] No ego route XMLs found for alignment in {routes_dir}.")
+        return
+
+    for xml_path in ego_xmls:
+        try:
+            orig, aligned = align_route_file(
+                xml_path,
+                carla_map,
+                grp,
+                backup=False,
+            )
+            if orig != aligned:
+                print(f"[INFO] Aligned {xml_path.name}: {orig} -> {aligned} waypoints")
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[WARN] Failed to align {xml_path.name}: {exc}")
+
+
 def main() -> None:
+    global _active_carla_manager
     args = parse_args()
     if args.planner:
         planner = PLANNER_SPECS[args.planner]
@@ -424,6 +857,13 @@ def main() -> None:
         if args.agent_config is None:
             args.agent_config = DEFAULT_AGENT_CONFIG
     repo_root = Path(__file__).resolve().parents[1]
+    # Allow overriding CARLA install via environment; fallback to bundled carla912.
+    carla_root = Path(os.environ.get("CARLA_ROOT", repo_root / "carla912")).expanduser().resolve()
+    if not carla_root.exists():
+        raise FileNotFoundError(
+            f"CARLA_ROOT '{carla_root}' does not exist. "
+            "Set CARLA_ROOT to a valid CARLA installation (with PythonAPI/carla/dist)."
+        )
 
     scenario_summary = None
     routes_dir: Path
@@ -449,57 +889,135 @@ def main() -> None:
             raise FileNotFoundError(routes_dir)
         
         # Check if routes_dir contains multiple scenario subfolders
-        scenario_subfolders = detect_scenario_subfolders(routes_dir)
+        scenario_subfolders = detect_scenario_subfolders(routes_dir, args.routes_leaf)
         if scenario_subfolders:
+            base_results_tag = args.results_tag or args.scenario_name or routes_dir.name
             print(f"Detected {len(scenario_subfolders)} scenario subfolders in {routes_dir}:")
-            for sf in scenario_subfolders:
-                print(f"  - {sf.name}")
+            for sf_path, sf_name in scenario_subfolders:
+                print(f"  - {sf_name} ({sf_path})")
             print("\nRunning each scenario sequentially...\n")
-            
-            # Run each subfolder as a separate scenario
-            for i, subfolder in enumerate(scenario_subfolders, 1):
-                print(f"\n{'='*60}")
-                print(f"SCENARIO {i}/{len(scenario_subfolders)}: {subfolder.name}")
-                print(f"{'='*60}")
-                
-                # Build a new command to run this subfolder
-                new_cmd = [sys.executable, __file__]
-                new_cmd.extend(["--routes-dir", str(subfolder)])
-                new_cmd.extend(["--port", str(args.port)])
-                if args.planner:
-                    new_cmd.extend(["--planner", args.planner])
-                if args.agent:
-                    new_cmd.extend(["--agent", args.agent])
-                if args.agent_config:
-                    new_cmd.extend(["--agent-config", args.agent_config])
-                new_cmd.extend(["--repetitions", str(args.repetitions)])
-                new_cmd.extend(["--track", args.track])
-                new_cmd.extend(["--timeout", str(args.timeout)])
-                new_cmd.extend(["--carla-seed", str(args.carla_seed)])
-                new_cmd.extend(["--traffic-seed", str(args.traffic_seed)])
-                if args.debug:
-                    new_cmd.append("--debug")
-                if args.resume:
-                    new_cmd.append("--resume")
-                if not args.skip_existed:
-                    new_cmd.append("--no-skip-existed")
-                if args.add_night:
-                    new_cmd.append("--add-night")
-                if args.add_cloudy:
-                    new_cmd.append("--add-cloudy")
-                if args.add_npcs:
-                    new_cmd.append("--add-npcs")
-                if args.add_no_negotiation:
-                    new_cmd.append("--add-no-negotiation")
-                if args.dry_run:
-                    new_cmd.append("--dry-run")
-                
-                try:
-                    subprocess.run(new_cmd, check=True, env=os.environ.copy())
-                except subprocess.CalledProcessError as e:
-                    print(f"[WARNING] Scenario {subfolder.name} failed with exit code {e.returncode}")
-                    continue
-            
+
+            carla_manager = None
+            if args.start_carla and not args.dry_run:
+                carla_manager = CarlaProcessManager(
+                    carla_root=carla_root,
+                    host="127.0.0.1",
+                    port=args.port,
+                    extra_args=args.carla_arg,
+                    env=os.environ.copy(),
+                    port_tries=args.carla_port_tries,
+                    port_step=args.carla_port_step,
+                )
+                _active_carla_manager = carla_manager
+                _install_signal_handlers()
+                selected_port = carla_manager.start()
+                if selected_port != args.port:
+                    args.port = selected_port
+
+            try:
+                # Run each subfolder as a separate scenario
+                for i, (subfolder, sub_name) in enumerate(scenario_subfolders, 1):
+                    print(f"\n{'='*60}")
+                    print(f"SCENARIO {i}/{len(scenario_subfolders)}: {sub_name}")
+                    print(f"{'='*60}")
+
+                    if carla_manager and not carla_manager.is_running():
+                        print("[WARN] CARLA process is not running. Restarting...")
+                        selected_port = carla_manager.restart(args.carla_restart_wait)
+                        if selected_port != args.port:
+                            args.port = selected_port
+
+                    # Build a new command to run this subfolder
+                    new_cmd = [sys.executable, __file__]
+                    new_cmd.extend(["--routes-dir", str(subfolder)])
+                    new_cmd.extend(["--results-tag", base_results_tag])
+                    new_cmd.extend(["--results-subdir", sub_name])
+                    new_cmd.extend(["--scenario-name", sub_name])
+                    new_cmd.extend(["--port", str(args.port)])
+                    if args.align_ego_routes:
+                        new_cmd.append("--align-ego-routes")
+                        new_cmd.extend(["--align-ego-host", str(args.align_ego_host)])
+                        if args.align_ego_port is not None:
+                            new_cmd.extend(["--align-ego-port", str(args.align_ego_port)])
+                        new_cmd.extend(
+                            [
+                                "--align-ego-sampling-resolution",
+                                str(args.align_ego_sampling_resolution),
+                            ]
+                        )
+                    if args.planner:
+                        new_cmd.extend(["--planner", args.planner])
+                    if args.agent:
+                        new_cmd.extend(["--agent", args.agent])
+                    if args.agent_config:
+                        new_cmd.extend(["--agent-config", args.agent_config])
+                    new_cmd.extend(["--repetitions", str(args.repetitions)])
+                    new_cmd.extend(["--track", args.track])
+                    new_cmd.extend(["--timeout", str(args.timeout)])
+                    new_cmd.extend(["--carla-seed", str(args.carla_seed)])
+                    new_cmd.extend(["--traffic-seed", str(args.traffic_seed)])
+                    if args.debug:
+                        new_cmd.append("--debug")
+                    if args.resume:
+                        new_cmd.append("--resume")
+                    if not args.skip_existed:
+                        new_cmd.append("--no-skip-existed")
+                    if args.add_night:
+                        new_cmd.append("--add-night")
+                    if args.add_cloudy:
+                        new_cmd.append("--add-cloudy")
+                    if args.weather:
+                        new_cmd.extend(["--weather", args.weather])
+                    if args.add_npcs:
+                        new_cmd.append("--add-npcs")
+                    if args.add_no_negotiation:
+                        new_cmd.append("--add-no-negotiation")
+                    if args.dry_run:
+                        new_cmd.append("--dry-run")
+                    if args.capture_actor_images:
+                        new_cmd.append("--capture-actor-images")
+                    if args.normalize_actor_z:
+                        new_cmd.append("--normalize-actor-z")
+                    if args.normalize_ego_z:
+                        new_cmd.append("--normalize-ego-z")
+
+                    timeout_seconds = None
+                    if not args.dry_run and args.carla_crash_multiplier > 0:
+                        timeout_seconds = estimate_scenario_timeout(args, subfolder)
+                        print(
+                            f"[INFO] Scenario timeout watchdog: {timeout_seconds:.1f}s"
+                        )
+
+                    try:
+                        subprocess.run(
+                            new_cmd,
+                            check=True,
+                            env=os.environ.copy(),
+                            timeout=timeout_seconds,
+                        )
+                    except subprocess.TimeoutExpired:
+                        print(
+                            f"[WARNING] Scenario {subfolder.name} exceeded the watchdog timeout. "
+                            "Assuming CARLA crashed."
+                        )
+                        if carla_manager:
+                            print("[INFO] Restarting CARLA before continuing.")
+                            selected_port = carla_manager.restart(args.carla_restart_wait)
+                            if selected_port != args.port:
+                                args.port = selected_port
+                        else:
+                            print("[WARNING] CARLA auto-restart is disabled (use --start-carla).")
+                        continue
+                    except subprocess.CalledProcessError as e:
+                        print(
+                            f"[WARNING] Scenario {subfolder.name} failed with exit code {e.returncode}"
+                        )
+                        continue
+            finally:
+                if carla_manager:
+                    carla_manager.stop()
+                _active_carla_manager = None
+
             print(f"\n{'='*60}")
             print(f"Completed all {len(scenario_subfolders)} scenarios")
             print(f"{'='*60}")
@@ -516,46 +1034,76 @@ def main() -> None:
     ego_num = args.ego_num or auto_ego_num
     scenario_name = scenario_name or routes_dir.name
     results_tag = args.results_tag or scenario_name
+    if args.results_subdir:
+        results_tag = f"{results_tag}/{args.results_subdir}"
 
-    variants: list[VariantSpec] = [
-        VariantSpec(
-            label="baseline",
-            suffix=None,
-            description="Default daylight / clear run.",
-            scenario_parameter=args.scenario_parameter,
-            weather=None,
-        )
-    ]
-    if args.add_night:
+    variants: list[VariantSpec] = []
+    if args.weather:
+        weather_key = args.weather.lower()
+        if weather_key == "night":
+            weather_override = NIGHT_WEATHER
+            desc = "Night-time lighting (sun altitude override)."
+        elif weather_key == "overcast":
+            weather_override = OVERCAST_WEATHER
+            desc = "Overcast daylight (reduced sun + heavy cloud cover)."
+        elif weather_key == "cloudy":
+            weather_override = CLOUDY_WEATHER
+            desc = "Daylight with heavy cloud cover."
+        elif weather_key == "clear":
+            weather_override = None
+            desc = "Default daylight / clear run."
+        else:
+            weather_override = None
+            desc = "Default daylight / clear run."
         variants.append(
             VariantSpec(
-                label="night",
-                suffix="night",
-                description="Night-time lighting (sun altitude override).",
-                weather=NIGHT_WEATHER,
+                label=weather_key,
+                suffix=weather_key,
+                description=desc,
                 scenario_parameter=args.scenario_parameter,
+                weather=weather_override,
             )
         )
-    if args.add_cloudy:
+    else:
         variants.append(
             VariantSpec(
-                label="cloudy",
-                suffix="cloudy",
-                description="Daylight with heavy cloud cover.",
-                weather=CLOUDY_WEATHER,
+                label="baseline",
+                suffix=None,
+                description="Default daylight / clear run.",
                 scenario_parameter=args.scenario_parameter,
-            )
-        )
-    if args.add_npcs:
-        variants.append(
-            VariantSpec(
-                label="npcs",
-                suffix="npcs",
-                description="Interdrive NPC parameter file (random traffic/pedestrians).",
-                scenario_parameter=args.npc_scenario_parameter,
                 weather=None,
             )
         )
+        if args.add_night:
+            variants.append(
+                VariantSpec(
+                    label="night",
+                    suffix="night",
+                    description="Night-time lighting (sun altitude override).",
+                    weather=NIGHT_WEATHER,
+                    scenario_parameter=args.scenario_parameter,
+                )
+            )
+        if args.add_cloudy:
+            variants.append(
+                VariantSpec(
+                    label="cloudy",
+                    suffix="cloudy",
+                    description="Daylight with heavy cloud cover.",
+                    weather=CLOUDY_WEATHER,
+                    scenario_parameter=args.scenario_parameter,
+                )
+            )
+        if args.add_npcs:
+            variants.append(
+                VariantSpec(
+                    label="npcs",
+                    suffix="npcs",
+                    description="Interdrive NPC parameter file (random traffic/pedestrians).",
+                    scenario_parameter=args.npc_scenario_parameter,
+                    weather=None,
+                )
+            )
 
     negotiation_modes: list[NegotiationMode] = [
         NegotiationMode(
@@ -575,13 +1123,6 @@ def main() -> None:
             )
         )
 
-    # Allow overriding CARLA install via environment; fallback to bundled carla912.
-    carla_root = Path(os.environ.get("CARLA_ROOT", repo_root / "carla912")).expanduser().resolve()
-    if not carla_root.exists():
-        raise FileNotFoundError(
-            f"CARLA_ROOT '{carla_root}' does not exist. "
-            "Set CARLA_ROOT to a valid CARLA installation (with PythonAPI/carla/dist)."
-        )
     leaderboard_root = repo_root / "simulation" / "leaderboard"
     scenario_runner_root = repo_root / "simulation" / "scenario_runner"
     data_root = repo_root / "simulation" / "assets" / "v2xverse_debug"
@@ -649,119 +1190,213 @@ def main() -> None:
             mode_note = " (no negotiation)" if nego.disable_comm else ""
             print(f"  - {base_name}{mode_note}: {spec.description} [{nego.description}]")
 
-    for spec, negotiation in run_matrix:
-        variant_routes_dir, temp_dir = clone_routes_with_weather_override(routes_dir, spec.weather)
-        try:
-            env = env_template.copy()
-            env["ROUTES"] = str(variant_routes_dir)
-            env["ROUTES_DIR"] = str(variant_routes_dir)
+    carla_manager = None
+    if args.start_carla and not args.dry_run:
+        carla_manager = CarlaProcessManager(
+            carla_root=carla_root,
+            host="127.0.0.1",
+            port=args.port,
+            extra_args=args.carla_arg,
+            env=os.environ.copy(),
+            port_tries=args.carla_port_tries,
+            port_step=args.carla_port_step,
+        )
+        _active_carla_manager = carla_manager
+        _install_signal_handlers()
+        selected_port = carla_manager.start()
+        if selected_port != args.port:
+            args.port = selected_port
 
-            variant_manifest = variant_routes_dir / "actors_manifest.json"
-            if variant_manifest.exists():
-                env["CUSTOM_ACTOR_MANIFEST"] = str(variant_manifest)
-                actors_root = variant_manifest.parent / "actors"
-                if actors_root.exists():
-                    env["CUSTOM_ACTOR_ROOT"] = str(actors_root)
+    try:
+        for spec, negotiation in run_matrix:
+            if carla_manager and not carla_manager.is_running():
+                print("[WARN] CARLA process is not running. Restarting...")
+                carla_manager.restart(args.carla_restart_wait)
+
+            variant_routes_dir, temp_dir = clone_routes_with_weather_override(routes_dir, spec.weather)
+            try:
+                if args.align_ego_routes:
+                    if temp_dir is None:
+                        temp_dir = tempfile.TemporaryDirectory(prefix=f"{routes_dir.name}_align_")
+                        clone_root = Path(temp_dir.name) / routes_dir.name
+                        shutil.copytree(routes_dir, clone_root)
+                        variant_routes_dir = clone_root
+
+                    align_port = args.align_ego_port or args.port
+                    town = None
+                    for xml_path in variant_routes_dir.glob("*.xml"):
+                        try:
+                            _, xml_town, role = parse_route_metadata(xml_path.read_bytes())
+                        except Exception:
+                            continue
+                        if role == "ego":
+                            town = xml_town
+                            break
+                    if town:
+                        align_ego_routes_in_directory(
+                            routes_dir=variant_routes_dir,
+                            town=town,
+                            carla_host=str(args.align_ego_host),
+                            carla_port=int(align_port),
+                            sampling_resolution=float(args.align_ego_sampling_resolution),
+                        )
+                    else:
+                        print("[WARN] Ego route alignment requested, but no ego XMLs found to infer town.")
+
+                env = env_template.copy()
+                env["ROUTES"] = str(variant_routes_dir)
+                env["ROUTES_DIR"] = str(variant_routes_dir)
+
+                variant_manifest = variant_routes_dir / "actors_manifest.json"
+                if variant_manifest.exists():
+                    env["CUSTOM_ACTOR_MANIFEST"] = str(variant_manifest)
+                    actors_root = variant_manifest.parent / "actors"
+                    if actors_root.exists():
+                        env["CUSTOM_ACTOR_ROOT"] = str(actors_root)
+                    else:
+                        env.pop("CUSTOM_ACTOR_ROOT", None)
+                    behavior_path = variant_manifest.parent / "actors_behavior.json"
+                    if behavior_path.exists():
+                        env["CUSTOM_ACTOR_BEHAVIORS"] = str(behavior_path)
+                    else:
+                        env.pop("CUSTOM_ACTOR_BEHAVIORS", None)
                 else:
+                    env.pop("CUSTOM_ACTOR_MANIFEST", None)
                     env.pop("CUSTOM_ACTOR_ROOT", None)
-                behavior_path = variant_manifest.parent / "actors_behavior.json"
-                if behavior_path.exists():
-                    env["CUSTOM_ACTOR_BEHAVIORS"] = str(behavior_path)
-                else:
                     env.pop("CUSTOM_ACTOR_BEHAVIORS", None)
-            else:
-                env.pop("CUSTOM_ACTOR_MANIFEST", None)
-                env.pop("CUSTOM_ACTOR_ROOT", None)
-                env.pop("CUSTOM_ACTOR_BEHAVIORS", None)
 
-            if negotiation.disable_comm:
-                env["COLMDRIVER_DISABLE_NEGOTIATION"] = "1"
-            else:
-                env.pop("COLMDRIVER_DISABLE_NEGOTIATION", None)
+                if negotiation.disable_comm:
+                    env["COLMDRIVER_DISABLE_NEGOTIATION"] = "1"
+                else:
+                    env.pop("COLMDRIVER_DISABLE_NEGOTIATION", None)
 
-            # Set LLM/VLM ports for CoLMDriver
-            env["COLMDRIVER_LLM_PORT"] = str(args.llm_port)
-            env["COLMDRIVER_VLM_PORT"] = str(args.vlm_port)
+                # Set LLM/VLM ports for CoLMDriver
+                env["COLMDRIVER_LLM_PORT"] = str(args.llm_port)
+                env["COLMDRIVER_VLM_PORT"] = str(args.vlm_port)
+                if args.debug:
+                    env.setdefault("CUSTOM_LOG_REPLAY_DEBUG", "1")
+                    env.setdefault("CUSTOM_LOG_REPLAY_DEBUG_INTERVAL", "2.0")
 
-            suffix_parts: list[str] = []
-            if spec.suffix:
-                suffix_parts.append(spec.suffix)
-            if negotiation.suffix:
-                suffix_parts.append(negotiation.suffix)
-            variant_suffix = "_".join(suffix_parts) if suffix_parts else None
-            variant_results_tag = results_tag if not variant_suffix else f"{results_tag}_{variant_suffix}"
-            result_root = repo_root / "results" / "results_driving_custom" / variant_results_tag
-            save_path = result_root / "image"
-            checkpoint_endpoint = result_root / "results.json"
-            save_path.mkdir(parents=True, exist_ok=True)
-            checkpoint_endpoint.parent.mkdir(parents=True, exist_ok=True)
+                suffix_parts: list[str] = []
+                if spec.suffix:
+                    suffix_parts.append(spec.suffix)
+                if negotiation.suffix:
+                    suffix_parts.append(negotiation.suffix)
+                variant_suffix = "_".join(suffix_parts) if suffix_parts else None
+                variant_results_tag = results_tag if not variant_suffix else f"{results_tag}_{variant_suffix}"
+                result_root = repo_root / "results" / "results_driving_custom" / variant_results_tag
+                save_path = result_root / "image"
+                checkpoint_endpoint = result_root / "results.json"
+                save_path.mkdir(parents=True, exist_ok=True)
+                checkpoint_endpoint.parent.mkdir(parents=True, exist_ok=True)
 
-            env["RESULT_ROOT"] = str(result_root)
-            env["SAVE_PATH"] = str(save_path)
-            env["CHECKPOINT_ENDPOINT"] = str(checkpoint_endpoint)
+                env["RESULT_ROOT"] = str(result_root)
+                env["SAVE_PATH"] = str(save_path)
+                env["CHECKPOINT_ENDPOINT"] = str(checkpoint_endpoint)
+                if args.capture_actor_images:
+                    actor_image_dir = result_root / "actor_images"
+                    actor_image_dir.mkdir(parents=True, exist_ok=True)
+                    env["CUSTOM_ACTOR_IMAGE_DIR"] = str(actor_image_dir)
+                else:
+                    env.pop("CUSTOM_ACTOR_IMAGE_DIR", None)
+                if args.normalize_actor_z:
+                    env["CUSTOM_ACTOR_NORMALIZE_Z"] = "1"
+                else:
+                    env.pop("CUSTOM_ACTOR_NORMALIZE_Z", None)
+                if args.image_save_interval is not None:
+                    env["TCP_SAVE_INTERVAL"] = str(args.image_save_interval)
+                if args.rgb_width is not None:
+                    env["TCP_RGB_WIDTH"] = str(args.rgb_width)
+                if args.rgb_height is not None:
+                    env["TCP_RGB_HEIGHT"] = str(args.rgb_height)
+                if args.rgb_fov is not None:
+                    env["TCP_RGB_FOV"] = str(args.rgb_fov)
+                if args.bev_width is not None:
+                    env["TCP_BEV_WIDTH"] = str(args.bev_width)
+                if args.bev_height is not None:
+                    env["TCP_BEV_HEIGHT"] = str(args.bev_height)
+                if args.bev_fov is not None:
+                    env["TCP_BEV_FOV"] = str(args.bev_fov)
+                if args.log_replay_actors:
+                    env["CUSTOM_ACTOR_LOG_REPLAY"] = "1"
+                else:
+                    env.pop("CUSTOM_ACTOR_LOG_REPLAY", None)
+                if args.planner == "log-replay":
+                    env["CUSTOM_EGO_LOG_REPLAY"] = "1"
+                    env["CUSTOM_ACTOR_LOG_REPLAY"] = "1"
+                else:
+                    env.pop("CUSTOM_EGO_LOG_REPLAY", None)
+                if args.normalize_ego_z:
+                    env["CUSTOM_EGO_NORMALIZE_Z"] = "1"
+                else:
+                    env.pop("CUSTOM_EGO_NORMALIZE_Z", None)
 
-            scenario_parameter_rel = spec.scenario_parameter or args.scenario_parameter
-            scenario_parameter_path = (repo_root / scenario_parameter_rel).resolve()
+                scenario_parameter_rel = spec.scenario_parameter or args.scenario_parameter
+                scenario_parameter_path = (repo_root / scenario_parameter_rel).resolve()
 
-            cmd: List[str] = [
-                sys.executable,
-                str(evaluator),
-                "--routes_dir",
-                str(variant_routes_dir),
-                "--ego-num",
-                str(ego_num),
-                "--scenario_parameter",
-                str(scenario_parameter_path),
-                "--agent",
-                str(agent_path),
-                "--agent-config",
-                str(agent_config_path),
-                "--port",
-                str(args.port),
-                "--trafficManagerPort",
-                str(tm_port),
-                "--scenarios",
-                str(scenarios_json),
-                "--repetitions",
-                str(args.repetitions),
-                "--track",
-                args.track,
-                "--checkpoint",
-                str(checkpoint_endpoint),
-                "--debug",
-                "1" if args.debug else "0",
-                "--record",
-                args.record,
-                "--resume",
-                "1" if args.resume else "0",
-                "--carlaProviderSeed",
-                str(args.carla_seed),
-                "--trafficManagerSeed",
-                str(args.traffic_seed),
-                "--skip_existed",
-                "1" if args.skip_existed else "0",
-                "--timeout",
-                str(args.timeout),
-            ]
+                cmd: List[str] = [
+                    sys.executable,
+                    str(evaluator),
+                    "--routes_dir",
+                    str(variant_routes_dir),
+                    "--ego-num",
+                    str(ego_num),
+                    "--scenario_parameter",
+                    str(scenario_parameter_path),
+                    "--agent",
+                    str(agent_path),
+                    "--agent-config",
+                    str(agent_config_path),
+                    "--port",
+                    str(args.port),
+                    "--trafficManagerPort",
+                    str(tm_port),
+                    "--scenarios",
+                    str(scenarios_json),
+                    "--repetitions",
+                    str(args.repetitions),
+                    "--track",
+                    args.track,
+                    "--checkpoint",
+                    str(checkpoint_endpoint),
+                    "--debug",
+                    "1" if args.debug else "0",
+                    "--record",
+                    args.record,
+                    "--resume",
+                    "1" if args.resume else "0",
+                    "--carlaProviderSeed",
+                    str(args.carla_seed),
+                    "--trafficManagerSeed",
+                    str(args.traffic_seed),
+                    "--skip_existed",
+                    "1" if args.skip_existed else "0",
+                    "--timeout",
+                    str(args.timeout),
+                ]
 
-            variant_name = spec.suffix or "baseline"
-            if negotiation.disable_comm:
-                variant_name = f"{variant_name} (no negotiation)"
-            print(f"\n=== Running variant: {variant_name} ===")
-            print("Scenario parameter:", scenario_parameter_path)
-            if spec.weather:
-                print("Weather override applied via:", variant_routes_dir)
-            print("Results will be stored under:", result_root)
-            print("Command:")
-            print("  " + " ".join(cmd))
+                variant_name = spec.suffix or "baseline"
+                if negotiation.disable_comm:
+                    variant_name = f"{variant_name} (no negotiation)"
+                print(f"\n=== Running variant: {variant_name} ===")
+                print("Scenario parameter:", scenario_parameter_path)
+                if spec.weather:
+                    print("Weather override applied via:", variant_routes_dir)
+                print("Results will be stored under:", result_root)
+                print("Command:")
+                print("  " + " ".join(cmd))
 
-            if args.dry_run:
-                continue
+                if args.dry_run:
+                    continue
 
-            subprocess.run(cmd, check=True, env=env)
-        finally:
-            if temp_dir is not None:
-                temp_dir.cleanup()
+                subprocess.run(cmd, check=True, env=env)
+            finally:
+                if temp_dir is not None:
+                    temp_dir.cleanup()
+    finally:
+        if carla_manager:
+            carla_manager.stop()
+        _active_carla_manager = None
 
 
 if __name__ == "__main__":

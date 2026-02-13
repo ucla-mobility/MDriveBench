@@ -1,1 +1,0 @@
-Vehicle 2 and Vehicle 3 both approach from the same road. Vehicle 2 continues straight. Vehicle 3 continues straight. Vehicle 1 travels and changes lanes. Vehicle 2 is in the lane to the left of Vehicle 1. 3 traffic cones on Vehicle 1's approach at the right edge of the lane.
