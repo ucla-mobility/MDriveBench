@@ -474,6 +474,32 @@ def _is_drivable_wp(wp):
 def _build_route_line_and_lane_ids(config, ego_id: int, carla_map):
     if config is None or LineString is None or carla_map is None:
         return None, set()
+
+    def _extract_xy(entry):
+        if entry is None:
+            return None
+        # carla.Location-like
+        if hasattr(entry, "x") and hasattr(entry, "y"):
+            try:
+                return float(entry.x), float(entry.y)
+            except Exception:
+                return None
+        # carla.Transform-like
+        if hasattr(entry, "location"):
+            loc = getattr(entry, "location", None)
+            if loc is not None and hasattr(loc, "x") and hasattr(loc, "y"):
+                try:
+                    return float(loc.x), float(loc.y)
+                except Exception:
+                    return None
+        # tuple/list wrappers, e.g. [location, road_option] or [[location, ...], ...]
+        if isinstance(entry, (list, tuple)):
+            for item in entry:
+                xy = _extract_xy(item)
+                if xy is not None:
+                    return xy
+        return None
+
     trajectory = None
     if hasattr(config, "multi_traj") and config.multi_traj:
         try:
@@ -482,7 +508,11 @@ def _build_route_line_and_lane_ids(config, ego_id: int, carla_map):
             trajectory = config.multi_traj[0]
     if trajectory is None:
         trajectory = config.trajectory
-    coords = [(loc.x, loc.y) for loc in trajectory if loc is not None]
+    coords = []
+    for entry in trajectory:
+        xy = _extract_xy(entry)
+        if xy is not None:
+            coords.append(xy)
     if len(coords) < 2:
         return None, set()
     route_line = LineString(coords)

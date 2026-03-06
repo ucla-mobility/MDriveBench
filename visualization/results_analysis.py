@@ -659,8 +659,35 @@ def load_ego_records(route_path: str):
             continue
         ego_records = data.get("_checkpoint", {}).get("records", [])
         if ego_records:
-            records.append(ego_records[-1])
+            records.append((ego_dir, ego_records[-1]))
     return records
+
+
+def summarize_single_record(record: Dict) -> Dict:
+    scores = record.get("scores", {})
+    meta = record.get("meta", {})
+
+    infractions_totals: Dict[str, int] = defaultdict(int)
+    infractions = record.get("infractions", {})
+    if infractions:
+        for key, events in infractions.items():
+            if isinstance(events, list):
+                if events:
+                    infractions_totals[key] += len(events)
+            elif isinstance(events, (int, float)):
+                infractions_totals[key] += int(events)
+            elif isinstance(events, dict):
+                infractions_totals[key] += len(events)
+
+    return {
+        "score_route": scores.get("score_route", 0.0),
+        "score_penalty": scores.get("score_penalty", 0.0),
+        "score_composed": scores.get("score_composed", 0.0),
+        "success_flag": 1 if scores.get("score_composed", 0.0) > 99.95 else 0,
+        "duration_game": meta.get("duration_game", 0.0),
+        "duration_system": meta.get("duration_system", 0.0),
+        "infractions": {k: v for k, v in infractions_totals.items() if v > 0},
+    }
 
 
 def aggregate_route_records(records):
@@ -673,26 +700,18 @@ def aggregate_route_records(records):
     infractions_totals = defaultdict(int)
 
     for record in records:
-        scores = record.get("scores", {})
-        meta = record.get("meta", {})
+        summary = summarize_single_record(record)
+        score_route_vals.append(summary["score_route"])
+        score_penalty_vals.append(summary["score_penalty"])
+        score_composed_vals.append(summary["score_composed"])
+        duration_game_vals.append(summary["duration_game"])
+        duration_system_vals.append(summary["duration_system"])
+        success_flags.append(summary["success_flag"])
 
-        score_route_vals.append(scores.get("score_route", 0.0))
-        score_penalty_vals.append(scores.get("score_penalty", 0.0))
-        score_composed_vals.append(scores.get("score_composed", 0.0))
-        duration_game_vals.append(meta.get("duration_game", 0.0))
-        duration_system_vals.append(meta.get("duration_system", 0.0))
-        success_flags.append(1 if scores.get("score_composed", 0.0) > 99.95 else 0)
-
-        infractions = record.get("infractions", {})
+        infractions = summary["infractions"]
         if infractions:
-            for key, events in infractions.items():
-                if isinstance(events, list):
-                    if events:
-                        infractions_totals[key] += len(events)
-                elif isinstance(events, (int, float)):
-                    infractions_totals[key] += events
-                elif isinstance(events, dict):
-                    infractions_totals[key] += len(events)
+            for key, count in infractions.items():
+                infractions_totals[key] += count
 
     aggregated = {
         "score_route": average(score_route_vals),
@@ -883,6 +902,7 @@ def analyze_results(main_path: str):
         return None
 
     route_entries = []
+    per_ego_entries = []
     infractions_summary = []
     unmatched_routes = []
     total_ego_runs = 0
@@ -899,9 +919,11 @@ def analyze_results(main_path: str):
 
     for mode, prefix, route_dir in sorted(discovered_routes, key=lambda x: x[2]):
         route_path = os.path.join(main_path, route_dir)
-        records = load_ego_records(route_path)
-        if not records:
+        ego_records = load_ego_records(route_path)
+        if not ego_records:
             continue
+
+        records = [record for _, record in ego_records]
 
         agent_count = len([d for d in os.listdir(route_path) if d.startswith("ego_vehicle")])
 
@@ -1003,6 +1025,26 @@ def analyze_results(main_path: str):
                 "negotiation_avg_min_distance": negotiation_avg_min_distance,
             }
         )
+
+        for ego_vehicle, record in ego_records:
+            ego_summary = summarize_single_record(record)
+            per_ego_entries.append(
+                {
+                    "route_id": route_dir,
+                    "route_name": route_name,
+                    "mode": mode,
+                    "ego_vehicle": ego_vehicle,
+                    "agent_count": agent_count,
+                    "category": category,
+                    "score_composed": ego_summary["score_composed"],
+                    "score_route": ego_summary["score_route"],
+                    "score_penalty": ego_summary["score_penalty"],
+                    "success_flag": ego_summary["success_flag"],
+                    "duration_game": ego_summary["duration_game"],
+                    "duration_system": ego_summary["duration_system"],
+                    "infractions": ego_summary["infractions"],
+                }
+            )
 
     if not route_entries:
         return None
@@ -1121,6 +1163,7 @@ def analyze_results(main_path: str):
 
     return {
         "route_entries": route_entries,
+        "per_ego_entries": per_ego_entries,
         "infractions": infractions_summary,
         "unmatched_routes": unmatched_routes,
         "category_summaries": category_summaries,
@@ -1753,6 +1796,7 @@ def create_markdown_report(label: str, result: Dict, resources: Optional[Dict] =
     infractions = result["infractions"]
 
     per_route_csv = None
+    per_ego_csv = None
     category_csvs: Dict[str, str] = {}
     infractions_csv = None
     unmatched_csv = None
@@ -1766,6 +1810,7 @@ def create_markdown_report(label: str, result: Dict, resources: Optional[Dict] =
 
     if resources:
         per_route_csv = resources.get("per_route_csv")
+        per_ego_csv = resources.get("per_ego_csv")
         category_csvs = resources.get("category_csvs", {})
         infractions_csv = resources.get("infractions_csv")
         unmatched_csv = resources.get("unmatched_csv")
@@ -1826,6 +1871,8 @@ def create_markdown_report(label: str, result: Dict, resources: Optional[Dict] =
     lines.append("## Per-Route Summary")
     if per_route_csv:
         lines.append(f"[Download full per-route dataset]({per_route_csv})")
+    if per_ego_csv:
+        lines.append(f"[Download per-ego dataset]({per_ego_csv})")
 
     top_routes = sorted(route_entries, key=lambda e: e["score_composed"], reverse=True)[:15]
     if top_routes:
@@ -2199,6 +2246,56 @@ def write_experiment_outputs(base_dir: Path, label: str, result: Dict, *, nest: 
         ],
     )
 
+    per_ego_csv_path = None
+    per_ego_entries = result.get("per_ego_entries") or []
+    if per_ego_entries:
+        per_ego_csv = tables_dir / "per_ego_summary.csv"
+        write_csv_file(
+            per_ego_csv,
+            [
+                "Route ID",
+                "Route",
+                "Mode",
+                "Ego Vehicle",
+                "Agent Count",
+                "Category",
+                "DS",
+                "RC",
+                "IS",
+                "Success Rate",
+                "Game Time (s)",
+                "System Time (s)",
+                "Infractions",
+            ],
+            [
+                [
+                    entry["route_id"],
+                    entry["route_name"],
+                    entry["mode"],
+                    entry["ego_vehicle"],
+                    str(int(entry["agent_count"])) if isinstance(entry["agent_count"], (int, float)) else entry["agent_count"],
+                    entry["category"],
+                    f"{entry['score_composed']:.3f}",
+                    f"{entry['score_route']:.3f}",
+                    f"{entry['score_penalty']:.4f}",
+                    f"{entry['success_flag']:.3f}",
+                    f"{entry['duration_game']:.2f}",
+                    f"{entry['duration_system']:.2f}",
+                    infractions_to_string(entry.get("infractions", {})),
+                ]
+                for entry in sorted(
+                    per_ego_entries,
+                    key=lambda entry: (
+                        extract_route_index(entry["route_name"]),
+                        entry["route_name"].lower(),
+                        MODE_ORDER.get(entry["mode"], len(MODE_ORDER)),
+                        entry["ego_vehicle"],
+                    ),
+                )
+            ],
+        )
+        per_ego_csv_path = per_ego_csv.relative_to(experiment_dir).as_posix()
+
     category_csv_paths = {}
     for section_name, summary in result["category_summaries"].items():
         if not summary:
@@ -2410,6 +2507,7 @@ def write_experiment_outputs(base_dir: Path, label: str, result: Dict, *, nest: 
 
     resources = {
         "per_route_csv": route_csv_path.relative_to(experiment_dir).as_posix(),
+        "per_ego_csv": per_ego_csv_path,
         "category_csvs": category_csv_paths,
         "infractions_csv": infractions_csv_path,
         "unmatched_csv": unmatched_csv_path,

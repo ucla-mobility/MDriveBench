@@ -724,6 +724,16 @@ def parse_args() -> argparse.Namespace:
         help="Snap ego vehicle Z to nearest driving road height before spawning.",
     )
     parser.add_argument(
+        "--veer-audit",
+        action="store_true",
+        help="Enable runtime veer/route-quality auditing and write per-scenario summary.json artifacts.",
+    )
+    parser.add_argument(
+        "--veer-audit-save-ticks",
+        action="store_true",
+        help="Save per-ego per-tick veer audit traces (JSONL). Implies --veer-audit.",
+    )
+    parser.add_argument(
         "--align-ego-routes",
         action="store_true",
         help=(
@@ -1021,6 +1031,43 @@ def append_pythonpath(env: Dict[str, str], path: Path) -> None:
     path_str = str(path)
     current = env.get("PYTHONPATH")
     env["PYTHONPATH"] = f"{path_str}:{current}" if current else path_str
+
+
+def _load_hugsim_payload(checkpoint_path: Path) -> dict | None:
+    if not checkpoint_path.exists():
+        return None
+    try:
+        raw = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    global_record = raw.get("_checkpoint", {}).get("global_record", {})
+    if not isinstance(global_record, dict):
+        return None
+    hugsim = global_record.get("hugsim")
+    return hugsim if isinstance(hugsim, dict) else None
+
+
+def _print_hugsim_summary(checkpoint_endpoint: Path, ego_num: int) -> None:
+    if ego_num <= 0:
+        return
+    for ego_idx in range(ego_num):
+        ego_checkpoint = (
+            checkpoint_endpoint.parent / f"ego_vehicle_{ego_idx}" / checkpoint_endpoint.name
+        )
+        hugsim = _load_hugsim_payload(ego_checkpoint)
+        if not hugsim:
+            continue
+        if hugsim.get("available"):
+            print(
+                "[HUGSIM] "
+                f"ego_vehicle_{ego_idx}: "
+                f"hug_score={float(hugsim.get('hug_score', 0.0)):.4f} "
+                f"route_completion={float(hugsim.get('route_completion', 0.0)):.4f} "
+                f"mean_epdm_score={float(hugsim.get('mean_epdm_score', 0.0)):.4f}"
+            )
+        else:
+            reason = hugsim.get("reason") or "unknown"
+            print(f"[HUGSIM] ego_vehicle_{ego_idx}: unavailable ({reason})")
 
 
 def find_carla_egg(carla_root: Path) -> Path:
@@ -1894,6 +1941,10 @@ def main() -> None:
                         new_cmd.append("--resume")
                     if not args.skip_existed:
                         new_cmd.append("--no-skip-existed")
+                    if args.veer_audit:
+                        new_cmd.append("--veer-audit")
+                    if args.veer_audit_save_ticks:
+                        new_cmd.append("--veer-audit-save-ticks")
                     if args.add_night:
                         new_cmd.append("--add-night")
                     if args.add_cloudy:
@@ -2337,6 +2388,14 @@ def main() -> None:
                 env["RESULT_ROOT"] = str(result_root)
                 env["SAVE_PATH"] = str(save_path)
                 env["CHECKPOINT_ENDPOINT"] = str(checkpoint_endpoint)
+                if args.veer_audit or args.veer_audit_save_ticks:
+                    env["CUSTOM_VEER_AUDIT"] = "1"
+                else:
+                    env.pop("CUSTOM_VEER_AUDIT", None)
+                if args.veer_audit_save_ticks:
+                    env["CUSTOM_VEER_AUDIT_SAVE_TICKS"] = "1"
+                else:
+                    env.pop("CUSTOM_VEER_AUDIT_SAVE_TICKS", None)
                 if args.capture_actor_images:
                     actor_image_dir = result_root / "actor_images"
                     actor_image_dir.mkdir(parents=True, exist_ok=True)
@@ -2576,6 +2635,10 @@ def main() -> None:
                     continue
 
                 subprocess.run(cmd, check=True, env=env)
+                _print_hugsim_summary(
+                    checkpoint_endpoint=checkpoint_endpoint,
+                    ego_num=ego_num,
+                )
             finally:
                 if temp_dir is not None:
                     temp_dir.cleanup()

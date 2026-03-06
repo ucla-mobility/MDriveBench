@@ -17,6 +17,7 @@ import sys
 import numpy as np
 
 from leaderboard.utils.pdm_metrics import compute_pdm_route_metrics
+from leaderboard.utils.hugsim_metrics import compute_hugsim_route_metrics
 
 from srunner.scenariomanager.traffic_events import TrafficEventType
 
@@ -54,6 +55,7 @@ class RouteRecord():
 
         # navsim-style PDM metrics (filled later)
         self.pdm = None
+        self.hugsim = None
 
         self.meta = {}
 
@@ -226,6 +228,12 @@ class StatisticsManager(object):
             config=config,
             ego_id=self.ego_car_id,
         )
+        route_record.hugsim = compute_hugsim_route_metrics(
+            pdm_trace=pdm_trace,
+            pdm_world_trace=pdm_world_trace,
+            config=config,
+            ego_id=self.ego_car_id,
+        )
 
         return route_record
 
@@ -251,6 +259,9 @@ class StatisticsManager(object):
         pdm_count = 0
         pdm_min_ttc = np.inf
         pdm_min_ttc_dist = np.inf
+        hugsim_fields = ["hug_score", "route_completion", "mean_epdm_score"]
+        hugsim_accumulator = {key: 0.0 for key in hugsim_fields}
+        hugsim_count = 0
 
         if self._registry_route_records:
             for route_record in self._registry_route_records:
@@ -292,6 +303,12 @@ class StatisticsManager(object):
                     ttc_min_distance_m = route_record.pdm.get("ttc_min_distance_m")
                     if ttc_min_distance_m is not None:
                         pdm_min_ttc_dist = min(pdm_min_ttc_dist, ttc_min_distance_m)
+                route_hugsim = getattr(route_record, "hugsim", None)
+                if route_hugsim and route_hugsim.get("available"):
+                    hugsim_count += 1
+                    hugsim_accumulator["hug_score"] += route_hugsim.get("hug_score", 0.0)
+                    hugsim_accumulator["route_completion"] += route_hugsim.get("route_completion", 0.0)
+                    hugsim_accumulator["mean_epdm_score"] += route_hugsim.get("mean_epdm_score", 0.0)
 
         global_record.scores['score_route'] /= float(total_routes)
         global_record.scores['score_penalty'] /= float(total_routes)
@@ -306,6 +323,13 @@ class StatisticsManager(object):
             global_record.pdm["ttc_min_distance_m"] = None if pdm_min_ttc_dist == np.inf else float(pdm_min_ttc_dist)
         else:
             global_record.pdm = {"available": False}
+        if hugsim_count > 0:
+            global_record.hugsim = {
+                key: hugsim_accumulator[key] / hugsim_count for key in hugsim_fields
+            }
+            global_record.hugsim["available"] = True
+        else:
+            global_record.hugsim = {"available": False}
 
         return global_record
 
@@ -392,6 +416,20 @@ class StatisticsManager(object):
                 'PDM traffic light compliance',
                 'PDM TTC min time (s)',
                 'PDM TTC min distance (m)',
+            ]
+        hugsim_stats = stats_dict.get("hugsim")
+        if not isinstance(hugsim_stats, dict):
+            hugsim_stats = {}
+        if hugsim_stats.get("available"):
+            data['values'] += [
+                '{:.3f}'.format(hugsim_stats.get('hug_score', 0.0)),
+                '{:.3f}'.format(hugsim_stats.get('route_completion', 0.0)),
+                '{:.3f}'.format(hugsim_stats.get('mean_epdm_score', 0.0)),
+            ]
+            data['labels'] += [
+                'HUGSIM driving score',
+                'HUGSIM route completion',
+                'HUGSIM mean EPDM (no EP)',
             ]
 
         entry_status = "Finished"

@@ -16,6 +16,7 @@ import sys
 import time
 import math
 import re
+from pathlib import Path
 from typing import Optional
 
 import py_trees
@@ -30,6 +31,7 @@ from leaderboard.scenarios.scenarioatomics.atomic_criteria import ActorSpeedAbov
 from leaderboard.autoagents.agent_wrapper import AgentWrapper, AgentError
 from leaderboard.envs.sensor_interface import SensorReceivedNoData
 from leaderboard.utils.result_writer import ResultOutputProvider
+from leaderboard.utils.veer_audit import VeerAuditor
 
 
 class ScenarioManager(object):
@@ -90,11 +92,26 @@ class ScenarioManager(object):
 
         # Position-based stall detection (conservative fallback)
         # Tracks position history to detect when ALL vehicles are stuck
+        def _env_float(name, default):
+            raw = os.environ.get(name, "")
+            if not raw:
+                return default
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                print(f"[STALL CONFIG] Invalid {name}={raw!r}; using default {default}")
+                return default
+
         self._stall_position_history = {}  # {ego_id: [(time, x, y, z), ...]}
-        self._stall_check_interval = 5.0   # Check every 5 seconds
+        self._stall_check_interval = max(0.5, _env_float("CUSTOM_STALL_CHECK_INTERVAL", 5.0))
         self._stall_last_check_time = 0.0
-        self._stall_threshold_time = 90.0  # 90 seconds of minimal movement = stall
-        self._stall_min_distance = 0.5     # Must move at least 0.5 meters in threshold_time
+        # Use relaxed defaults to reduce premature stall termination.
+        self._stall_threshold_time = max(
+            self._stall_check_interval,
+            _env_float("CUSTOM_STALL_THRESHOLD_TIME", 240.0),
+        )
+        self._stall_min_distance = max(0.0, _env_float("CUSTOM_STALL_MIN_DISTANCE", 0.2))
+        self._stall_min_speed = max(0.0, _env_float("CUSTOM_STALL_MIN_SPEED", 0.03))
 
         # PDM trace logging (for navsim-style metrics)
         self.pdm_traces = []
@@ -113,6 +130,7 @@ class ScenarioManager(object):
         self._scenario_name = None
         self._scenario_town = None
         self._scenario_route = None
+        self._veer_auditor = None
         
     def signal_handler(self, signum, frame):
         """
@@ -152,6 +170,44 @@ class ScenarioManager(object):
         if details:
             parts.append(details)
         print(" ".join(parts))
+
+    def _init_veer_auditor(self, scenario, rep_number) -> None:
+        self._veer_auditor = None
+        enabled = os.environ.get("CUSTOM_VEER_AUDIT", "").lower() in ("1", "true", "yes")
+        if not enabled:
+            return
+        try:
+            result_root = os.environ.get("RESULT_ROOT", "").strip()
+            if not result_root:
+                checkpoint = os.environ.get("CHECKPOINT_ENDPOINT", "").strip()
+                if checkpoint:
+                    result_root = str(Path(checkpoint).parent)
+                else:
+                    result_root = "."
+
+            scenario_name = getattr(getattr(scenario, "config", None), "name", None) or "scenario"
+            scenario_slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(scenario_name)).strip("_")
+            if not scenario_slug:
+                scenario_slug = "scenario"
+            out_dir = Path(result_root) / "veer_audit" / f"{scenario_slug}__rep{int(rep_number)}"
+            save_ticks = os.environ.get("CUSTOM_VEER_AUDIT_SAVE_TICKS", "").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+            self._veer_auditor = VeerAuditor(
+                output_dir=out_dir,
+                scenario_name=str(scenario_name),
+                town=getattr(getattr(scenario, "config", None), "town", None),
+                route_id=getattr(getattr(scenario, "config", None), "route_id", None),
+                repetition=int(rep_number),
+                save_ticks=bool(save_ticks),
+            )
+            self._veer_auditor.configure_from_scenario(scenario, int(self.ego_vehicles_num))
+            print(f"[VEER_AUDIT] enabled output={out_dir} save_ticks={int(bool(save_ticks))}")
+        except Exception as exc:
+            self._veer_auditor = None
+            print(f"[VEER_AUDIT] init failed: {exc}")
 
     def cleanup(self):
         """
@@ -237,6 +293,8 @@ class ScenarioManager(object):
             print("set ip sensor for ego vehicle {}".format(vehicle_num))
             self._agent.setup_sensors(self.ego_vehicles[vehicle_num], vehicle_num, save_root, self._debug_mode)
             self.first_entry.append(True)
+
+        self._init_veer_auditor(scenario, rep_number)
 
     def run_scenario(self):
         """
@@ -382,6 +440,7 @@ class ScenarioManager(object):
                             self.ego_vehicles[vehicle_num].apply_control(ego_action[vehicle_num])
                             # record trace for PDM metrics
                             self._record_pdm_sample(vehicle_num, ego, timestamp)
+                            self._record_veer_sample(vehicle_num, ego, timestamp)
                 except:
                     pass
 
@@ -709,6 +768,21 @@ class ScenarioManager(object):
         except Exception:
             pass
 
+    def _record_veer_sample(self, vehicle_num, ego, timestamp):
+        if self._veer_auditor is None:
+            return
+        try:
+            transform = ego.get_transform()
+            velocity = ego.get_velocity()
+            self._veer_auditor.log_tick(
+                ego_idx=int(vehicle_num),
+                sim_time_s=float(timestamp.elapsed_seconds),
+                transform=transform,
+                velocity=velocity,
+            )
+        except Exception:
+            pass
+
     def _record_pdm_world(self, timestamp):
         """
         Record world actors and traffic light states once per tick.
@@ -840,7 +914,11 @@ class ScenarioManager(object):
         """
         import math
         
-        current_time = time.time()
+        # Use simulation time so stall logic is aligned with CARLA progress.
+        try:
+            current_time = float(GameTime.get_time())
+        except Exception:
+            current_time = time.time()
         
         # Only check periodically to reduce overhead
         if current_time - self._stall_last_check_time < self._stall_check_interval:
@@ -909,7 +987,7 @@ class ScenarioManager(object):
             vel = ego.get_velocity()
             speed = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
             
-            if distance >= self._stall_min_distance or speed > 0.1:
+            if distance >= self._stall_min_distance or speed > self._stall_min_speed:
                 # This ego has moved enough OR is currently moving, not stalled
                 all_stalled = False
                 # Debug: print which vehicle is NOT stalled
@@ -925,7 +1003,7 @@ class ScenarioManager(object):
                 if ego and ego.is_alive:
                     vel = ego.get_velocity()
                     speed = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
-                    if speed > 0.1:
+                    if speed > self._stall_min_speed:
                         print(f"[STALL DEBUG] Wait - Ego {vehicle_num} has speed={speed:.2f}m/s, NOT stalled!")
                         all_stalled = False
                         break
@@ -944,6 +1022,14 @@ class ScenarioManager(object):
 
         self.scenario_duration_system = self.end_system_time - self.start_system_time
         self.scenario_duration_game = self.end_game_time - self.start_game_time
+
+        if self._veer_auditor is not None:
+            try:
+                self._veer_auditor.finalize()
+                print("[VEER_AUDIT] summary written")
+            except Exception as exc:
+                print(f"[VEER_AUDIT] finalize failed: {exc}")
+            self._veer_auditor = None
 
         if self.get_running_status():
             # print("terminate ego vehicle in the first step {}".format(ego_vehicle_id))
