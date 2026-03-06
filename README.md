@@ -52,11 +52,11 @@ $CARLA_ROOT/CarlaUE4.sh --world-port=2014 -RenderOffScreen
 ```
 
 ### 4) Run benchmark scenarios with your custom planner
-Run LLM-Generated Scenarios:
+Run LLM-Generated and OpenCDA Scenarios:
 ```bash
 # terminal B
 python tools/run_custom_eval.py \
-  --routes-dir scenarioset/llmgen \
+  --routes-dir scenarioset/nonreplay \
   --agent /abs/path/to/agents.py \
   --agent-config /abs/path/to/agent_config.yaml
 ```
