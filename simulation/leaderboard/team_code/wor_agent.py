@@ -278,7 +278,8 @@ class ImageAgent(AutonomousAgent):
     def run_step(self, input_data, timestamp):
         if not self.initialized:
             self._init()
-        if self.num_frames % self.skip_frames != 0 and self.num_frames > 4:
+        force_fresh_every_frame = os.environ.get('OPENLOOP_FORCE_FRESH_INFERENCE', '0') == '1'
+        if (not force_fresh_every_frame) and self.num_frames % self.skip_frames != 0 and self.num_frames > 4:
             self.num_frames += 1
             return self.prev_control
         control_all = []
@@ -425,4 +426,3 @@ class ImageAgent(AutonomousAgent):
 
         return steer, throt, brake
    
-

@@ -279,7 +279,8 @@ class HybridAgent(autonomous_agent.AutonomousAgent):
         self.pid_metadata['gps_x'] = tick_data['gps'][0]
         self.pid_metadata['gps_y'] = tick_data['gps'][1]
         self.pid_metadata['speed'] = tick_data['speed']
-        if self.step % 4 != 0 and self.step > 4:
+        force_fresh_every_frame = os.environ.get('OPENLOOP_FORCE_FRESH_INFERENCE', '0') == '1'
+        if (not force_fresh_every_frame) and self.step % 4 != 0 and self.step > 4:
                 # return the previous control signal.   
             return [self.prev_control]
 

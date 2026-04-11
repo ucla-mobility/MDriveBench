@@ -516,7 +516,8 @@ class LAVAgent(autonomous_agent.AutonomousAgent):
         # dict_keys(['GPS_0', 'LIDAR_0', 'IMU_0', 'EGO_0', 'TEL_RGB_0', 'RGB_2_0', 'RGB_1_0', 'RGB_0_0'])
         # raise ValueError
         self.step += 1
-        if self.step % self.skip_frames != 0 and self.step > 4:
+        force_fresh_every_frame = os.environ.get('OPENLOOP_FORCE_FRESH_INFERENCE', '0') == '1'
+        if (not force_fresh_every_frame) and self.step % self.skip_frames != 0 and self.step > 4:
                 return self.prev_control
         # print('Running control.')
         # print(self.ego_vehicles_num)

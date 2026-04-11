@@ -68,11 +68,25 @@ _CAM_FOV    = 100
 
 # How many future steps to include as ground-truth trajectory.
 # Matches RiskM config: prediction_len=6 at prediction_hz=2.
-MAX_GT_STEPS = 6
+MAX_GT_STEPS = 100
 
 # Downsampling rate: data is at 10 Hz; predictions are evaluated at 2 Hz.
 # Every PREDICTION_DOWNSAMPLING_RATE-th frame = 0.5 s per step → 3 s horizon.
 PREDICTION_DOWNSAMPLING_RATE = 5
+
+# RoadOption values (agents.navigation.local_planner).
+_ROADOPTION_LEFT = 1
+_ROADOPTION_RIGHT = 2
+_ROADOPTION_STRAIGHT = 3
+_ROADOPTION_LANEFOLLOW = 4
+_ROADOPTION_CHANGELANELEFT = 5
+_ROADOPTION_CHANGELANERIGHT = 6
+
+# Geometry-only route-command inference knobs.
+_ROUTE_COMMAND_TURN_THRESHOLD_DEG = 12.0
+_ROUTE_COMMAND_LOOKAROUND_STEPS = 8
+_ROUTE_COMMAND_LANECHANGE_SHIFT_THRESHOLD_M = 1.2
+_ROUTE_COMMAND_LANECHANGE_MAX_TURN_DEG = 8.0
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +367,99 @@ def _sparsify_route_waypoints(gt_traj: np.ndarray) -> np.ndarray:
     return sparse
 
 
+def _find_nonzero_route_segment(
+    route_xy: np.ndarray,
+    idx: int,
+    direction: int,
+    max_hops: int,
+) -> Optional[np.ndarray]:
+    """Return a non-degenerate local route vector around index ``idx``."""
+    n = len(route_xy)
+    if n <= 1:
+        return None
+    i = int(idx)
+    if direction > 0:
+        hi = min(n - 1, i + int(max_hops))
+        for j in range(i + 1, hi + 1):
+            vec = route_xy[j, :2] - route_xy[i, :2]
+            if float(np.linalg.norm(vec)) > 1e-6:
+                return vec
+        return None
+    lo = max(0, i - int(max_hops))
+    for j in range(i - 1, lo - 1, -1):
+        vec = route_xy[i, :2] - route_xy[j, :2]
+        if float(np.linalg.norm(vec)) > 1e-6:
+            return vec
+    return None
+
+
+def _infer_route_command_values(
+    route_xy: np.ndarray,
+    *,
+    turn_threshold_deg: float = _ROUTE_COMMAND_TURN_THRESHOLD_DEG,
+    lookaround_steps: int = _ROUTE_COMMAND_LOOKAROUND_STEPS,
+    lanechange_shift_threshold_m: float = _ROUTE_COMMAND_LANECHANGE_SHIFT_THRESHOLD_M,
+    lanechange_max_turn_deg: float = _ROUTE_COMMAND_LANECHANGE_MAX_TURN_DEG,
+) -> np.ndarray:
+    """Infer RoadOption commands from route geometry.
+
+    Notes
+    -----
+    v2xpnp frame YAML does not provide per-frame command annotations.
+    We infer ``LEFT``/``RIGHT`` from local signed turn angle. On low-curvature
+    segments, we also detect lane-change intent from signed lateral drift over
+    a local lookaround window and emit ``CHANGELANELEFT`` / ``CHANGELANERIGHT``.
+    Remaining points default to ``LANEFOLLOW``.
+    """
+    route = np.asarray(route_xy, dtype=np.float64)
+    if route.ndim != 2 or route.shape[1] < 2:
+        return np.zeros((0,), dtype=np.int64)
+
+    n = len(route)
+    cmds = np.full((n,), _ROADOPTION_LANEFOLLOW, dtype=np.int64)
+    if n <= 2:
+        return cmds
+
+    for i in range(n):
+        back = _find_nonzero_route_segment(route, i, direction=-1, max_hops=lookaround_steps)
+        fwd = _find_nonzero_route_segment(route, i, direction=+1, max_hops=lookaround_steps)
+        if back is None or fwd is None:
+            continue
+
+        cross_z = float(back[0] * fwd[1] - back[1] * fwd[0])
+        dot = float(back[0] * fwd[0] + back[1] * fwd[1])
+        signed_deg = math.degrees(math.atan2(cross_z, dot))
+
+        if signed_deg > float(turn_threshold_deg):
+            cmds[i] = _ROADOPTION_LEFT
+        elif signed_deg < -float(turn_threshold_deg):
+            cmds[i] = _ROADOPTION_RIGHT
+        else:
+            # Lane-change inference: when heading change is small, use signed
+            # lateral displacement between local past/future anchors.
+            if abs(signed_deg) <= float(lanechange_max_turn_deg):
+                t = back + fwd
+                t_norm = float(np.linalg.norm(t))
+                if t_norm > 1e-6:
+                    tangent = t / t_norm
+                    left_normal = np.array([-tangent[1], tangent[0]], dtype=np.float64)
+                    i_prev = max(0, i - int(lookaround_steps))
+                    i_next = min(n - 1, i + int(lookaround_steps))
+                    disp = route[i_next, :2] - route[i_prev, :2]
+                    lateral_shift_m = float(np.dot(disp, left_normal))
+                    if lateral_shift_m > float(lanechange_shift_threshold_m):
+                        cmds[i] = _ROADOPTION_CHANGELANELEFT
+                    elif lateral_shift_m < -float(lanechange_shift_threshold_m):
+                        cmds[i] = _ROADOPTION_CHANGELANERIGHT
+                    else:
+                        cmds[i] = _ROADOPTION_LANEFOLLOW
+                else:
+                    cmds[i] = _ROADOPTION_LANEFOLLOW
+            else:
+                cmds[i] = _ROADOPTION_LANEFOLLOW
+    return cmds
+
+
 # ---------------------------------------------------------------------------
 # ScenarioFrame — single-frame data container
 # ---------------------------------------------------------------------------
@@ -388,7 +495,7 @@ class ScenarioFrame:
               "camera_front/left/right/rear_extrinsics" : list 4×4 (lidar→cam)
               "speed"         : float
               "compass"       : float  (radians)
-              "command"       : int    (RoadOption.LANEFOLLOW = 4)
+              "command"       : int    (RoadOption value inferred from route geometry)
               "target_point"  : np.ndarray[2] (local next-waypoint, metres)
           }
           "bev"          : PIL.Image (placeholder; never used by planner model)
@@ -427,6 +534,7 @@ class V2XPnPScenario:
         self.fps          = fps
         self._actor_ids   = self._discover_actors()
         self._frame_counts: Dict[int, int] = {}
+        self._route_command_cache: Dict[int, np.ndarray] = {}
         for aid in self._actor_ids:
             self._frame_counts[aid] = self._count_frames(aid)
 
@@ -440,6 +548,15 @@ class V2XPnPScenario:
 
     def num_frames(self, actor_id: int) -> int:
         return self._frame_counts.get(actor_id, 0)
+
+    def _get_route_command_values(self, actor_id: int) -> np.ndarray:
+        cached = self._route_command_cache.get(int(actor_id))
+        if cached is not None:
+            return cached
+        traj = self.get_gt_trajectory(actor_id)
+        cmds = _infer_route_command_values(traj)
+        self._route_command_cache[int(actor_id)] = cmds
+        return cmds
 
     # ------------------------------------------------------------------
     # Core data loading
@@ -471,24 +588,41 @@ class V2XPnPScenario:
         ego_speed  = float(meta.get("ego_speed", 0.0))
 
         # If recorded speed is zero (common data-recording bug where the
-        # field was never populated), derive it from position deltas.
-        if ego_speed == 0.0 and frame_idx > 0:
-            prev_yaml = self.scenario_dir / str(actor_id) / f"{frame_idx - 1:06d}.yaml"
-            try:
-                with open(prev_yaml) as _fh:
-                    prev_meta = yaml.safe_load(_fh)
-                prev_pose = prev_meta["lidar_pose"]
-                dx = pose[0] - prev_pose[0]
-                dy = pose[1] - prev_pose[1]
-                ego_speed = math.sqrt(dx * dx + dy * dy) * self.fps
-            except Exception:
-                pass  # keep ego_speed = 0 if prev frame unavailable
+        # field was never populated), derive it from neighboring-frame deltas.
+        if ego_speed == 0.0:
+            if frame_idx > 0:
+                prev_yaml = self.scenario_dir / str(actor_id) / f"{frame_idx - 1:06d}.yaml"
+                try:
+                    with open(prev_yaml) as _fh:
+                        prev_meta = yaml.safe_load(_fh)
+                    prev_pose = prev_meta["lidar_pose"]
+                    dx = pose[0] - prev_pose[0]
+                    dy = pose[1] - prev_pose[1]
+                    ego_speed = math.sqrt(dx * dx + dy * dy) * self.fps
+                except Exception:
+                    pass  # keep ego_speed = 0 if prev frame unavailable
+            elif frame_idx == 0:
+                # For frame 0 specifically, prefer frame-1 recorded speed;
+                # if unavailable/zero, use forward-difference pose delta.
+                next_yaml = self.scenario_dir / str(actor_id) / f"{frame_idx + 1:06d}.yaml"
+                try:
+                    with open(next_yaml) as _fh:
+                        next_meta = yaml.safe_load(_fh)
+                    next_speed = float(next_meta.get("ego_speed", 0.0))
+                    if next_speed > 0.0:
+                        ego_speed = next_speed
+                    else:
+                        next_pose = next_meta["lidar_pose"]
+                        dx = next_pose[0] - pose[0]
+                        dy = next_pose[1] - pose[1]
+                        ego_speed = math.sqrt(dx * dx + dy * dy) * self.fps
+                except Exception:
+                    pass  # keep ego_speed = 0 if next frame unavailable
 
-        # Keep compass aligned with dataset yaw for open-loop replay.
-        # This matches the CoDriving/PnP preprocessing path used by the
-        # leaderboard agents when consuming v2xpnp recordings.
+        # CARLA compass convention: compass = yaw - π/2.
+        # Agents are trained with this convention (theta = compass + π/2 = yaw).
         yaw_rad    = math.radians(float(pose[4]))   # dataset yaw_deg -> rad
-        compass    = _wrap_angle_rad(yaw_rad)
+        compass    = _wrap_angle_rad(yaw_rad - math.pi / 2.0)
 
         world_x, world_y, world_z = pose[0], pose[1], pose[2]
 
@@ -557,8 +691,14 @@ class V2XPnPScenario:
         pos        = fake_gps * GPS_SCALE    # ≈ world (x, y) in metres
 
         if next_waypoints is not None and len(next_waypoints) > 0:
-            # Use the nearest future waypoint as the local navigation target
-            nwp_world = next_waypoints[min(1, len(next_waypoints) - 1)]
+            # Use waypoint ~10 m ahead (matching colmdriver training target_point_distance: 10).
+            # At 10 Hz, step_size = ego_speed * 0.1 m/step; clamp to ≥0.5 m to avoid div-by-zero.
+            _target_dist_m = 10.0
+            _target_idx = min(
+                max(0, round(_target_dist_m / max(ego_speed * 0.1, 0.5))),
+                len(next_waypoints) - 1,
+            )
+            nwp_world = next_waypoints[_target_idx]
             world_diff = nwp_world - pos
         else:
             # Placeholder: 5 m ahead in vehicle-forward heading.
@@ -571,6 +711,15 @@ class V2XPnPScenario:
         local_target = np.clip(local_target,
                                a_min=[-DET_RANGE[2], -DET_RANGE[0]],
                                a_max=[ DET_RANGE[3],  DET_RANGE[1]])
+
+        command_value = _ROADOPTION_LANEFOLLOW
+        try:
+            cmd_values = self._get_route_command_values(actor_id)
+            if len(cmd_values) > 0:
+                cmd_idx = min(max(int(frame_idx) + 1, 0), len(cmd_values) - 1)
+                command_value = int(cmd_values[cmd_idx])
+        except Exception:
+            command_value = _ROADOPTION_LANEFOLLOW
 
         # ---- Drivable area: 192×96 binary (filled by MockBirdViewProducer) ----
         # The agent's tick() constructs this from BirdViewProducer.  In the
@@ -606,7 +755,7 @@ class V2XPnPScenario:
             "lidar_pose_gps_y":          world_x,  # agent convention
             "speed":                    ego_speed_np,
             "compass":                  compass,
-            "command":                  4,         # RoadOption.LANEFOLLOW
+            "command":                  int(command_value),
             "target_point":             local_target,
             "camera_front_intrinsics":  intrinsics["front"],
             "camera_front_extrinsics":  extrinsics["front"],
@@ -664,7 +813,10 @@ class V2XPnPScenario:
         return np.array(poses, dtype=np.float64)   # [N, 2]
 
     def get_surrounding_trajectories(
-            self, actor_id: int, frame_idx: int
+            self,
+            actor_id: int,
+            frame_idx: int,
+            return_actor_ids: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Return future world-frame positions of surrounding vehicles at a given
@@ -677,6 +829,7 @@ class V2XPnPScenario:
         -------
         traj  : np.ndarray  [N_actors, T_future, 2]
         mask  : np.ndarray  [N_actors, T_future]  1 = valid
+        actor_ids (optional): list[int] of length N_actors aligned with traj/mask
         """
         n_future = MAX_GT_STEPS
         n_frames = self.num_frames(actor_id)
@@ -694,7 +847,11 @@ class V2XPnPScenario:
         )
 
         if not actor_ids_at_t0:
-            return np.zeros((0, n_future, 2)), np.zeros((0, n_future))
+            traj_empty = np.zeros((0, n_future, 2))
+            mask_empty = np.zeros((0, n_future))
+            if return_actor_ids:
+                return traj_empty, mask_empty, []
+            return traj_empty, mask_empty
 
         traj = np.zeros((len(actor_ids_at_t0), n_future, 2), dtype=np.float64)
         mask = np.zeros((len(actor_ids_at_t0), n_future),    dtype=np.float64)
@@ -716,6 +873,8 @@ class V2XPnPScenario:
                     traj[ai, t_step - 1, 1] = loc[1]
                     mask[ai, t_step - 1]    = 1.0
 
+        if return_actor_ids:
+            return traj, mask, [int(aid) for aid in actor_ids_at_t0]
         return traj, mask
 
     # ------------------------------------------------------------------
@@ -744,6 +903,12 @@ class V2XPnPScenario:
         """
         gt_traj = self.get_gt_trajectory(actor_id)   # [N, 2]
         route_xy = _sparsify_route_waypoints(gt_traj) if sparsify else gt_traj
+        if sparsify:
+            route_cmd_values = _infer_route_command_values(route_xy)
+        else:
+            route_cmd_values = self._get_route_command_values(actor_id)
+            if len(route_cmd_values) != len(route_xy):
+                route_cmd_values = _infer_route_command_values(route_xy)
 
         # Import the stub RoadOption set up by install_openloop_stubs
         try:
@@ -754,12 +919,16 @@ class V2XPnPScenario:
                 def __init__(self, v=4): self.value = v
 
         route: List[Tuple[Dict, Any]] = []
-        for xy in route_xy:
+        for idx, xy in enumerate(route_xy):
             gps = {
                 "lat": float(xy[0] / GPS_SCALE[0]),
                 "lon": float(xy[1] / GPS_SCALE[1]),
             }
-            route.append((gps, RoadOption(4)))  # LANEFOLLOW = 4
+            if idx < len(route_cmd_values):
+                cmd_value = int(route_cmd_values[idx])
+            else:
+                cmd_value = _ROADOPTION_LANEFOLLOW
+            route.append((gps, RoadOption(cmd_value)))
 
         # RoutePlanner expects list-of-lists (one per ego vehicle); return for
         # actor_id mapped to vehicle slot 0 (single-vehicle evaluation) or

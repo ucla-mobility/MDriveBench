@@ -453,6 +453,7 @@ class PnP_Agent(autonomous_agent.AutonomousAgent):
 
         # If the frame is skipped.
         realtime_mode = os.environ.get('REALTIME_MODE', '0')
+        force_fresh_every_frame = os.environ.get('OPENLOOP_FORCE_FRESH_INFERENCE', '0') == '1'
         if realtime_mode == '1':
             # REAL-TIME
             if self.step and self.step < self.next_action_step:
@@ -460,7 +461,7 @@ class PnP_Agent(autonomous_agent.AutonomousAgent):
                 return self.infer.prev_control
         else:
             # NON_REAL_TIME
-            if self.step and self.step % 4 != 0:
+            if self.step and (not force_fresh_every_frame) and self.step % 4 != 0:
                 # return the previous control signal.
                 return self.infer.prev_control
 

@@ -105,16 +105,21 @@ _OPENLOOP_ROOT = _THIS_FILE.parents[1]        # openloop/
 _PROJECT_ROOT = _OPENLOOP_ROOT.parent          # CoLMDriver/
 
 # Add paths that planners need
-for _p in [
+# NOTE:
+# Keep local project paths at the FRONT of sys.path so namespace packages
+# (e.g. Bench2DriveZoo) do not resolve to stale copies from other checkouts.
+_LOCAL_IMPORT_PATHS = [
     str(_PROJECT_ROOT),
     str(_PROJECT_ROOT / "simulation" / "leaderboard"),
     str(_PROJECT_ROOT / "simulation" / "leaderboard" / "leaderboard"),
     str(_PROJECT_ROOT / "simulation" / "leaderboard" / "scenario_runner"),
     str(_PROJECT_ROOT / "simulation" / "leaderboard" / "team_code"),
     str(_OPENLOOP_ROOT),
-]:
-    if _p not in sys.path:
-        sys.path.append(_p)
+]
+for _p in reversed(_LOCAL_IMPORT_PATHS):
+    while _p in sys.path:
+        sys.path.remove(_p)
+    sys.path.insert(0, _p)
 
 install_openloop_stubs = None
 configure_openloop_world = None
@@ -1979,34 +1984,47 @@ class MetricAccumulator:
         plan_ade = float((dists * valid).sum() / n_valid)
         plan_fde = float(dists[valid][-1]) if valid.any() else 0.0
 
-        # ---- Collision rate (paper formula: TTC < 0.9 s AND lateral < 3.5 m) ----
-        # Per the paper (citing NavSim [32]), "time distance (TTC)" is the future
-        # time of the first predicted step at which lateral proximity is breached.
-        # Waypoints are at 0.5 s intervals; 0.5 s < 0.9 s ≤ 1.0 s, so only the
-        # FIRST predicted step (t=0.5 s) can satisfy TTC < 0.9 s.
-        # We check all steps whose time t_s = (step+1)*0.5 < 0.9 s.
+        # ---- Collision rate (RiskMM formula: L2 < 6 m gate, then |ΔY| ≤ 3.5 m) ----
+        # Faithfully matches eval_utils.py in the RiskMM codebase:
+        #   1. Remove the closest actor if within 2.6 m of ego (handles V2X partner ego).
+        #   2. Flag collision if any (t, actor) pair has L2 < 6 m AND |ΔY| ≤ 3.5 m
+        #      over all predicted timesteps (no TTC threshold).
+        # World-frame Y-difference (axis-aligned) used for lateral, matching RiskMM.
+        _EUCLIDEAN_GATE    = 6.0   # metres — pre-filter before lateral check
+        _LAT_THRESH        = 3.5   # metres — world-frame |ΔY|
+        _CLOSE_ACTOR_THRESH = 2.6  # metres — remove physically co-located actor
         collision = 0
-        _TTC_THRESH  = 0.9  # seconds
-        _LAT_THRESH  = 3.5  # metres
-        _dt_step     = float(PREDICTION_DOWNSAMPLING_RATE) * 0.1  # 0.5 s per step
         if surround_traj.shape[0] > 0:
+            N_actors = surround_traj.shape[0]
             B  = surround_traj[:, :T_min, :].transpose(1, 0, 2)  # [T, N, 2]
             sm = surround_mask[:, :T_min].T                       # [T, N]
 
-            _yaw     = math.radians(float(ego_pose[4])) if ego_pose is not None else 0.0
-            _sin_yaw = math.sin(_yaw)
-            _cos_yaw = math.cos(_yaw)
+            # Step 1: remove the closest actor if it is virtually co-located
+            # (e.g. the V2X partner ego appearing in its own actor list).
+            actor_keep = np.ones(N_actors, dtype=bool)
+            if ego_pose is not None:
+                ego_xy = np.asarray(ego_pose[:2], dtype=np.float64)
+                first_pos = surround_traj[:, 0, :]  # [N, 2] — proxy for t=0
+                cur_dists = np.linalg.norm(first_pos - ego_xy, axis=1)
+                closest_idx = int(np.argmin(cur_dists))
+                if cur_dists[closest_idx] < _CLOSE_ACTOR_THRESH:
+                    actor_keep[closest_idx] = False
 
-            for _t in range(T_min):
-                _t_seconds = (_t + 1) * _dt_step   # 0.5, 1.0, 1.5 … s
-                if _t_seconds >= _TTC_THRESH:
-                    break  # all later steps also exceed the threshold
-                diffs   = pred[_t] - B[_t]          # [N, 2]
-                lateral = np.abs(-_sin_yaw * diffs[:, 0] + _cos_yaw * diffs[:, 1])
-                valid   = sm[_t] > 0
-                if np.any(valid & (lateral < _LAT_THRESH)):
+            # Step 2: L2 distances over all timesteps [T, N]
+            A = pred[:T_min, :2]           # [T, 2]
+            diffs_all = A[:, None, :] - B  # [T, N, 2]
+            l2_all    = np.linalg.norm(diffs_all, axis=2)  # [T, N]
+            valid_sm  = sm > 0             # [T, N]
+            l2_gated  = np.where(valid_sm, l2_all, np.inf)
+            l2_gated[:, ~actor_keep] = np.inf
+
+            # Step 3: lateral check only where L2 < gate
+            close_pairs = l2_gated < _EUCLIDEAN_GATE
+            if np.any(close_pairs):
+                t_idx, n_idx = np.where(close_pairs)
+                delta_y = np.abs(A[t_idx, 1] - B[t_idx, n_idx, 1])
+                if np.any(delta_y <= _LAT_THRESH):
                     collision = 1
-                    break
 
         self.plan_ade_sum    += plan_ade
         self.plan_fde_sum    += plan_fde
@@ -2038,6 +2056,7 @@ def _compute_plan_metrics_core(
     gt_future_mask: np.ndarray,
     surround_traj: np.ndarray,
     surround_mask: np.ndarray,
+    surround_actor_ids: Optional[List[int]] = None,
     ego_pose: Optional[np.ndarray] = None,
 ) -> Optional[Dict[str, Any]]:
     pred_world_wps = np.asarray(pred_world_wps, dtype=np.float64)
@@ -2074,30 +2093,86 @@ def _compute_plan_metrics_core(
     plan_ade = float((dists * mask).sum() / n_valid)
     plan_fde = float(dists[mask][-1]) if np.any(mask) else 0.0
 
+    # ---- Collision rate (RiskMM formula: L2 < 6 m gate, then |ΔY| ≤ 3.5 m) ----
+    # Faithfully matches eval_utils.py in the RiskMM codebase:
+    #   1. Remove the closest actor if within 2.6 m of ego (handles V2X partner ego).
+    #   2. Flag collision if any (t, actor) pair has L2 < 6 m AND |ΔY| ≤ 3.5 m
+    #      over all predicted timesteps (no TTC threshold).
+    # World-frame Y-difference (axis-aligned) used for lateral, matching RiskMM.
+    _EUCLIDEAN_GATE     = 6.0   # metres
+    _LAT_THRESH         = 3.5   # metres — world-frame |ΔY|
+    _CLOSE_ACTOR_THRESH = 2.6   # metres — remove virtually co-located actor
     collision = 0
-    _TTC_THRESH = 0.9
-    _LAT_THRESH = 3.5
-    _dt_step = float(PREDICTION_DOWNSAMPLING_RATE) * 0.1
+    collision_debug: Dict[str, Any] = {
+        "collision": False,
+        "actor_index": None,
+        "actor_id": None,
+        "step_index": None,
+        "t_seconds": None,
+        "delta_y_m": None,
+        "euclidean_m": None,
+        "pred_world_xy": None,
+        "actor_world_xy": None,
+    }
     if surround_traj.shape[0] > 0:
-        B = surround_traj[:, :T_min, :].transpose(1, 0, 2)
-        sm = surround_mask[:, :T_min].T
+        N_actors = surround_traj.shape[0]
+        B  = surround_traj[:, :T_min, :].transpose(1, 0, 2)  # [T, N, 2]
+        sm = surround_mask[:, :T_min].T                       # [T, N]
 
-        _yaw = math.radians(float(ego_pose[4])) if ego_pose is not None else 0.0
-        _sin_yaw = math.sin(_yaw)
-        _cos_yaw = math.cos(_yaw)
+        # Step 1: remove closest actor if virtually co-located (V2X partner ego).
+        actor_keep = np.ones(N_actors, dtype=bool)
+        if ego_pose is not None:
+            ego_xy = np.asarray(ego_pose[:2], dtype=np.float64)
+            first_pos = surround_traj[:, 0, :]  # [N, 2] — proxy for current pos
+            cur_dists = np.linalg.norm(first_pos - ego_xy, axis=1)
+            closest_idx = int(np.argmin(cur_dists))
+            if cur_dists[closest_idx] < _CLOSE_ACTOR_THRESH:
+                actor_keep[closest_idx] = False
 
-        for _t in range(T_min):
-            if not bool(mask[_t]):
-                continue
-            _t_seconds = (_t + 1) * _dt_step
-            if _t_seconds >= _TTC_THRESH:
-                break
-            diffs = pred[_t] - B[_t]
-            lateral = np.abs(-_sin_yaw * diffs[:, 0] + _cos_yaw * diffs[:, 1])
-            valid = sm[_t] > 0
-            if np.any(valid & (lateral < _LAT_THRESH)):
+        # Step 2: L2 distances over all timesteps.
+        A = pred[:T_min, :2]           # [T, 2]
+        diffs_all = A[:, None, :] - B  # [T, N, 2]
+        l2_all    = np.linalg.norm(diffs_all, axis=2)  # [T, N]
+        valid_sm  = sm > 0
+        l2_gated  = np.where(valid_sm, l2_all, np.inf)
+        l2_gated[:, ~actor_keep] = np.inf
+
+        # Step 3: lateral check only where L2 < gate.
+        close_pairs = l2_gated < _EUCLIDEAN_GATE
+        if np.any(close_pairs):
+            t_indices, n_indices = np.where(close_pairs)
+            delta_y = np.abs(A[t_indices, 1] - B[t_indices, n_indices, 1])
+            lat_ok  = delta_y <= _LAT_THRESH
+            if np.any(lat_ok):
                 collision = 1
-                break
+                first     = int(np.where(lat_ok)[0][0])
+                t_hit     = int(t_indices[first])
+                n_hit     = int(n_indices[first])
+                _dt_step  = float(PREDICTION_DOWNSAMPLING_RATE) * 0.1
+                actor_id_hit: Optional[int] = None
+                if (
+                    surround_actor_ids is not None
+                    and isinstance(surround_actor_ids, list)
+                    and 0 <= n_hit < len(surround_actor_ids)
+                ):
+                    try:
+                        actor_id_hit = int(surround_actor_ids[n_hit])
+                    except Exception:
+                        pass
+                collision_debug = {
+                    "collision": True,
+                    "actor_index": n_hit,
+                    "actor_id": actor_id_hit,
+                    "step_index": t_hit,
+                    "t_seconds": float((t_hit + 1) * _dt_step),
+                    "delta_y_m": float(delta_y[first]),
+                    "euclidean_m": float(l2_all[t_hit, n_hit]),
+                    "pred_world_xy": [float(A[t_hit, 0]), float(A[t_hit, 1])],
+                    "actor_world_xy": [
+                        float(B[t_hit, n_hit, 0]),
+                        float(B[t_hit, n_hit, 1]),
+                    ],
+                }
 
     per_step_errors = [None] * T_min
     for idx in np.where(mask)[0]:
@@ -2107,6 +2182,7 @@ def _compute_plan_metrics_core(
         "plan_ade": plan_ade,
         "plan_fde": plan_fde,
         "collision": collision,
+        "collision_debug": collision_debug,
         "n_valid": n_valid,
         "per_step_errors": per_step_errors,
         "valid_mask": [bool(v) for v in mask.tolist()],
@@ -2129,6 +2205,9 @@ class CanonicalMetricAccumulator:
         self.skipped_missing_canonical = 0
         self.skipped_run_step_exception = 0
         self.skipped_other = 0
+        # Per-horizon (6 canonical timesteps) ADE tracking.
+        self._per_step_ade_sum = [0.0] * 6
+        self._per_step_count = [0] * 6
 
     def record_skip(self, reason: str) -> None:
         self.total_frames += 1
@@ -2157,6 +2236,14 @@ class CanonicalMetricAccumulator:
         self.plan_fde_sum += float(debug_record.get("plan_fde", 0.0))
         self.collision_count += int(bool(debug_record.get("collision", 0)))
         self.n_frames += 1
+        # Per-horizon ADE tracking.
+        breakdown = debug_record.get("ade_breakdown_m")
+        if breakdown and isinstance(breakdown, (list, tuple)):
+            for idx in range(min(6, len(breakdown))):
+                val = breakdown[idx]
+                if val is not None and isinstance(val, (int, float)):
+                    self._per_step_ade_sum[idx] += float(val)
+                    self._per_step_count[idx] += 1
 
     def summary(self) -> Dict[str, float]:
         if self.n_frames == 0:
@@ -2172,6 +2259,18 @@ class CanonicalMetricAccumulator:
             "collision_rate": self.collision_count / self.n_frames,
             "n_frames": self.n_frames,
         }
+
+    def per_horizon_ade(self) -> Dict[str, Any]:
+        """Per-canonical-timestep mean ADE (keys: '0.5s', '1.0s', ..., '3.0s')."""
+        from canonical_trajectory import CANONICAL_TIMESTAMPS
+        result: Dict[str, Any] = {}
+        for idx, ts in enumerate(CANONICAL_TIMESTAMPS):
+            key = f"{float(ts):.1f}s"
+            if idx < len(self._per_step_count) and self._per_step_count[idx] > 0:
+                result[key] = round(self._per_step_ade_sum[idx] / self._per_step_count[idx], 4)
+            else:
+                result[key] = None
+        return result
 
     def coverage_summary(self) -> Dict[str, int]:
         return {
@@ -3362,6 +3461,7 @@ def _build_stage4_scoring_debug_record(
     canonical_record: Optional[Dict[str, Any]],
     surround_traj: Optional[np.ndarray],
     surround_mask: Optional[np.ndarray],
+    surround_actor_ids: Optional[List[int]],
     ego_pose: Optional[np.ndarray],
     run_step_exception: Optional[Exception],
 ) -> Dict[str, Any]:
@@ -3387,7 +3487,7 @@ def _build_stage4_scoring_debug_record(
         inclusion_reason = "missing_canonical"
     else:
         score_mask = valid_mask & gt_valid_mask
-        if not np.all(score_mask):
+        if not np.any(score_mask):
             inclusion_reason = "insufficient_horizon"
         else:
             metrics_payload = _compute_plan_metrics_core(
@@ -3401,6 +3501,9 @@ def _build_stage4_scoring_debug_record(
                 surround_mask=(
                     np.asarray(surround_mask)
                     if surround_mask is not None else np.zeros((0, 6), dtype=np.float64)
+                ),
+                surround_actor_ids=(
+                    list(surround_actor_ids) if surround_actor_ids is not None else None
                 ),
                 ego_pose=ego_pose,
             )
@@ -3448,12 +3551,702 @@ def _build_stage4_scoring_debug_record(
             int(metrics_payload["collision"])
             if metrics_payload is not None else 0
         ),
+        "collision_debug": (
+            metrics_payload.get("collision_debug")
+            if isinstance(metrics_payload, dict)
+            else None
+        ),
         "provenance_debug_notes": list(record.get("provenance_debug_notes", []) or []),
         "run_step_exception": (
             f"{type(run_step_exception).__name__}: {run_step_exception}"
             if run_step_exception is not None else None
         ),
     }
+
+
+def _summarize_input_payload(value: Any) -> Dict[str, Any]:
+    """Compact JSON-safe summary of one run_step input payload."""
+    if value is None:
+        return {"type": "none"}
+    if np is not None and isinstance(value, np.ndarray):
+        arr = np.asarray(value)
+        summary: Dict[str, Any] = {
+            "type": "ndarray",
+            "shape": [int(v) for v in arr.shape],
+            "dtype": str(arr.dtype),
+        }
+        if arr.size > 0 and np.issubdtype(arr.dtype, np.number):
+            finite = np.isfinite(arr)
+            summary["finite_fraction"] = float(np.mean(finite))
+            if np.any(finite):
+                vals = arr[finite]
+                summary["min"] = float(np.min(vals))
+                summary["max"] = float(np.max(vals))
+                summary["mean"] = float(np.mean(vals))
+        return summary
+    if isinstance(value, dict):
+        keys = sorted(str(k) for k in value.keys())
+        preview: Dict[str, Any] = {}
+        for k, v in value.items():
+            ks = str(k)
+            if isinstance(v, (str, int, bool)):
+                preview[ks] = v
+                continue
+            if isinstance(v, float):
+                preview[ks] = float(v) if math.isfinite(v) else None
+                continue
+            if np is not None and isinstance(v, (np.floating, np.integer, np.bool_)):
+                try:
+                    vv = v.item()
+                    preview[ks] = float(vv) if isinstance(vv, float) else vv
+                except Exception:
+                    preview[ks] = str(type(v).__name__)
+                continue
+            if np is not None and isinstance(v, np.ndarray):
+                preview[ks] = _summarize_input_payload(v)
+                continue
+            if isinstance(v, dict):
+                preview[ks] = {
+                    "type": "dict",
+                    "keys": sorted(str(x) for x in v.keys()),
+                }
+                continue
+            preview[ks] = str(type(v).__name__)
+        return {
+            "type": "dict",
+            "keys": keys,
+            "preview": preview,
+        }
+    if isinstance(value, (list, tuple)):
+        return {
+            "type": type(value).__name__,
+            "length": len(value),
+        }
+    if isinstance(value, (str, int, bool)):
+        return {"type": type(value).__name__, "value": value}
+    if isinstance(value, float):
+        return {"type": "float", "value": (float(value) if math.isfinite(value) else None)}
+    return {"type": str(type(value).__name__)}
+
+
+def _summarize_input_data(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Summarise planner-facing input_data keys and payload shapes."""
+    out: Dict[str, Any] = {}
+    for key in sorted(input_data.keys(), key=lambda x: str(x)):
+        val = input_data[key]
+        rec: Dict[str, Any] = {}
+        if isinstance(val, (list, tuple)) and len(val) == 2:
+            ts = val[0]
+            try:
+                rec["frame_token"] = int(ts)
+            except Exception:
+                rec["frame_token"] = ts
+            rec["payload"] = _summarize_input_payload(val[1])
+        else:
+            rec["payload"] = _summarize_input_payload(val)
+        out[str(key)] = rec
+    return out
+
+
+def _summarize_frame_sensors(frame_data: Any) -> Dict[str, Any]:
+    """Compute compact per-frame sensor statistics for debug JSONL."""
+    stats: Dict[str, Any] = {"cameras": {}, "lidar": {}}
+    if frame_data is None:
+        return stats
+    entry = getattr(frame_data, "car_data_raw_entry", None) or {}
+
+    lidar = entry.get("lidar")
+    if lidar is not None:
+        arr = np.asarray(lidar)
+        lidar_stats: Dict[str, Any] = {
+            "shape": [int(v) for v in arr.shape],
+            "dtype": str(arr.dtype),
+            "num_points": int(arr.shape[0]) if arr.ndim >= 1 else 0,
+        }
+        if arr.ndim == 2 and arr.shape[1] >= 3 and arr.size > 0:
+            xyz = arr[:, :3]
+            finite_xyz = np.isfinite(xyz).all(axis=1)
+            lidar_stats["finite_xyz_fraction"] = float(np.mean(finite_xyz)) if len(finite_xyz) else 0.0
+            if np.any(finite_xyz):
+                xyzf = xyz[finite_xyz]
+                lidar_stats["xyz_min"] = [float(v) for v in np.min(xyzf, axis=0)]
+                lidar_stats["xyz_max"] = [float(v) for v in np.max(xyzf, axis=0)]
+                xy_norm = np.linalg.norm(xyzf[:, :2], axis=1)
+                if len(xy_norm):
+                    lidar_stats["xy_range_min"] = float(np.min(xy_norm))
+                    lidar_stats["xy_range_max"] = float(np.max(xy_norm))
+        if arr.ndim == 2 and arr.shape[1] >= 4 and arr.size > 0:
+            intensity = arr[:, 3]
+            finite_i = np.isfinite(intensity)
+            if np.any(finite_i):
+                iv = intensity[finite_i]
+                lidar_stats["intensity_min"] = float(np.min(iv))
+                lidar_stats["intensity_max"] = float(np.max(iv))
+                lidar_stats["intensity_mean"] = float(np.mean(iv))
+        stats["lidar"] = lidar_stats
+
+    for direction in ("front", "left", "right", "rear"):
+        img = entry.get(f"rgb_{direction}")
+        if img is None:
+            stats["cameras"][direction] = {"available": False}
+            continue
+        arr = np.asarray(img)
+        cam_stats: Dict[str, Any] = {
+            "available": True,
+            "shape": [int(v) for v in arr.shape],
+            "dtype": str(arr.dtype),
+        }
+        if arr.size > 0 and np.issubdtype(arr.dtype, np.number):
+            finite = np.isfinite(arr)
+            cam_stats["finite_fraction"] = float(np.mean(finite))
+            cam_stats["nonzero_fraction"] = float(np.count_nonzero(arr) / arr.size)
+            if np.any(finite):
+                vals = arr[finite]
+                cam_stats["min"] = float(np.min(vals))
+                cam_stats["max"] = float(np.max(vals))
+                cam_stats["mean"] = float(np.mean(vals))
+                cam_stats["std"] = float(np.std(vals))
+        stats["cameras"][direction] = cam_stats
+
+    return stats
+
+
+def _find_frame_camera_image(base: Path, cam_key: str) -> Optional[str]:
+    for ext in (".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"):
+        p = Path(f"{base}_{cam_key}{ext}")
+        if p.exists():
+            return str(p)
+    return None
+
+
+def _build_frame_input_files_manifest(
+    *,
+    scenario_dir: Path,
+    actor_id: int,
+    frame_idx: int,
+    camera_assignment: Optional[Dict[str, str]],
+) -> Dict[str, Any]:
+    """Return source file paths used to build one open-loop frame."""
+    base = scenario_dir / str(actor_id) / f"{frame_idx:06d}"
+    camera_images: Dict[str, Optional[str]] = {
+        "front": None,
+        "left": None,
+        "right": None,
+        "rear": None,
+    }
+    camera_keys: Dict[str, str] = {}
+
+    if isinstance(camera_assignment, dict):
+        for cam_key, direction in camera_assignment.items():
+            d = str(direction)
+            if d not in camera_images:
+                continue
+            camera_keys[d] = str(cam_key)
+            camera_images[d] = _find_frame_camera_image(base, str(cam_key))
+
+    return {
+        "scenario_dir": str(scenario_dir),
+        "actor_id": int(actor_id),
+        "frame_base": str(base),
+        "yaml": str(base.with_suffix(".yaml")),
+        "lidar_bin": str(base.with_suffix(".bin")),
+        "camera_keys": camera_keys,
+        "camera_images": camera_images,
+    }
+
+
+def _build_measurements_debug_payload(
+    measurements: Dict[str, Any],
+    *,
+    speed_mps: float,
+) -> Dict[str, Any]:
+    """Persist high-value measurement fields used by planners and projection code."""
+    payload: Dict[str, Any] = {
+        "speed_mps": float(speed_mps),
+    }
+    keys = [
+        "speed",
+        "gps_x",
+        "gps_y",
+        "x",
+        "y",
+        "theta",
+        "compass",
+        "command",
+        "target_point",
+        "lidar_pose_x",
+        "lidar_pose_y",
+        "lidar_pose_z",
+        "lidar_pose_gps_x",
+        "lidar_pose_gps_y",
+        "camera_front_intrinsics",
+        "camera_front_extrinsics",
+        "camera_left_intrinsics",
+        "camera_left_extrinsics",
+        "camera_right_intrinsics",
+        "camera_right_extrinsics",
+        "camera_rear_intrinsics",
+        "camera_rear_extrinsics",
+    ]
+    for k in keys:
+        if isinstance(measurements, dict) and k in measurements:
+            payload[k] = measurements.get(k)
+    return payload
+
+
+_ROADOPTION_NAME_BY_VALUE: Dict[int, str] = {
+    1: "LEFT",
+    2: "RIGHT",
+    3: "STRAIGHT",
+    4: "LANEFOLLOW",
+    5: "CHANGELANELEFT",
+    6: "CHANGELANERIGHT",
+}
+_VAD_BRANCH_NAME_BY_INDEX: List[str] = [
+    "LEFT",
+    "RIGHT",
+    "STRAIGHT",
+    "LANEFOLLOW",
+    "CHANGELANELEFT",
+    "CHANGELANERIGHT",
+]
+
+
+def _roadoption_name(value: Optional[int]) -> Optional[str]:
+    if value is None:
+        return None
+    return _ROADOPTION_NAME_BY_VALUE.get(int(value), f"UNKNOWN_{int(value)}")
+
+
+def _world_to_carla_local(
+    world_xy: np.ndarray,
+    ego_world_xy: np.ndarray,
+    compass_rad: float,
+) -> np.ndarray:
+    theta = float(compass_rad) + math.pi / 2.0
+    rot = np.array(
+        [[math.cos(theta), -math.sin(theta)], [math.sin(theta), math.cos(theta)]],
+        dtype=np.float64,
+    )
+    return (rot.T @ (world_xy[:, :2] - ego_world_xy[:2]).T).T
+
+
+def _carla_local_to_world(
+    local_xy: np.ndarray,
+    ego_world_xy: np.ndarray,
+    compass_rad: float,
+) -> np.ndarray:
+    theta = float(compass_rad) + math.pi / 2.0
+    rot = np.array(
+        [[math.cos(theta), -math.sin(theta)], [math.sin(theta), math.cos(theta)]],
+        dtype=np.float64,
+    )
+    return np.asarray(ego_world_xy, dtype=np.float64)[:2] + (rot @ local_xy[:, :2].T).T
+
+
+def _path_length_m(xy: np.ndarray) -> Optional[float]:
+    arr = np.asarray(xy, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[1] < 2 or len(arr) < 2:
+        return None
+    seg = arr[1:, :2] - arr[:-1, :2]
+    if not np.isfinite(seg).all():
+        return None
+    return float(np.sum(np.linalg.norm(seg, axis=1)))
+
+
+def _heading_change_rad(xy: np.ndarray) -> Optional[float]:
+    arr = np.asarray(xy, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[1] < 2 or len(arr) < 3:
+        return None
+    seg = arr[1:, :2] - arr[:-1, :2]
+    norms = np.linalg.norm(seg, axis=1)
+    valid = np.where(norms > 1e-6)[0]
+    if len(valid) < 2:
+        return None
+    h0 = math.atan2(seg[valid[0], 1], seg[valid[0], 0])
+    h1 = math.atan2(seg[valid[-1], 1], seg[valid[-1], 0])
+    dh = (h1 - h0 + math.pi) % (2.0 * math.pi) - math.pi
+    return float(dh)
+
+
+def _to_list_or_none(values: np.ndarray, mask: np.ndarray) -> List[Optional[float]]:
+    out: List[Optional[float]] = []
+    n = min(len(values), len(mask))
+    for i in range(n):
+        if bool(mask[i]) and math.isfinite(float(values[i])):
+            out.append(float(values[i]))
+        else:
+            out.append(None)
+    return out
+
+
+def _trajectory_error_components_local(
+    pred_world_xy: np.ndarray,
+    gt_world_xy: np.ndarray,
+    *,
+    ego_world_xy: np.ndarray,
+    compass_rad: float,
+    valid_mask: Optional[np.ndarray] = None,
+) -> Dict[str, Any]:
+    pred = np.asarray(pred_world_xy, dtype=np.float64)
+    gt = np.asarray(gt_world_xy, dtype=np.float64)
+    n = min(len(pred), len(gt))
+    if n <= 0:
+        return {
+            "longitudinal_error_m_by_step": [],
+            "lateral_error_m_by_step": [],
+            "abs_longitudinal_error_m_by_step": [],
+            "abs_lateral_error_m_by_step": [],
+            "mean_abs_longitudinal_error_m": None,
+            "mean_abs_lateral_error_m": None,
+        }
+    pred = pred[:n, :2]
+    gt = gt[:n, :2]
+    pred_local = _world_to_carla_local(pred, np.asarray(ego_world_xy, dtype=np.float64), float(compass_rad))
+    gt_local = _world_to_carla_local(gt, np.asarray(ego_world_xy, dtype=np.float64), float(compass_rad))
+    err_local = pred_local - gt_local
+
+    if valid_mask is None:
+        mask = np.ones(n, dtype=bool)
+    else:
+        mask = np.asarray(valid_mask, dtype=bool).reshape(-1)
+        if len(mask) < n:
+            padded = np.zeros(n, dtype=bool)
+            padded[: len(mask)] = mask
+            mask = padded
+        else:
+            mask = mask[:n]
+
+    lon = err_local[:, 0]
+    lat = err_local[:, 1]
+    abs_lon = np.abs(lon)
+    abs_lat = np.abs(lat)
+    return {
+        "longitudinal_error_m_by_step": _to_list_or_none(lon, mask),
+        "lateral_error_m_by_step": _to_list_or_none(lat, mask),
+        "abs_longitudinal_error_m_by_step": _to_list_or_none(abs_lon, mask),
+        "abs_lateral_error_m_by_step": _to_list_or_none(abs_lat, mask),
+        "mean_abs_longitudinal_error_m": (
+            float(np.mean(abs_lon[mask])) if np.any(mask) else None
+        ),
+        "mean_abs_lateral_error_m": (
+            float(np.mean(abs_lat[mask])) if np.any(mask) else None
+        ),
+    }
+
+
+def _select_vad_branch_world_from_index(
+    *,
+    planner_debug: Optional[Dict[str, Any]],
+    branch_index: Optional[int],
+    ego_world_xy: np.ndarray,
+    compass_rad: Optional[float],
+) -> Optional[Dict[str, Any]]:
+    """Convert a VAD branch index from adapter debug payload into world waypoints."""
+    if not isinstance(planner_debug, dict):
+        return None
+    if compass_rad is None or branch_index is None:
+        return None
+    try:
+        idx = int(branch_index)
+    except Exception:
+        return None
+
+    branches_raw = planner_debug.get("candidate_local_wps_by_command")
+    if branches_raw is None:
+        return None
+    try:
+        branches = np.asarray(branches_raw, dtype=np.float64)
+    except Exception:
+        return None
+    if branches.ndim != 3 or branches.shape[-1] < 2 or branches.shape[0] <= 0:
+        return None
+    if idx < 0 or idx >= int(branches.shape[0]):
+        return None
+
+    vad_local = np.asarray(branches[idx, :, :2], dtype=np.float64)
+    if vad_local.ndim != 2 or vad_local.shape[0] <= 0:
+        return None
+    if not np.isfinite(vad_local).all():
+        return None
+
+    # VAD local frame: x=right, y=forward -> CARLA local: x=forward, y=left.
+    carla_local = np.column_stack([vad_local[:, 1], -vad_local[:, 0]])
+    world_wps = _carla_local_to_world(
+        carla_local,
+        np.asarray(ego_world_xy, dtype=np.float64),
+        float(compass_rad),
+    )
+    if not np.isfinite(world_wps).all():
+        return None
+    return {
+        "branch_index": int(idx),
+        "local_wps_vad_frame": vad_local,
+        "world_wps": world_wps,
+    }
+
+
+def _compute_vad_branch_diagnostics(
+    *,
+    planner_name: Optional[str],
+    planner_debug: Optional[Dict[str, Any]],
+    measurements: Optional[Dict[str, Any]],
+    ego_world_xy: np.ndarray,
+    compass_rad: Optional[float],
+    gt_future_world: Optional[np.ndarray],
+    gt_valid_mask: Optional[np.ndarray],
+) -> Optional[Dict[str, Any]]:
+    """Best-effort VAD branch-selection diagnostics for per-frame debug JSONL."""
+    planner_tag = str(planner_name or "").lower()
+    if planner_tag != "vad" and "vad" not in planner_tag:
+        return None
+    if not isinstance(planner_debug, dict):
+        return None
+
+    branches_raw = planner_debug.get("candidate_local_wps_by_command")
+    if branches_raw is None:
+        return None
+    try:
+        branches = np.asarray(branches_raw, dtype=np.float64)
+    except Exception:
+        return None
+    if branches.ndim != 3 or branches.shape[-1] < 2 or branches.shape[0] <= 0:
+        return None
+
+    selected_idx: Optional[int]
+    try:
+        selected_idx = int(planner_debug.get("selected_command_index"))
+    except Exception:
+        selected_idx = None
+
+    route_cmd_value: Optional[int]
+    try:
+        route_cmd_value = int((measurements or {}).get("command"))
+    except Exception:
+        route_cmd_value = None
+
+    selected_cmd_raw_value: Optional[int]
+    try:
+        selected_cmd_raw_value = int(planner_debug.get("selected_command_raw_value"))
+    except Exception:
+        selected_cmd_raw_value = None
+    selected_cmd_fallback_to_lanefollow: Optional[bool]
+    raw_fallback_val = planner_debug.get("selected_command_fallback_to_lanefollow")
+    if isinstance(raw_fallback_val, bool):
+        selected_cmd_fallback_to_lanefollow = bool(raw_fallback_val)
+    else:
+        selected_cmd_fallback_to_lanefollow = None
+
+    selected_cmd_value = (
+        int(selected_idx + 1)
+        if selected_idx is not None and 0 <= selected_idx < len(_VAD_BRANCH_NAME_BY_INDEX)
+        else None
+    )
+
+    summary: Dict[str, Any] = {
+        "route_command_value": route_cmd_value,
+        "route_command_name": _roadoption_name(route_cmd_value),
+        "selected_branch_index": selected_idx,
+        "selected_command_value": selected_cmd_value,
+        "selected_command_name": _roadoption_name(selected_cmd_value),
+        "selected_command_raw_value": selected_cmd_raw_value,
+        "selected_command_fallback_to_lanefollow": selected_cmd_fallback_to_lanefollow,
+        "selected_matches_route_command": (
+            bool(selected_cmd_value == route_cmd_value)
+            if selected_cmd_value is not None and route_cmd_value is not None
+            else None
+        ),
+    }
+
+    if compass_rad is None or gt_future_world is None:
+        return summary
+
+    gt_world = np.asarray(gt_future_world, dtype=np.float64).reshape(-1, 2)
+    if len(gt_world) == 0:
+        return summary
+
+    if gt_valid_mask is None:
+        valid_mask = np.ones(len(gt_world), dtype=bool)
+    else:
+        valid_mask = np.asarray(gt_valid_mask, dtype=bool).reshape(-1)
+        if len(valid_mask) < len(gt_world):
+            padded = np.zeros(len(gt_world), dtype=bool)
+            padded[: len(valid_mask)] = valid_mask
+            valid_mask = padded
+        else:
+            valid_mask = valid_mask[: len(gt_world)]
+
+    gt_local_carla = _world_to_carla_local(gt_world, np.asarray(ego_world_xy, dtype=np.float64), float(compass_rad))
+    gt_local_finite = np.isfinite(gt_local_carla).all(axis=1)
+
+    # Branches from VAD metadata use (right=+x, forward=+y). Convert to
+    # CARLA-local (forward=+x, left=+y) for direct GT-local comparison.
+    branches_local_carla = np.stack([branches[:, :, 1], -branches[:, :, 0]], axis=-1)
+    ade_by_branch: List[Optional[float]] = []
+    fde_by_branch: List[Optional[float]] = []
+    world_ade_by_branch: List[Optional[float]] = []
+    world_fde_by_branch: List[Optional[float]] = []
+    for branch in branches_local_carla:
+        n = min(len(branch), len(gt_local_carla))
+        if n <= 0:
+            ade_by_branch.append(None)
+            fde_by_branch.append(None)
+            world_ade_by_branch.append(None)
+            world_fde_by_branch.append(None)
+            continue
+        branch_n = branch[:n, :2]
+        gt_n = gt_local_carla[:n, :2]
+        valid = (
+            valid_mask[:n]
+            & gt_local_finite[:n]
+            & np.isfinite(branch_n).all(axis=1)
+        )
+        if not np.any(valid):
+            ade_by_branch.append(None)
+            fde_by_branch.append(None)
+            world_ade_by_branch.append(None)
+            world_fde_by_branch.append(None)
+            continue
+        d_local = np.linalg.norm(branch_n[valid] - gt_n[valid], axis=1)
+        ade_by_branch.append(float(np.mean(d_local)))
+        fde_by_branch.append(float(d_local[-1]))
+
+        branch_world = _carla_local_to_world(
+            branch_n,
+            np.asarray(ego_world_xy, dtype=np.float64),
+            float(compass_rad),
+        )
+        gt_world_n = gt_world[:n, :2]
+        valid_world = (
+            valid
+            & np.isfinite(branch_world).all(axis=1)
+            & np.isfinite(gt_world_n).all(axis=1)
+        )
+        if not np.any(valid_world):
+            world_ade_by_branch.append(None)
+            world_fde_by_branch.append(None)
+        else:
+            d_world = np.linalg.norm(
+                branch_world[valid_world] - gt_world_n[valid_world],
+                axis=1,
+            )
+            world_ade_by_branch.append(float(np.mean(d_world)))
+            world_fde_by_branch.append(float(d_world[-1]))
+
+    finite = [
+        (idx, val) for idx, val in enumerate(ade_by_branch)
+        if val is not None and math.isfinite(float(val))
+    ]
+    finite_world = [
+        (idx, val) for idx, val in enumerate(world_ade_by_branch)
+        if val is not None and math.isfinite(float(val))
+    ]
+    if not finite:
+        summary["branch_local_ade_m_by_index"] = ade_by_branch
+        summary["branch_local_fde_m_by_index"] = fde_by_branch
+        summary["branch_world_ade_m_by_index"] = world_ade_by_branch
+        summary["branch_world_fde_m_by_index"] = world_fde_by_branch
+        return summary
+
+    best_idx, best_ade = min(finite, key=lambda iv: float(iv[1]))
+    best_world_idx: Optional[int] = None
+    best_world_ade: Optional[float] = None
+    if finite_world:
+        best_world_idx, best_world_ade = min(finite_world, key=lambda iv: float(iv[1]))
+    selected_ade: Optional[float] = None
+    selected_fde: Optional[float] = None
+    selected_world_ade: Optional[float] = None
+    selected_world_fde: Optional[float] = None
+    if selected_idx is not None and 0 <= selected_idx < len(ade_by_branch):
+        selected_ade = ade_by_branch[selected_idx]
+        selected_fde = fde_by_branch[selected_idx]
+        selected_world_ade = world_ade_by_branch[selected_idx]
+        selected_world_fde = world_fde_by_branch[selected_idx]
+
+    summary.update({
+        "branch_local_ade_m_by_index": ade_by_branch,
+        "branch_local_fde_m_by_index": fde_by_branch,
+        "branch_world_ade_m_by_index": world_ade_by_branch,
+        "branch_world_fde_m_by_index": world_fde_by_branch,
+        "best_branch_index_by_local_ade": int(best_idx),
+        "best_command_value_by_local_ade": int(best_idx + 1),
+        "best_command_name_by_local_ade": _roadoption_name(int(best_idx + 1)),
+        "best_branch_local_ade_m": float(best_ade),
+        "best_branch_local_fde_m": (
+            float(fde_by_branch[best_idx])
+            if fde_by_branch[best_idx] is not None and math.isfinite(float(fde_by_branch[best_idx]))
+            else None
+        ),
+        "best_branch_index_by_world_ade": (
+            int(best_world_idx) if best_world_idx is not None else None
+        ),
+        "best_command_value_by_world_ade": (
+            int(best_world_idx + 1) if best_world_idx is not None else None
+        ),
+        "best_command_name_by_world_ade": (
+            _roadoption_name(int(best_world_idx + 1))
+            if best_world_idx is not None else None
+        ),
+        "best_branch_world_ade_m": (
+            float(best_world_ade)
+            if best_world_ade is not None and math.isfinite(float(best_world_ade))
+            else None
+        ),
+        "best_branch_world_fde_m": (
+            float(world_fde_by_branch[best_world_idx])
+            if best_world_idx is not None
+            and world_fde_by_branch[best_world_idx] is not None
+            and math.isfinite(float(world_fde_by_branch[best_world_idx]))
+            else None
+        ),
+        "selected_branch_local_ade_m": (
+            float(selected_ade)
+            if selected_ade is not None and math.isfinite(float(selected_ade))
+            else None
+        ),
+        "selected_branch_local_fde_m": (
+            float(selected_fde)
+            if selected_fde is not None and math.isfinite(float(selected_fde))
+            else None
+        ),
+        "selected_branch_world_ade_m": (
+            float(selected_world_ade)
+            if selected_world_ade is not None and math.isfinite(float(selected_world_ade))
+            else None
+        ),
+        "selected_branch_world_fde_m": (
+            float(selected_world_fde)
+            if selected_world_fde is not None and math.isfinite(float(selected_world_fde))
+            else None
+        ),
+        "selected_minus_best_local_ade_m": (
+            float(selected_ade - best_ade)
+            if selected_ade is not None and math.isfinite(float(selected_ade))
+            else None
+        ),
+        "selected_minus_best_world_ade_m": (
+            float(selected_world_ade - best_world_ade)
+            if selected_world_ade is not None
+            and best_world_ade is not None
+            and math.isfinite(float(selected_world_ade))
+            and math.isfinite(float(best_world_ade))
+            else None
+        ),
+        "selected_is_best_by_local_ade": (
+            bool(float(selected_ade) <= float(best_ade) + 1e-6)
+            if selected_ade is not None and math.isfinite(float(selected_ade))
+            else None
+        ),
+        "selected_is_best_by_world_ade": (
+            bool(float(selected_world_ade) <= float(best_world_ade) + 1e-6)
+            if selected_world_ade is not None
+            and best_world_ade is not None
+            and math.isfinite(float(selected_world_ade))
+            and math.isfinite(float(best_world_ade))
+            else None
+        ),
+    })
+    return summary
 
 
 def evaluate_scenario(agent,
@@ -3472,6 +4265,7 @@ def evaluate_scenario(agent,
                       canonical_export_dir: Optional[Path] = None,
                       scoring_debug_dir: Optional[Path] = None,
                       native_horizon: bool = True,
+                      vad_oracle_branch_by_local_ade: bool = True,
                       skip_stale_frames: bool = True,
                       scoring_path: str = "canonical_fresh_only") -> Dict[str, Any]:
     """
@@ -3498,6 +4292,10 @@ def evaluate_scenario(agent,
     legacy_accum = MetricAccumulator()
     canonical_accum = CanonicalMetricAccumulator()
     debug_rollout_accum = MetricAccumulator()   # debug-only: control-rollout metrics
+    branch_selected_accum = MetricAccumulator()  # command-selected branch (non-oracle)
+    branch_oracle_accum = MetricAccumulator()    # best branch by GT-local ADE (oracle)
+    branch_selected_scored_accum = MetricAccumulator()  # canonical-scored subset only
+    branch_oracle_scored_accum = MetricAccumulator()    # canonical-scored subset only
     stale_detector = StaleControlDetector()
     traj_source_counts: Dict[str, int] = {}     # provenance counter
     adapter_source_counts: Dict[str, int] = {}  # adapter raw source before fallback
@@ -3611,6 +4409,10 @@ def evaluate_scenario(agent,
         f"  [openloop] native_horizon={'enabled' if native_horizon else 'disabled (0.5s grid)'}  "
         f"skip_stale_frames={'enabled' if skip_stale_frames else 'disabled'}"
     )
+    print(
+        f"  [openloop] vad_oracle_branch_by_local_ade="
+        f"{'enabled' if vad_oracle_branch_by_local_ade else 'disabled'}"
+    )
     print(f"  [openloop] scoring_path={scoring_path}")
 
     gt_traj_all = scenario.get_gt_trajectory(primary_actor_id)  # [N_frames, 2]
@@ -3635,6 +4437,7 @@ def evaluate_scenario(agent,
         timestamp = frame_idx * runtime_dt
         meta = {}
         prev_meta = {}
+        cam_assign: Optional[Dict[str, str]] = None
         try:
             import yaml as _yaml
             _yp = (scenario.scenario_dir / str(primary_actor_id)
@@ -3646,9 +4449,12 @@ def evaluate_scenario(agent,
                             / f"{frame_idx - 1:06d}.yaml")
                 with open(_prev_yp) as _fh:
                     prev_meta = _yaml.safe_load(_fh) or {}
+            _assign_camera_directions = _ds_mod._assign_camera_directions
+            cam_assign = _assign_camera_directions(meta)
         except Exception:
             meta = {}
             prev_meta = {}
+            cam_assign = None
 
         # Update synthetic world actors from recorded frame metadata so agent
         # calls to CarlaDataProvider.get_world().get_actors() stay open-loop.
@@ -3747,6 +4553,18 @@ def evaluate_scenario(agent,
                 _m["speed"] = np.float32(_sp)
         except Exception:
             pass
+        input_data_overview = _summarize_input_data(input_data)
+        sensor_stats = _summarize_frame_sensors(frame_data)
+        input_files = _build_frame_input_files_manifest(
+            scenario_dir=scenario.scenario_dir,
+            actor_id=int(primary_actor_id),
+            frame_idx=int(frame_idx),
+            camera_assignment=cam_assign,
+        )
+        measurements_debug = _build_measurements_debug_payload(
+            measurements,
+            speed_mps=speed_mps,
+        )
 
         run_exc = None
         run_output = None
@@ -3783,9 +4601,22 @@ def evaluate_scenario(agent,
         _gt_indices: List[int] = []
         surround_traj = np.zeros((0, 0, 2), dtype=np.float64)
         surround_mask = np.zeros((0, 0), dtype=np.float64)
+        surround_actor_ids: List[int] = []
         primary_pred_world_vis = pred_world
         primary_gt_world_vis = gt_future_xy
         primary_pred_raw_vis = None
+        vad_branch_diagnostics: Optional[Dict[str, Any]] = None
+        branch_selected_frame_metrics: Dict[str, Any] = {}
+        branch_oracle_frame_metrics: Dict[str, Any] = {}
+        frame_eval_diagnostics: Dict[str, Any] = {}
+        selected_eval_wps_ref = np.zeros((0, 2), dtype=np.float64)
+        selected_gt_future_ref = np.zeros((0, 2), dtype=np.float64)
+        selected_gt_mask_ref = np.zeros((0,), dtype=np.float64)
+        selected_eval_dt_frames_ref = int(PREDICTION_DOWNSAMPLING_RATE)
+        oracle_branch_world_candidate: Optional[np.ndarray] = None
+        oracle_eval_wps_ref = np.zeros((0, 2), dtype=np.float64)
+        oracle_gt_future_ref = np.zeros((0, 2), dtype=np.float64)
+        oracle_gt_mask_ref = np.zeros((0,), dtype=np.float64)
 
         if run_exc is None:
             ctrl = _extract_primary_control(run_output, slot_id=0)
@@ -3824,6 +4655,7 @@ def evaluate_scenario(agent,
                 _ego_xy  = np.array([pose[0], pose[1]], dtype=np.float64)
                 planner_out = extract_planner_trajectory(
                     agent, _ego_xy, _compass, planner_name=planner_name,
+                    measurements=measurements,
                 )
                 adapter_source = str(planner_out.traj_source or "none")
                 adapter_source_counts[adapter_source] = (
@@ -3864,38 +4696,44 @@ def evaluate_scenario(agent,
                 rollout_pred = np.asarray(rollout_pred, dtype=np.float64)[:T_pred, :2]
 
             # ── Select evaluation waypoints + GT time grid ──────────
-            # native_horizon=True: use the planner's own raw (pre-resample)
-            # waypoints and match GT at the planner's native dt, so every
-            # prediction is compared to the GT position it was actually meant
-            # to target.  native_horizon=False: use the resampled 0.5-s grid
-            # (original behaviour).
-            _raw_avail = (
-                native_horizon
-                and planner_out is not None
-                and planner_out.raw_world_wps is not None
-                and pred_source != "control_rollout"
-            )
-            if _raw_avail:
-                eval_wps = np.asarray(planner_out.raw_world_wps,
-                                      dtype=np.float64)[:, :2]
-                _eval_dt_frames = max(1, round(planner_out.native_dt / runtime_dt))
-            else:
-                eval_wps = pred_world
-                _eval_dt_frames = int(PREDICTION_DOWNSAMPLING_RATE)
-            T_eval = len(eval_wps)
+            def _build_eval_grid(
+                pred_world_now: np.ndarray,
+            ) -> Tuple[bool, np.ndarray, int, List[int], np.ndarray, np.ndarray]:
+                # native_horizon=True: use planner raw (pre-resample) waypoints
+                # and match GT at planner native dt.
+                raw_avail_now = (
+                    native_horizon
+                    and planner_out is not None
+                    and planner_out.raw_world_wps is not None
+                    and pred_source != "control_rollout"
+                )
+                if raw_avail_now:
+                    eval_now = np.asarray(planner_out.raw_world_wps, dtype=np.float64)[:, :2]
+                    eval_dt_frames_now = max(1, round(planner_out.native_dt / runtime_dt))
+                else:
+                    eval_now = np.asarray(pred_world_now, dtype=np.float64)[:, :2]
+                    eval_dt_frames_now = int(PREDICTION_DOWNSAMPLING_RATE)
+                gt_idx_now = [
+                    frame_idx + eval_dt_frames_now * t
+                    for t in range(1, len(eval_now) + 1)
+                    if frame_idx + eval_dt_frames_now * t < n_frames
+                ]
+                gt_now = (
+                    gt_traj_all[gt_idx_now]
+                    if gt_idx_now
+                    else np.zeros((0, 2), dtype=np.float64)
+                )
+                gt_mask_now = np.ones(len(gt_now), dtype=np.float64)
+                return raw_avail_now, eval_now, eval_dt_frames_now, gt_idx_now, gt_now, gt_mask_now
 
-            # GT at the evaluation time grid (indices into gt_traj_all)
-            _gt_indices = [
-                frame_idx + _eval_dt_frames * t
-                for t in range(1, T_eval + 1)
-                if frame_idx + _eval_dt_frames * t < n_frames
-            ]
-            gt_future_xy = (
-                gt_traj_all[_gt_indices]
-                if _gt_indices
-                else np.zeros((0, 2), dtype=np.float64)
+            _raw_avail, eval_wps, _eval_dt_frames, _gt_indices, gt_future_xy, gt_future_mask = (
+                _build_eval_grid(pred_world)
             )
-            gt_future_mask = np.ones(len(gt_future_xy))
+            T_eval = len(eval_wps)
+            selected_eval_wps_ref = np.asarray(eval_wps, dtype=np.float64).copy()
+            selected_gt_future_ref = np.asarray(gt_future_xy, dtype=np.float64).copy()
+            selected_gt_mask_ref = np.asarray(gt_future_mask, dtype=np.float64).copy()
+            selected_eval_dt_frames_ref = int(_eval_dt_frames)
 
             # Standard 0.5-s GT grid kept for the debug rollout accumulator
             _dsr = PREDICTION_DOWNSAMPLING_RATE
@@ -3911,6 +4749,105 @@ def evaluate_scenario(agent,
             )
             gt_std_mask = np.ones(len(gt_std_xy))
 
+            vad_branch_diagnostics = _compute_vad_branch_diagnostics(
+                planner_name=planner_name,
+                planner_debug=(planner_out.debug if planner_out is not None else None),
+                measurements=measurements,
+                ego_world_xy=np.asarray([pose[0], pose[1]], dtype=np.float64),
+                compass_rad=_compass,
+                gt_future_world=gt_future_xy,
+                gt_valid_mask=gt_future_mask,
+            )
+
+            best_idx = (
+                vad_branch_diagnostics.get("best_branch_index_by_local_ade")
+                if isinstance(vad_branch_diagnostics, dict)
+                else None
+            )
+            branch_override = _select_vad_branch_world_from_index(
+                planner_debug=(planner_out.debug if planner_out is not None else None),
+                branch_index=best_idx,
+                ego_world_xy=np.asarray([pose[0], pose[1]], dtype=np.float64),
+                compass_rad=_compass,
+            )
+            if branch_override is not None:
+                oracle_branch_world_candidate = np.asarray(
+                    branch_override["world_wps"], dtype=np.float64
+                )
+
+            if (
+                vad_oracle_branch_by_local_ade
+                and planner_out is not None
+                and pred_source != "control_rollout"
+                and branch_override is not None
+            ):
+                oracle_idx = int(branch_override["branch_index"])
+                oracle_world = np.asarray(branch_override["world_wps"], dtype=np.float64)
+                oracle_local = np.asarray(
+                    branch_override["local_wps_vad_frame"], dtype=np.float64
+                )
+
+                prev_source = str(pred_source or "")
+                if prev_source:
+                    traj_source_counts[prev_source] = max(
+                        0, int(traj_source_counts.get(prev_source, 0)) - 1
+                    )
+                    pred_source = f"{prev_source}|vad_oracle_local_ade"
+                else:
+                    pred_source = "vad_oracle_local_ade"
+                traj_source_counts[pred_source] = (
+                    int(traj_source_counts.get(pred_source, 0)) + 1
+                )
+
+                pred_world = oracle_world
+                planner_out.future_trajectory_world = oracle_world
+                planner_out.raw_world_wps = oracle_world
+                planner_out.raw_length = int(len(oracle_world))
+
+                if not isinstance(planner_out.debug, dict):
+                    planner_out.debug = {}
+                planner_out.debug["selected_command_index_original"] = (
+                    planner_out.debug.get("selected_command_index")
+                )
+                planner_out.debug["selected_command_index"] = int(oracle_idx)
+                planner_out.debug["oracle_selected_by_local_ade"] = True
+                planner_out.debug["oracle_selected_branch_index"] = int(oracle_idx)
+                planner_out.debug["oracle_selection_metric"] = (
+                    "local_ade_to_gt_eval_grid"
+                )
+
+                raw_export_obj = getattr(planner_out, "raw_export", None)
+                if raw_export_obj is not None:
+                    try:
+                        raw_export_obj.raw_positions = oracle_local
+                        notes = list(getattr(raw_export_obj, "adapter_debug_notes", []) or [])
+                        notes.append(
+                            "oracle branch override enabled: selected VAD branch "
+                            "with minimum local ADE to GT on the current eval grid"
+                        )
+                        raw_export_obj.adapter_debug_notes = notes
+                    except Exception:
+                        pass
+
+                _raw_avail, eval_wps, _eval_dt_frames, _gt_indices, gt_future_xy, gt_future_mask = (
+                    _build_eval_grid(pred_world)
+                )
+                T_eval = len(eval_wps)
+
+                if vad_branch_diagnostics is None:
+                    vad_branch_diagnostics = {}
+                vad_branch_diagnostics["oracle_branch_selection_applied"] = True
+                vad_branch_diagnostics["oracle_branch_selection_mode"] = (
+                    "min_local_ade_to_gt"
+                )
+                vad_branch_diagnostics["oracle_selected_branch_index"] = int(oracle_idx)
+                vad_branch_diagnostics["oracle_selected_command_value"] = int(oracle_idx + 1)
+                vad_branch_diagnostics["oracle_selected_command_name"] = _roadoption_name(
+                    int(oracle_idx + 1)
+                )
+            elif vad_branch_diagnostics is not None:
+                vad_branch_diagnostics["oracle_branch_selection_applied"] = False
+
             if len(gt_future_xy) > 0:
                 if len(gt_future_xy) < T_eval:
                     pad = T_eval - len(gt_future_xy)
@@ -3925,9 +4862,44 @@ def evaluate_scenario(agent,
                     gt_std_mask = np.concatenate([gt_std_mask,
                                                   np.zeros(pad)])
 
-                surround_traj, surround_mask = scenario.get_surrounding_trajectories(
-                    primary_actor_id, frame_idx
-                )
+                try:
+                    _surround_out = scenario.get_surrounding_trajectories(
+                        primary_actor_id,
+                        frame_idx,
+                        return_actor_ids=True,
+                    )
+                    if (
+                        isinstance(_surround_out, tuple)
+                        and len(_surround_out) == 3
+                    ):
+                        surround_traj, surround_mask, surround_actor_ids = _surround_out
+                    else:
+                        surround_traj, surround_mask = _surround_out  # type: ignore[misc]
+                        surround_actor_ids = []
+                except TypeError:
+                    surround_traj, surround_mask = scenario.get_surrounding_trajectories(
+                        primary_actor_id, frame_idx
+                    )
+                    surround_actor_ids = []
+
+                oracle_eval_wps_ref = np.zeros((0, 2), dtype=np.float64)
+                oracle_gt_future_ref = np.zeros((0, 2), dtype=np.float64)
+                oracle_gt_mask_ref = np.zeros((0,), dtype=np.float64)
+                if oracle_branch_world_candidate is not None and selected_eval_dt_frames_ref > 0:
+                    oracle_eval_wps_ref = np.asarray(
+                        oracle_branch_world_candidate, dtype=np.float64
+                    )[:, :2]
+                    oracle_gt_indices = [
+                        frame_idx + selected_eval_dt_frames_ref * t
+                        for t in range(1, len(oracle_eval_wps_ref) + 1)
+                        if frame_idx + selected_eval_dt_frames_ref * t < n_frames
+                    ]
+                    oracle_gt_future_ref = (
+                        gt_traj_all[oracle_gt_indices]
+                        if oracle_gt_indices
+                        else np.zeros((0, 2), dtype=np.float64)
+                    )
+                    oracle_gt_mask_ref = np.ones(len(oracle_gt_future_ref), dtype=np.float64)
 
                 # ── Skip stale frames from metric accumulation ───────
                 if skip_stale_frames and is_stale:
@@ -3937,7 +4909,46 @@ def evaluate_scenario(agent,
                         "stale": True,
                         "inclusion_reason": "stale",
                     }
+                    branch_selected_frame_metrics = {
+                        "inclusion_reason": "stale",
+                        "scored": False,
+                    }
+                    branch_oracle_frame_metrics = {
+                        "inclusion_reason": "stale",
+                        "scored": False,
+                    }
                 else:
+                    if len(selected_eval_wps_ref) > 0 and len(selected_gt_future_ref) > 0:
+                        _selected_branch_m = branch_selected_accum.update(
+                            pred_world_wps=selected_eval_wps_ref,
+                            gt_future_xy=selected_gt_future_ref,
+                            gt_future_mask=selected_gt_mask_ref,
+                            surround_traj=surround_traj,
+                            surround_mask=surround_mask,
+                            ego_pose=pose,
+                        )
+                        if _selected_branch_m:
+                            branch_selected_frame_metrics = {
+                                **_selected_branch_m,
+                                "inclusion_reason": "scored",
+                                "scored": True,
+                            }
+                    if len(oracle_eval_wps_ref) > 0 and len(oracle_gt_future_ref) > 0:
+                        _oracle_branch_m = branch_oracle_accum.update(
+                            pred_world_wps=oracle_eval_wps_ref,
+                            gt_future_xy=oracle_gt_future_ref,
+                            gt_future_mask=oracle_gt_mask_ref,
+                            surround_traj=surround_traj,
+                            surround_mask=surround_mask,
+                            ego_pose=pose,
+                        )
+                        if _oracle_branch_m:
+                            branch_oracle_frame_metrics = {
+                                **_oracle_branch_m,
+                                "inclusion_reason": "scored",
+                                "scored": True,
+                            }
+
                     legacy_frame_metrics = legacy_accum.update(
                         pred_world_wps = eval_wps,
                         gt_future_xy   = gt_future_xy,
@@ -4061,6 +5072,7 @@ def evaluate_scenario(agent,
                 canonical_record=canonical_export_record,
                 surround_traj=surround_traj,
                 surround_mask=surround_mask,
+                surround_actor_ids=surround_actor_ids,
                 ego_pose=pose,
                 run_step_exception=run_exc,
             )
@@ -4072,6 +5084,7 @@ def evaluate_scenario(agent,
                 canonical_record=None,
                 surround_traj=surround_traj,
                 surround_mask=surround_mask,
+                surround_actor_ids=surround_actor_ids,
                 ego_pose=pose,
                 run_step_exception=run_exc,
             )
@@ -4090,6 +5103,143 @@ def evaluate_scenario(agent,
                     exc,
                 )
 
+        selected_mask_bool = np.asarray(selected_gt_mask_ref, dtype=np.float64) > 0
+        oracle_mask_bool = np.asarray(oracle_gt_mask_ref, dtype=np.float64) > 0
+        selected_error_components: Optional[Dict[str, Any]] = None
+        oracle_error_components: Optional[Dict[str, Any]] = None
+        if _compass is not None and len(selected_eval_wps_ref) > 0 and len(selected_gt_future_ref) > 0:
+            selected_error_components = _trajectory_error_components_local(
+                selected_eval_wps_ref,
+                selected_gt_future_ref,
+                ego_world_xy=np.asarray([pose[0], pose[1]], dtype=np.float64),
+                compass_rad=float(_compass),
+                valid_mask=selected_mask_bool,
+            )
+        if _compass is not None and len(oracle_eval_wps_ref) > 0 and len(oracle_gt_future_ref) > 0:
+            oracle_error_components = _trajectory_error_components_local(
+                oracle_eval_wps_ref,
+                oracle_gt_future_ref,
+                ego_world_xy=np.asarray([pose[0], pose[1]], dtype=np.float64),
+                compass_rad=float(_compass),
+                valid_mask=oracle_mask_bool,
+            )
+
+        selected_path_len = _path_length_m(selected_eval_wps_ref)
+        gt_path_len = _path_length_m(selected_gt_future_ref)
+        oracle_path_len = _path_length_m(oracle_eval_wps_ref)
+        selected_headchg = _heading_change_rad(selected_eval_wps_ref)
+        gt_headchg = _heading_change_rad(selected_gt_future_ref)
+        oracle_headchg = _heading_change_rad(oracle_eval_wps_ref)
+        frame_eval_diagnostics = {
+            "speed_mps": float(speed_mps),
+            "startup_frame_idx_threshold": 1,
+            "low_speed_threshold_mps": 1.0,
+            "is_startup_frame": bool(int(frame_idx) <= 1),
+            "is_low_speed_frame": bool(float(speed_mps) <= 1.0),
+            "route_command_value": (
+                vad_branch_diagnostics.get("route_command_value")
+                if isinstance(vad_branch_diagnostics, dict) else None
+            ),
+            "route_command_name": (
+                vad_branch_diagnostics.get("route_command_name")
+                if isinstance(vad_branch_diagnostics, dict) else None
+            ),
+            "selected_command_raw_value": (
+                vad_branch_diagnostics.get("selected_command_raw_value")
+                if isinstance(vad_branch_diagnostics, dict) else None
+            ),
+            "selected_command_fallback_to_lanefollow": (
+                vad_branch_diagnostics.get("selected_command_fallback_to_lanefollow")
+                if isinstance(vad_branch_diagnostics, dict) else None
+            ),
+            "selected_branch_index": (
+                vad_branch_diagnostics.get("selected_branch_index")
+                if isinstance(vad_branch_diagnostics, dict) else None
+            ),
+            "best_branch_index_by_local_ade": (
+                vad_branch_diagnostics.get("best_branch_index_by_local_ade")
+                if isinstance(vad_branch_diagnostics, dict) else None
+            ),
+            "best_branch_index_by_world_ade": (
+                vad_branch_diagnostics.get("best_branch_index_by_world_ade")
+                if isinstance(vad_branch_diagnostics, dict) else None
+            ),
+            "selected_ade_m": (
+                branch_selected_frame_metrics.get("plan_ade")
+                if isinstance(branch_selected_frame_metrics, dict) else None
+            ),
+            "selected_fde_m": (
+                branch_selected_frame_metrics.get("plan_fde")
+                if isinstance(branch_selected_frame_metrics, dict) else None
+            ),
+            "oracle_ade_m": (
+                branch_oracle_frame_metrics.get("plan_ade")
+                if isinstance(branch_oracle_frame_metrics, dict) else None
+            ),
+            "oracle_fde_m": (
+                branch_oracle_frame_metrics.get("plan_fde")
+                if isinstance(branch_oracle_frame_metrics, dict) else None
+            ),
+            "selected_minus_oracle_ade_m": (
+                float(branch_selected_frame_metrics.get("plan_ade") - branch_oracle_frame_metrics.get("plan_ade"))
+                if isinstance(branch_selected_frame_metrics.get("plan_ade"), (int, float))
+                and isinstance(branch_oracle_frame_metrics.get("plan_ade"), (int, float))
+                and math.isfinite(float(branch_selected_frame_metrics.get("plan_ade")))
+                and math.isfinite(float(branch_oracle_frame_metrics.get("plan_ade")))
+                else None
+            ),
+            "selected_path_length_m": selected_path_len,
+            "gt_path_length_m": gt_path_len,
+            "oracle_path_length_m": oracle_path_len,
+            "selected_path_length_minus_gt_m": (
+                float(selected_path_len - gt_path_len)
+                if selected_path_len is not None and gt_path_len is not None
+                else None
+            ),
+            "oracle_path_length_minus_gt_m": (
+                float(oracle_path_len - gt_path_len)
+                if oracle_path_len is not None and gt_path_len is not None
+                else None
+            ),
+            "selected_heading_change_rad": selected_headchg,
+            "gt_heading_change_rad": gt_headchg,
+            "oracle_heading_change_rad": oracle_headchg,
+            "selected_heading_change_minus_gt_rad": (
+                float(selected_headchg - gt_headchg)
+                if selected_headchg is not None and gt_headchg is not None
+                else None
+            ),
+            "oracle_heading_change_minus_gt_rad": (
+                float(oracle_headchg - gt_headchg)
+                if oracle_headchg is not None and gt_headchg is not None
+                else None
+            ),
+            "selected_error_components_ego_local": selected_error_components,
+            "oracle_error_components_ego_local": oracle_error_components,
+            "is_fresh_plan": bool(raw_export_record.get("is_fresh_plan", False)),
+            "reused_from_step": raw_export_record.get("reused_from_step"),
+            "timestamp_source": (
+                canonical_frame_metrics.get("timestamp_source")
+                if isinstance(canonical_frame_metrics, dict) else None
+            ),
+            "interpolation_method": (
+                canonical_export_record.get("interpolation_method")
+                if isinstance(canonical_export_record, dict) else None
+            ),
+            "trajectory_extrapolated": (
+                "extrapolation" in str(canonical_export_record.get("interpolation_method", ""))
+                if isinstance(canonical_export_record, dict) else None
+            ),
+            "scored": (
+                bool(canonical_frame_metrics.get("scored", False))
+                if isinstance(canonical_frame_metrics, dict) else False
+            ),
+            "inclusion_reason": (
+                canonical_frame_metrics.get("inclusion_reason")
+                if isinstance(canonical_frame_metrics, dict) else None
+            ),
+        }
+
         if scoring_path == "canonical_fresh_only":
             if not canonical_frame_metrics:
                 canonical_frame_metrics = _build_stage4_scoring_debug_record(
@@ -4099,6 +5249,7 @@ def evaluate_scenario(agent,
                     canonical_record=None,
                     surround_traj=surround_traj,
                     surround_mask=surround_mask,
+                    surround_actor_ids=surround_actor_ids,
                     ego_pose=pose,
                     run_step_exception=run_exc,
                 )
@@ -4132,6 +5283,21 @@ def evaluate_scenario(agent,
                 "legacy_plan_ade": legacy_frame_metrics.get("plan_ade", float("nan")),
                 "legacy_plan_fde": legacy_frame_metrics.get("plan_fde", float("nan")),
                 "legacy_collision": legacy_frame_metrics.get("collision", 0),
+                "branch_selected_plan_ade": branch_selected_frame_metrics.get(
+                    "plan_ade", float("nan")
+                ),
+                "branch_selected_plan_fde": branch_selected_frame_metrics.get(
+                    "plan_fde", float("nan")
+                ),
+                "branch_oracle_plan_ade": branch_oracle_frame_metrics.get(
+                    "plan_ade", float("nan")
+                ),
+                "branch_oracle_plan_fde": branch_oracle_frame_metrics.get(
+                    "plan_fde", float("nan")
+                ),
+                "selected_minus_oracle_ade_m": frame_eval_diagnostics.get(
+                    "selected_minus_oracle_ade_m", float("nan")
+                ),
             }
             if "debug_ade_rollout" in legacy_frame_metrics:
                 frame_metrics["debug_ade_rollout"] = legacy_frame_metrics["debug_ade_rollout"]
@@ -4151,9 +5317,46 @@ def evaluate_scenario(agent,
                 if planner_out is not None and pred_source != "control_rollout"
                 else None
             )
+
+            # Branch diagnostics are also tracked on the canonical scored subset
+            # so selected-vs-oracle numbers are directly comparable to overall ADE/FDE.
+            if bool(canonical_frame_metrics.get("scored", False)):
+                if len(selected_eval_wps_ref) > 0 and len(selected_gt_future_ref) > 0:
+                    branch_selected_scored_accum.update(
+                        pred_world_wps=selected_eval_wps_ref,
+                        gt_future_xy=selected_gt_future_ref,
+                        gt_future_mask=selected_gt_mask_ref,
+                        surround_traj=surround_traj,
+                        surround_mask=surround_mask,
+                        ego_pose=pose,
+                    )
+                if len(oracle_eval_wps_ref) > 0 and len(oracle_gt_future_ref) > 0:
+                    branch_oracle_scored_accum.update(
+                        pred_world_wps=oracle_eval_wps_ref,
+                        gt_future_xy=oracle_gt_future_ref,
+                        gt_future_mask=oracle_gt_mask_ref,
+                        surround_traj=surround_traj,
+                        surround_mask=surround_mask,
+                        ego_pose=pose,
+                    )
         else:
             frame_metrics = dict(legacy_frame_metrics)
             frame_metrics["scoring_path"] = "legacy"
+            frame_metrics["branch_selected_plan_ade"] = branch_selected_frame_metrics.get(
+                "plan_ade", float("nan")
+            )
+            frame_metrics["branch_selected_plan_fde"] = branch_selected_frame_metrics.get(
+                "plan_fde", float("nan")
+            )
+            frame_metrics["branch_oracle_plan_ade"] = branch_oracle_frame_metrics.get(
+                "plan_ade", float("nan")
+            )
+            frame_metrics["branch_oracle_plan_fde"] = branch_oracle_frame_metrics.get(
+                "plan_fde", float("nan")
+            )
+            frame_metrics["selected_minus_oracle_ade_m"] = frame_eval_diagnostics.get(
+                "selected_minus_oracle_ade_m", float("nan")
+            )
             primary_pred_world_vis = pred_world
             primary_gt_world_vis = gt_future_xy
             primary_pred_raw_vis = (
@@ -4172,12 +5375,11 @@ def evaluate_scenario(agent,
                 "runtime_dt_s": float(runtime_dt),
                 "pose_world": np.asarray(pose, dtype=np.float64),
                 "ego_world_xy": [float(pose[0]), float(pose[1])],
-                "measurements": {
-                    "speed_mps": speed_mps,
-                    "gps_x": measurements.get("gps_x"),
-                    "gps_y": measurements.get("gps_y"),
-                    "compass": measurements.get("compass"),
-                },
+                "measurements": measurements_debug,
+                "sensor_stats": sensor_stats,
+                "input_files": input_files,
+                "camera_assignment": cam_assign,
+                "input_data_overview": input_data_overview,
                 "run_step_exception": run_exc,
                 "run_output_type": (
                     type(run_output).__name__ if run_output is not None else None
@@ -4199,6 +5401,8 @@ def evaluate_scenario(agent,
                 "planner_adapter_debug": (
                     planner_out.debug if planner_out is not None else None
                 ),
+                "vad_branch_diagnostics": vad_branch_diagnostics,
+                "frame_eval_diagnostics": frame_eval_diagnostics,
                 "pred_world_used": primary_pred_world_vis,
                 "control_rollout_world": rollout_pred,
                 "gt_future_world": primary_gt_world_vis,
@@ -4225,19 +5429,6 @@ def evaluate_scenario(agent,
                 )
 
         per_frame.append(frame_metrics)
-
-        # ---- Camera assignment for logging ----
-        cam_assign = None
-        try:
-            import yaml as _yaml
-            base = (scenario.scenario_dir / str(primary_actor_id)
-                    / f"{frame_idx:06d}.yaml")
-            with open(base) as _fh:
-                _meta_vis = _yaml.safe_load(_fh)
-            _assign_camera_directions = _ds_mod._assign_camera_directions
-            cam_assign = _assign_camera_directions(_meta_vis)
-        except Exception:
-            pass
 
         if vis_logger is not None:
             vis_logger.log_frame(
@@ -4296,8 +5487,13 @@ def evaluate_scenario(agent,
         else _legacy_metrics
     )
     _debug_metrics   = debug_rollout_accum.summary()
+    _branch_selected_metrics = branch_selected_accum.summary()
+    _branch_oracle_metrics = branch_oracle_accum.summary()
+    _branch_selected_scored_metrics = branch_selected_scored_accum.summary()
+    _branch_oracle_scored_metrics = branch_oracle_scored_accum.summary()
     _stale_info      = stale_detector.summary()
     _coverage_stats  = canonical_accum.coverage_summary()
+    _per_horizon_ade = canonical_accum.per_horizon_ade()
 
     # Warn if most frames fell back to control rollout.
     n_rollout = traj_source_counts.get("control_rollout", 0)
@@ -4356,7 +5552,7 @@ def evaluate_scenario(agent,
             f"mode={traj_mode}  "
             f"sources={dict(traj_source_counts)}  "
             f"adapter_sources={dict(adapter_source_counts)}"
-        )
+            )
         if scoring_path == "canonical_fresh_only":
             print(
                 f"  [{sname_eval}] coverage: total={_coverage_stats['total_frames']}  "
@@ -4364,6 +5560,36 @@ def evaluate_scenario(agent,
                 f"stale={_coverage_stats['skipped_stale']}  "
                 f"unresolved={_coverage_stats['skipped_unresolved_semantics']}  "
                 f"insufficient={_coverage_stats['skipped_insufficient_horizon']}"
+            )
+            _horizon_parts = [
+                f"{k}={v:.2f}" if v is not None else f"{k}=n/a"
+                for k, v in _per_horizon_ade.items()
+            ]
+            print(f"  [{sname_eval}] per-horizon ADE: {', '.join(_horizon_parts)}")
+        print(
+            f"  [{sname_eval}] branch-score(selected) ADE="
+            f"{_branch_selected_metrics.get('plan_ade', float('nan')):.4f}  "
+            f"FDE={_branch_selected_metrics.get('plan_fde', float('nan')):.4f}  "
+            f"n={_branch_selected_metrics.get('n_frames', 0)}"
+        )
+        print(
+            f"  [{sname_eval}] branch-score(oracle best-branch) ADE="
+            f"{_branch_oracle_metrics.get('plan_ade', float('nan')):.4f}  "
+            f"FDE={_branch_oracle_metrics.get('plan_fde', float('nan')):.4f}  "
+            f"n={_branch_oracle_metrics.get('n_frames', 0)}"
+        )
+        if scoring_path == "canonical_fresh_only":
+            print(
+                f"  [{sname_eval}] branch-score(selected, canonical-scored) ADE="
+                f"{_branch_selected_scored_metrics.get('plan_ade', float('nan')):.4f}  "
+                f"FDE={_branch_selected_scored_metrics.get('plan_fde', float('nan')):.4f}  "
+                f"n={_branch_selected_scored_metrics.get('n_frames', 0)}"
+            )
+            print(
+                f"  [{sname_eval}] branch-score(oracle, canonical-scored) ADE="
+                f"{_branch_oracle_scored_metrics.get('plan_ade', float('nan')):.4f}  "
+                f"FDE={_branch_oracle_scored_metrics.get('plan_fde', float('nan')):.4f}  "
+                f"n={_branch_oracle_scored_metrics.get('n_frames', 0)}"
             )
 
     result = {
@@ -4374,14 +5600,20 @@ def evaluate_scenario(agent,
         "legacy_metrics": _legacy_metrics,
         "canonical_metrics": _canonical_metrics,
         "debug_rollout_metrics": _debug_metrics,
+        "branch_selected_metrics": _branch_selected_metrics,
+        "branch_oracle_metrics": _branch_oracle_metrics,
+        "branch_selected_scored_metrics": _branch_selected_scored_metrics,
+        "branch_oracle_scored_metrics": _branch_oracle_scored_metrics,
         "traj_source_counts":   dict(traj_source_counts),
         "adapter_source_counts": dict(adapter_source_counts),
         "traj_mode": traj_mode,
         "scoring_path": scoring_path,
         "trajectory_extrapolation": bool(trajectory_extrapolation),
+        "vad_oracle_branch_by_local_ade": bool(vad_oracle_branch_by_local_ade),
         "planner_waypoint_missing_frames": int(planner_waypoint_miss_count),
         "stale_control_info":   _stale_info,
         "coverage_stats": _coverage_stats,
+        "per_horizon_ade": _per_horizon_ade,
         "sanity_checks":        sanity_checks,
         "frame_debug_file": (str(frame_debug_path) if frame_debug_path is not None else None),
         "raw_export_file": (str(raw_export_path) if raw_export_path is not None else None),
@@ -4428,7 +5660,15 @@ def evaluate_agent(
     trajectory_extrapolation: bool = True,
     town_id:         Optional[str] = None,
     dump_frame_debug: bool = True,
+    richviz:         bool = False,
+    richviz_dir:     Optional[str] = None,
+    richviz_all_frames: bool = False,
+    richviz_frame_stride: Optional[int] = None,
+    richviz_max_frames: int = 40,
+    planner_name_hint: Optional[str] = None,
     native_horizon:  bool = True,
+    vad_oracle_branch_by_local_ade: bool = True,
+    vad_force_fresh_inference: bool = True,
     skip_stale_frames: bool = True,
     scoring_path: str = "canonical_fresh_only",
 ) -> Dict[str, Any]:
@@ -4461,6 +5701,15 @@ def evaluate_agent(
     trajectory_extrapolation:
                       when False, adapter resampling will not extrapolate
                       beyond native planner horizon (holds last waypoint).
+    richviz         : run planner_inspector_viz automatically from dumped
+                      frame-debug JSONL files.
+    vad_oracle_branch_by_local_ade:
+                      VAD-only debug mode that uses GT to select the minimum
+                      local-ADE branch each frame (oracle branch selection).
+    vad_force_fresh_inference:
+                      Open-loop override: force fresh planner inference on
+                      every fed frame at the evaluator's 10 Hz cadence.
+                      This only applies inside openloop_eval.
 
     Returns
     -------
@@ -4508,7 +5757,20 @@ def evaluate_agent(
         f"  Traj extrapolation: "
         f"{'enabled' if trajectory_extrapolation else 'disabled'}"
     )
+    print(
+        f"  VAD oracle branch (min local ADE): "
+        f"{'enabled' if vad_oracle_branch_by_local_ade else 'disabled'}"
+    )
+    print(
+        "  Planner fresh inference override (open-loop, all planners): "
+        f"{'enabled' if vad_force_fresh_inference else 'disabled'}"
+    )
     print(f"  Frame debug dump: {str(frame_debug_dir) if frame_debug_dir else '(disabled)'}")
+    if richviz:
+        planned_richviz_dir = richviz_dir or str((Path(output_dir) / "richviz").resolve())
+        print(f"  Integrated richviz: enabled  -> {planned_richviz_dir}")
+    else:
+        print("  Integrated richviz: disabled")
     print(f"  Raw export dump : {str(raw_export_dir) if raw_export_dir else '(disabled)'}")
     print(f"  Canonical dump  : {str(canonical_export_dir) if canonical_export_dir else '(disabled)'}")
     print(f"  Scoring debug   : {str(scoring_debug_dir) if scoring_debug_dir else '(disabled)'}")
@@ -4540,6 +5802,10 @@ def evaluate_agent(
         # ---- Per-scenario evaluation ----
         global_accum = MetricAccumulator()
         global_legacy_accum = MetricAccumulator()
+        global_branch_selected_accum = MetricAccumulator()
+        global_branch_oracle_accum = MetricAccumulator()
+        global_branch_selected_scored_accum = MetricAccumulator()
+        global_branch_oracle_scored_accum = MetricAccumulator()
         global_coverage = CanonicalMetricAccumulator()
         scenario_results: List[Dict] = []
 
@@ -4563,9 +5829,20 @@ def evaluate_agent(
                       f"frames={scenario.num_frames(eval_actor)}")
 
                 prior_routes_env = os.environ.get("ROUTES")
+                prior_vad_force_env = os.environ.get("VAD_FORCE_FRESH_INFERENCE")
+                prior_uniad_force_env = os.environ.get("UNIAD_FORCE_FRESH_INFERENCE")
+                prior_openloop_force_env = os.environ.get("OPENLOOP_FORCE_FRESH_INFERENCE")
                 os.environ["ROUTES"] = (
                     f"openloop_{sanitize_run_id(sname)}_ego{int(eval_actor)}.xml"
                 )
+                if vad_force_fresh_inference:
+                    os.environ["VAD_FORCE_FRESH_INFERENCE"] = "1"
+                    os.environ["UNIAD_FORCE_FRESH_INFERENCE"] = "1"
+                    os.environ["OPENLOOP_FORCE_FRESH_INFERENCE"] = "1"
+                else:
+                    os.environ.pop("VAD_FORCE_FRESH_INFERENCE", None)
+                    os.environ.pop("UNIAD_FORCE_FRESH_INFERENCE", None)
+                    os.environ.pop("OPENLOOP_FORCE_FRESH_INFERENCE", None)
                 try:
                     print(f"Loading agent '{agent_label}'...")
                     try:
@@ -4599,6 +5876,7 @@ def evaluate_agent(
                             canonical_export_dir = canonical_export_dir,
                             scoring_debug_dir = scoring_debug_dir,
                             native_horizon = native_horizon,
+                            vad_oracle_branch_by_local_ade = vad_oracle_branch_by_local_ade,
                             skip_stale_frames = skip_stale_frames,
                             scoring_path = scoring_path,
                         )
@@ -4610,6 +5888,18 @@ def evaluate_agent(
                             except Exception as exc:
                                 print(f"[WARN] Agent '{agent_label}' destroy() failed: {exc}")
                 finally:
+                    if prior_vad_force_env is None:
+                        os.environ.pop("VAD_FORCE_FRESH_INFERENCE", None)
+                    else:
+                        os.environ["VAD_FORCE_FRESH_INFERENCE"] = prior_vad_force_env
+                    if prior_uniad_force_env is None:
+                        os.environ.pop("UNIAD_FORCE_FRESH_INFERENCE", None)
+                    else:
+                        os.environ["UNIAD_FORCE_FRESH_INFERENCE"] = prior_uniad_force_env
+                    if prior_openloop_force_env is None:
+                        os.environ.pop("OPENLOOP_FORCE_FRESH_INFERENCE", None)
+                    else:
+                        os.environ["OPENLOOP_FORCE_FRESH_INFERENCE"] = prior_openloop_force_env
                     if prior_routes_env is None:
                         os.environ.pop("ROUTES", None)
                     else:
@@ -4630,6 +5920,30 @@ def evaluate_agent(
                     global_legacy_accum.plan_fde_sum += lm["plan_fde"]
                     global_legacy_accum.collision_count += lm["collision_rate"]
                     global_legacy_accum.n_frames += 1
+                bsm = result.get("branch_selected_metrics", {})
+                for _ in range(bsm.get("n_frames", 0)):
+                    global_branch_selected_accum.plan_ade_sum += bsm["plan_ade"]
+                    global_branch_selected_accum.plan_fde_sum += bsm["plan_fde"]
+                    global_branch_selected_accum.collision_count += bsm["collision_rate"]
+                    global_branch_selected_accum.n_frames += 1
+                bom = result.get("branch_oracle_metrics", {})
+                for _ in range(bom.get("n_frames", 0)):
+                    global_branch_oracle_accum.plan_ade_sum += bom["plan_ade"]
+                    global_branch_oracle_accum.plan_fde_sum += bom["plan_fde"]
+                    global_branch_oracle_accum.collision_count += bom["collision_rate"]
+                    global_branch_oracle_accum.n_frames += 1
+                bssm = result.get("branch_selected_scored_metrics", {})
+                for _ in range(bssm.get("n_frames", 0)):
+                    global_branch_selected_scored_accum.plan_ade_sum += bssm["plan_ade"]
+                    global_branch_selected_scored_accum.plan_fde_sum += bssm["plan_fde"]
+                    global_branch_selected_scored_accum.collision_count += bssm["collision_rate"]
+                    global_branch_selected_scored_accum.n_frames += 1
+                bosm = result.get("branch_oracle_scored_metrics", {})
+                for _ in range(bosm.get("n_frames", 0)):
+                    global_branch_oracle_scored_accum.plan_ade_sum += bosm["plan_ade"]
+                    global_branch_oracle_scored_accum.plan_fde_sum += bosm["plan_fde"]
+                    global_branch_oracle_scored_accum.collision_count += bosm["collision_rate"]
+                    global_branch_oracle_scored_accum.n_frames += 1
                 cov = result.get("coverage_stats", {})
                 global_coverage.total_frames += int(cov.get("total_frames", 0))
                 global_coverage.scored_frames += int(cov.get("scored_frames", 0))
@@ -4669,8 +5983,37 @@ def evaluate_agent(
 
         overall = global_accum.summary()
         legacy_overall = global_legacy_accum.summary()
+        branch_selected_overall = global_branch_selected_accum.summary()
+        branch_oracle_overall = global_branch_oracle_accum.summary()
+        branch_selected_scored_overall = global_branch_selected_scored_accum.summary()
+        branch_oracle_scored_overall = global_branch_oracle_scored_accum.summary()
         debug_rollout_overall = global_debug_rollout.summary()
         coverage_summary = global_coverage.coverage_summary()
+
+        # Aggregate per-horizon ADE across all scenarios from per-frame data.
+        global_per_step_sum = [0.0] * 6
+        global_per_step_count = [0] * 6
+        for sr in scenario_results:
+            for fm in sr.get("per_frame", []):
+                breakdown = fm.get("ade_breakdown_m")
+                if not breakdown or not isinstance(breakdown, (list, tuple)):
+                    continue
+                for idx in range(min(6, len(breakdown))):
+                    val = breakdown[idx]
+                    if val is not None and isinstance(val, (int, float)):
+                        global_per_step_sum[idx] += float(val)
+                        global_per_step_count[idx] += 1
+        from canonical_trajectory import CANONICAL_TIMESTAMPS
+        global_per_horizon_ade: Dict[str, Any] = {}
+        for idx, ts in enumerate(CANONICAL_TIMESTAMPS):
+            key = f"{float(ts):.1f}s"
+            if global_per_step_count[idx] > 0:
+                global_per_horizon_ade[key] = round(
+                    global_per_step_sum[idx] / global_per_step_count[idx], 4
+                )
+            else:
+                global_per_horizon_ade[key] = None
+
         print(f"\n{'='*60}")
         print(f"  OVERALL  [{agent_label}]")
         print(f"  Scoring path    = {scoring_path}")
@@ -4688,6 +6031,34 @@ def evaluate_agent(
             )
             print(f"  Legacy ADE      = {legacy_overall['plan_ade']:.4f} m")
             print(f"  Legacy FDE      = {legacy_overall['plan_fde']:.4f} m")
+        _horizon_parts_global = [
+            f"{k}={v:.2f}" if v is not None else f"{k}=n/a"
+            for k, v in global_per_horizon_ade.items()
+        ]
+        print(f"  Per-horizon ADE = {', '.join(_horizon_parts_global)}")
+        print(
+            f"  Branch Selected ADE/FDE = "
+            f"{branch_selected_overall['plan_ade']:.4f} / {branch_selected_overall['plan_fde']:.4f} m "
+            f"(n={branch_selected_overall['n_frames']})"
+        )
+        print(
+            f"  Branch Oracle ADE/FDE   = "
+            f"{branch_oracle_overall['plan_ade']:.4f} / {branch_oracle_overall['plan_fde']:.4f} m "
+            f"(n={branch_oracle_overall['n_frames']})"
+        )
+        if scoring_path == "canonical_fresh_only":
+            print(
+                f"  Branch Selected ADE/FDE (canonical-scored) = "
+                f"{branch_selected_scored_overall['plan_ade']:.4f} / "
+                f"{branch_selected_scored_overall['plan_fde']:.4f} m "
+                f"(n={branch_selected_scored_overall['n_frames']})"
+            )
+            print(
+                f"  Branch Oracle ADE/FDE   (canonical-scored) = "
+                f"{branch_oracle_scored_overall['plan_ade']:.4f} / "
+                f"{branch_oracle_scored_overall['plan_fde']:.4f} m "
+                f"(n={branch_oracle_scored_overall['n_frames']})"
+            )
         print(f"  Traj sources    = {dict(global_traj_source_counts)}")
         print(f"  Adapter sources = {dict(global_adapter_source_counts)}")
         print(f"  Debug rollout ADE = {debug_rollout_overall.get('plan_ade', float('nan')):.4f} m")
@@ -4709,13 +6080,20 @@ def evaluate_agent(
             "planner_label": agent_label,
             "planner_conda_env": agent_conda_env,
             "overall":   overall,
+            "per_horizon_ade": global_per_horizon_ade,
             "legacy_overall": legacy_overall,
+            "branch_selected_overall": branch_selected_overall,
+            "branch_oracle_overall": branch_oracle_overall,
+            "branch_selected_scored_overall": branch_selected_scored_overall,
+            "branch_oracle_scored_overall": branch_oracle_scored_overall,
             "debug_rollout_overall": debug_rollout_overall,
             "traj_source_counts": dict(global_traj_source_counts),
             "adapter_source_counts": dict(global_adapter_source_counts),
             "scoring_path": scoring_path,
             "trajectory_extrapolation": bool(trajectory_extrapolation),
             "native_horizon": bool(native_horizon),
+            "vad_oracle_branch_by_local_ade": bool(vad_oracle_branch_by_local_ade),
+            "vad_force_fresh_inference": bool(vad_force_fresh_inference),
             "skip_stale_frames": bool(skip_stale_frames),
             "frame_debug_dir": (str(frame_debug_dir) if frame_debug_dir is not None else None),
             "raw_export_dir": (str(raw_export_dir) if raw_export_dir is not None else None),
@@ -4734,10 +6112,34 @@ def evaluate_agent(
             "scenarios": scenario_results,
         }
 
-        # ---- Save results ----
         output_path = Path(output_dir)
+        richviz_outputs: List[Dict[str, Any]] = []
+        resolved_richviz_dir = None
+        if richviz:
+            if not dump_frame_debug:
+                print("  [richviz] skipped: --richviz requires --dump-frame-debug.")
+            else:
+                resolved_richviz_dir = richviz_dir or str((output_path / "richviz").resolve())
+                richviz_outputs = _run_integrated_richviz_generation(
+                    planner_name=(planner_name_hint or agent_label),
+                    scenario_results=scenario_results,
+                    richviz_dir=resolved_richviz_dir,
+                    richviz_all_frames=bool(richviz_all_frames),
+                    richviz_frame_stride=richviz_frame_stride,
+                    richviz_max_frames=int(richviz_max_frames),
+                )
+
+        # ---- Save results ----
         output_path.mkdir(parents=True, exist_ok=True)
         result_file = output_path / f"{result_stem}_openloop.json"
+        out["integrated_richviz"] = {
+            "enabled": bool(richviz),
+            "richviz_dir": (str(resolved_richviz_dir) if resolved_richviz_dir else None),
+            "all_frames": bool(richviz_all_frames),
+            "frame_stride": (None if richviz_frame_stride is None else int(richviz_frame_stride)),
+            "max_frames": int(richviz_max_frames),
+            "outputs": richviz_outputs,
+        }
         with open(result_file, "w") as fh:
             json.dump(out, fh, indent=2)
         print(f"Results saved → {result_file}")
@@ -4784,6 +6186,115 @@ def _resolve_viz_dir(args: argparse.Namespace, output_dir: str) -> Optional[str]
     if args.viz_dir:
         return _resolve_abs_path(args.viz_dir)
     return str((Path(output_dir) / "viz").resolve())
+
+
+def _resolve_richviz_dir(args: argparse.Namespace, output_dir: str) -> str:
+    if args.richviz_dir:
+        return _resolve_abs_path(args.richviz_dir) or str(Path(args.richviz_dir).resolve())
+    return str((Path(output_dir) / "richviz").resolve())
+
+
+def _normalize_inspector_planner_name(planner_name: Optional[str]) -> Optional[str]:
+    tag = str(planner_name or "").strip().lower()
+    if not tag:
+        return "generic"
+    if "colmdriver_rulebase" in tag:
+        return "colmdriver_rulebase"
+    if "colmdriver" in tag:
+        return "colmdriver"
+    if "vad" in tag:
+        return "vad"
+    if "tcp" in tag:
+        return "tcp"
+    # planner_inspector_viz supports generic rendering for unknown planners.
+    return tag
+
+
+def _run_integrated_richviz_generation(
+    *,
+    planner_name: Optional[str],
+    scenario_results: List[Dict[str, Any]],
+    richviz_dir: str,
+    richviz_all_frames: bool,
+    richviz_frame_stride: Optional[int],
+    richviz_max_frames: int,
+) -> List[Dict[str, Any]]:
+    """Generate planner_inspector_viz outputs from dumped frame-debug JSONL files."""
+    planner_mode = _normalize_inspector_planner_name(planner_name)
+    outputs: List[Dict[str, Any]] = []
+
+    inspector_script = (_OPENLOOP_ROOT / "tools" / "planner_inspector_viz.py").resolve()
+    if not inspector_script.exists():
+        print(f"  [richviz] skipped: inspector script not found at {inspector_script}")
+        return outputs
+
+    base_out = Path(richviz_dir)
+    base_out.mkdir(parents=True, exist_ok=True)
+
+    print(f"  [richviz] generating integrated inspector plots → {base_out}")
+    for sr in scenario_results:
+        debug_frames_file = sr.get("frame_debug_file")
+        if not debug_frames_file:
+            continue
+        debug_path = Path(str(debug_frames_file))
+        if not debug_path.exists():
+            outputs.append({
+                "debug_frames_file": str(debug_path),
+                "status": "missing_debug_frames_file",
+            })
+            continue
+
+        scenario_eval = str(sr.get("scenario_eval") or debug_path.stem)
+        out_dir = base_out / sanitize_run_id(scenario_eval)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            sys.executable,
+            str(inspector_script),
+            "--debug-frames",
+            str(debug_path),
+            "--planner",
+            str(planner_mode),
+            "--out-dir",
+            str(out_dir),
+            "--max-frames",
+            str(max(1, int(richviz_max_frames))),
+        ]
+        if richviz_all_frames:
+            cmd.append("--all-frames")
+        elif richviz_frame_stride is not None:
+            cmd.extend(["--frame-stride", str(max(1, int(richviz_frame_stride)))])
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(_PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+            )
+            status = "ok" if proc.returncode == 0 else "failed"
+            if proc.returncode == 0:
+                print(f"  [richviz] OK  {scenario_eval} -> {out_dir}")
+            else:
+                tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:] or [""]
+                print(f"  [richviz] FAIL {scenario_eval}: {tail[0]}")
+            outputs.append({
+                "scenario_eval": scenario_eval,
+                "debug_frames_file": str(debug_path),
+                "out_dir": str(out_dir),
+                "status": status,
+                "returncode": int(proc.returncode),
+            })
+        except Exception as exc:
+            print(f"  [richviz] FAIL {scenario_eval}: {exc}")
+            outputs.append({
+                "scenario_eval": scenario_eval,
+                "debug_frames_file": str(debug_path),
+                "out_dir": str(out_dir),
+                "status": "failed_exception",
+                "error": str(exc),
+            })
+    return outputs
 
 
 def _push_colmdriver_port_env(planner_name: str, llm_port: int, vlm_port: int) -> Dict[str, Optional[str]]:
@@ -5062,6 +6573,7 @@ def _build_child_command(
     viz_dir: Optional[str],
     llm_port: int,
     vlm_port: int,
+    richviz_dir_override: Optional[str] = None,
 ) -> List[str]:
     child_argv = [
         str(_THIS_FILE),
@@ -5124,12 +6636,36 @@ def _build_child_command(
         child_argv.append("--no-viz-video")
     if args.video_fps is not None:
         child_argv.extend(["--video-fps", str(float(args.video_fps))])
+    if bool(getattr(args, "richviz", False)):
+        child_argv.append("--richviz")
+    if richviz_dir_override:
+        child_argv.extend(["--richviz-dir", str(richviz_dir_override)])
+    elif getattr(args, "richviz_dir", None):
+        child_argv.extend(["--richviz-dir", str(args.richviz_dir)])
+    if bool(getattr(args, "richviz_all_frames", False)):
+        child_argv.append("--richviz-all-frames")
+    if getattr(args, "richviz_frame_stride", None) is not None:
+        child_argv.extend(["--richviz-frame-stride", str(int(args.richviz_frame_stride))])
+    if getattr(args, "richviz_max_frames", None) is not None:
+        child_argv.extend(["--richviz-max-frames", str(int(args.richviz_max_frames))])
+    if bool(getattr(args, "vad_oracle_branch_by_local_ade", True)):
+        child_argv.append("--vad-oracle-branch-by-local-ade")
+    else:
+        child_argv.append("--no-vad-oracle-branch-by-local-ade")
+    if bool(getattr(args, "vad_force_fresh_inference", False)):
+        child_argv.append("--vad-force-fresh-inference")
+    if not bool(getattr(args, "native_horizon", True)):
+        child_argv.append("--no-native-horizon")
+    if not bool(getattr(args, "skip_stale_frames", True)):
+        child_argv.append("--no-skip-stale-frames")
     if args.town_id:
         child_argv.extend(["--town-id", str(args.town_id)])
     if not bool(getattr(args, "dump_frame_debug", True)):
         child_argv.append("--no-dump-frame-debug")
-    if not bool(getattr(args, "trajectory_extrapolation", True)):
-        child_argv.append("--no-trajectory-extrapolation")
+    if bool(getattr(args, "trajectory_extrapolation", False)):
+        child_argv.append("--trajectory-extrapolation")
+    if bool(getattr(args, "canonical_extrapolation", False)):
+        child_argv.append("--canonical-extrapolation")
 
     if planner_request.conda_env:
         return [
@@ -5166,6 +6702,10 @@ def _write_comparison_summary(
         name: payload.get("overall", {})
         for name, payload in planner_payloads.items()
     }
+    per_horizon = {
+        name: payload.get("per_horizon_ade", {})
+        for name, payload in planner_payloads.items()
+    }
     ranking = {
         "plan_ade": sorted(
             overall.keys(),
@@ -5188,6 +6728,7 @@ def _write_comparison_summary(
             "gpu_min_free_mib": int(AUTO_WORKERS_PER_GPU_MIN_FREE_MIB_DEFAULT),
         },
         "results": overall,
+        "per_horizon_ade": per_horizon,
         "ranking": ranking,
         "failures": failures,
     }
@@ -5246,6 +6787,9 @@ def _resolve_agent_requests_from_args(args: argparse.Namespace) -> List[PlannerR
 
 
 def _run_single_planner_from_args(args: argparse.Namespace) -> Dict[str, Any]:
+    # Set canonical extrapolation env var before canonical_trajectory is imported.
+    if not bool(getattr(args, "canonical_extrapolation", False)):
+        os.environ["OPENLOOP_CANONICAL_EXTRAPOLATE"] = "0"
     planner_requests = _resolve_agent_requests_from_args(args)
     if len(planner_requests) != 1:
         raise ValueError("Single-agent execution requires exactly one request.")
@@ -5298,7 +6842,15 @@ def _run_single_planner_from_args(args: argparse.Namespace) -> Dict[str, Any]:
             trajectory_extrapolation=args.trajectory_extrapolation,
             town_id=args.town_id,
             dump_frame_debug=args.dump_frame_debug,
+            richviz=args.richviz,
+            richviz_dir=args.richviz_dir,
+            richviz_all_frames=args.richviz_all_frames,
+            richviz_frame_stride=args.richviz_frame_stride,
+            richviz_max_frames=args.richviz_max_frames,
+            planner_name_hint=planner_name,
             native_horizon=args.native_horizon,
+            vad_oracle_branch_by_local_ade=args.vad_oracle_branch_by_local_ade,
+            vad_force_fresh_inference=args.vad_force_fresh_inference,
             skip_stale_frames=args.skip_stale_frames,
             scoring_path=args.scoring_path,
         )
@@ -5319,6 +6871,7 @@ def _run_single_planner_from_args(args: argparse.Namespace) -> Dict[str, Any]:
 
 def _run_multi_planner_launcher(args: argparse.Namespace) -> int:
     planner_requests = _resolve_agent_requests_from_args(args)
+    multi_planner_run = len(planner_requests) > 1
     planner_labels = [str(req.run_id or req.name) for req in planner_requests]
     planner_request_by_label = {
         str(req.run_id or req.name): req
@@ -5443,13 +6996,22 @@ def _run_multi_planner_launcher(args: argparse.Namespace) -> int:
             planner_request = pending.pop(selected_index)
             planner_name = str(planner_request.preset_name or planner_request.name)
             planner_label = str(planner_request.run_id or planner_request.name)
+            planner_slug = sanitize_run_id(planner_label)
             needs_vllm = _planner_request_uses_colmdriver_vllm(planner_request)
             wants_local_manager = bool(args.start_colmdriver_vllm and needs_vllm)
-            output_dir = _resolve_output_dir(args, planner_label)
+            if args.output and multi_planner_run:
+                output_root = Path(_resolve_abs_path(args.output) or args.output)
+                output_dir = str((output_root / planner_slug).resolve())
+            else:
+                output_dir = _resolve_output_dir(args, planner_label)
             viz_dir = _resolve_viz_dir(args, output_dir)
             llm_port = int(args.llm_port)
             vlm_port = int(args.vlm_port)
             manager: Optional[ColmDriverVLLMManager] = None
+            richviz_dir_override: Optional[str] = None
+            if multi_planner_run and getattr(args, "richviz_dir", None):
+                richviz_root = Path(_resolve_abs_path(args.richviz_dir) or str(args.richviz_dir))
+                richviz_dir_override = str((richviz_root / planner_slug).resolve())
 
             if wants_local_manager:
                 if shared_colmdriver_manager is None:
@@ -5471,6 +7033,7 @@ def _run_multi_planner_launcher(args: argparse.Namespace) -> int:
                 viz_dir=viz_dir,
                 llm_port=llm_port,
                 vlm_port=vlm_port,
+                richviz_dir_override=richviz_dir_override,
             )
             child_env = dict(os.environ)
             if planner_request.conda_env:
@@ -5916,10 +7479,10 @@ def parse_args():
         "--trajectory-extrapolation",
         dest="trajectory_extrapolation",
         action="store_true",
-        default=True,
+        default=False,
         help=(
-            "Enable linear extrapolation beyond each planner's native horizon "
-            "(default: enabled)."
+            "Enable linear extrapolation beyond each planner's native horizon. "
+            "(default: disabled — no extrapolation beyond native horizon)."
         ),
     )
     p.add_argument(
@@ -5927,8 +7490,29 @@ def parse_args():
         dest="trajectory_extrapolation",
         action="store_false",
         help=(
-            "Disable extrapolation in adapter resampling; future points beyond "
-            "native horizon hold the last available waypoint."
+            "Disable extrapolation in adapter resampling (default). Future points "
+            "beyond native horizon hold the last available waypoint."
+        ),
+    )
+    p.add_argument(
+        "--canonical-extrapolation",
+        dest="canonical_extrapolation",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable linear extrapolation in canonical trajectory construction. "
+            "Short-horizon planners are extrapolated to 3.0 s. "
+            "(default: disabled — planners are scored only within their native horizon)."
+        ),
+    )
+    p.add_argument(
+        "--no-canonical-extrapolation",
+        dest="canonical_extrapolation",
+        action="store_false",
+        help=(
+            "Disable canonical extrapolation (default): each planner is scored only "
+            "at canonical timesteps within its native prediction horizon. "
+            "This is the scientifically rigorous default."
         ),
     )
     p.add_argument(
@@ -5949,6 +7533,44 @@ def parse_args():
         help=(
             "Revert to fixed 0.5 s evaluation grid (original behaviour). "
             "All planners are resampled and compared at t+0.5, 1.0, …, 3.0 s."
+        ),
+    )
+    p.add_argument(
+        "--vad-oracle-branch-by-local-ade",
+        dest="vad_oracle_branch_by_local_ade",
+        action="store_true",
+        default=True,
+        help=(
+            "VAD-only debug mode (default enabled): replace command-selected branch "
+            "with the branch "
+            "that has the minimum GT local ADE on the current frame's evaluation grid "
+            "(oracle; uses GT and is not deployable)."
+        ),
+    )
+    p.add_argument(
+        "--no-vad-oracle-branch-by-local-ade",
+        dest="vad_oracle_branch_by_local_ade",
+        action="store_false",
+        help="Disable VAD oracle best-branch selection and use command-selected branch.",
+    )
+    p.add_argument(
+        "--vad-force-fresh-inference",
+        dest="vad_force_fresh_inference",
+        action="store_true",
+        default=True,
+        help=(
+            "Planner option (default enabled): in open-loop evaluation, force fresh "
+            "planner inference on every fed frame (10 Hz) and bypass planner-side "
+            "non-realtime frame skipping."
+        ),
+    )
+    p.add_argument(
+        "--no-vad-force-fresh-inference",
+        dest="vad_force_fresh_inference",
+        action="store_false",
+        help=(
+            "Disable open-loop fresh-inference override and use each planner's native "
+            "non-realtime inference cadence."
         ),
     )
     p.add_argument(
@@ -6003,6 +7625,37 @@ def parse_args():
         help="Disable per-frame JSONL debug snapshot dumping.",
     )
     p.add_argument(
+        "--richviz",
+        action="store_true",
+        help=(
+            "Automatically run planner_inspector_viz after evaluation using dumped "
+            "debug JSONL files. Supports all planners (generic fallback panels "
+            "for unknown adapter families)."
+        ),
+    )
+    p.add_argument(
+        "--richviz-dir",
+        default=None,
+        help="Output directory for integrated planner_inspector_viz figures (default: <output>/richviz).",
+    )
+    p.add_argument(
+        "--richviz-all-frames",
+        action="store_true",
+        help="When --richviz is enabled, render all frames instead of sampled frames.",
+    )
+    p.add_argument(
+        "--richviz-frame-stride",
+        type=int,
+        default=None,
+        help="When --richviz is enabled, sample every N-th frame for per-frame pages.",
+    )
+    p.add_argument(
+        "--richviz-max-frames",
+        type=int,
+        default=40,
+        help="When --richviz is enabled, max sampled per-frame pages (default: 40).",
+    )
+    p.add_argument(
         "--child-runner", action="store_true", help=argparse.SUPPRESS,
     )
     p.add_argument(
@@ -6025,6 +7678,9 @@ def parse_args():
 
 def main():
     args = parse_args()
+    # Set canonical extrapolation env var so child processes inherit it.
+    if not bool(getattr(args, "canonical_extrapolation", False)):
+        os.environ["OPENLOOP_CANONICAL_EXTRAPOLATE"] = "0"
     if args.child_runner:
         _run_single_planner_from_args(args)
         return

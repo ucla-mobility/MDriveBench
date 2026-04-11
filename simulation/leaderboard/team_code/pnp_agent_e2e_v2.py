@@ -454,7 +454,12 @@ class PnP_Agent(autonomous_agent.AutonomousAgent):
         rsu_data = []
 
         # If the frame is skipped.
-        if self.step % self.config['simulation']['skip_frames'] != 0 and self.step > self.config['simulation']['skip_frames']:
+        force_fresh_every_frame = os.environ.get('OPENLOOP_FORCE_FRESH_INFERENCE', '0') == '1'
+        if (
+            (not force_fresh_every_frame)
+            and self.step % self.config['simulation']['skip_frames'] != 0
+            and self.step > self.config['simulation']['skip_frames']
+        ):
             # return the previous control signal.   
             return self.infer.prev_control
 

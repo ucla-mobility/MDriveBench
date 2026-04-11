@@ -405,7 +405,8 @@ class InterfuserAgent(autonomous_agent.AutonomousAgent):
         if not self.initialized:
             self._init()
         self.step += 1
-        if self.step % self.skip_frames != 0 and self.step > 4:
+        force_fresh_every_frame = os.environ.get('OPENLOOP_FORCE_FRESH_INFERENCE', '0') == '1'
+        if (not force_fresh_every_frame) and self.step % self.skip_frames != 0 and self.step > 4:
                 return self.prev_control
         control_all = []
         input_data_copy = copy.copy(input_data) 

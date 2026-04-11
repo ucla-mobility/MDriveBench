@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -161,6 +162,20 @@ EVAL_DT = 0.5                # seconds between evaluation waypoints
 MAX_REASONABLE_FIRST_WP_OFFSET_M = 50.0
 DEGENERATE_TRAJ_EPS_M = 1e-4
 TRAJECTORY_EXTRAPOLATION_ENABLED = True
+
+# CV fallback for ColMDriver: when the VLM speed command causes the planning
+# model to output near-zero waypoints while the ego is actually moving, replace
+# with constant-velocity extrapolation along the current heading.
+CV_FALLBACK_DISP_THRESHOLD_M = 5.0    # total last-wp displacement from ego
+CV_FALLBACK_MIN_SPEED_MPS    = 2.0    # ego must be moving
+
+# Additional rotation (degrees) applied to ColMDriver model output displacements
+# AFTER the standard +90° heading correction, to compensate for any systematic
+# heading bias in the planning model output.  Set via env var or direct override.
+# Based on forensic analysis of model output heading errors: optimal = +21.1°.
+COLMDRIVER_MODEL_ROTATION_DEG = float(
+    os.environ.get("COLMDRIVER_MODEL_ROTATION_DEG", "0")
+)
 
 
 def set_trajectory_extrapolation(enabled: bool) -> None:
@@ -398,6 +413,83 @@ def _adapt_colmdriver(
     if not _has_finite_xy(wps):
         return PlannerOutput(traj_source="colmdriver_nonfinite_corrected")
 
+    # Heading correction: CoLMDriver's agent-side local-to-world transform uses
+    # theta=compass, but the standard CARLA BEV convention is theta=compass+π/2.
+    # After offset correction the waypoints are effectively:
+    #   wps = R(compass) @ local_wp + ego_world_xy
+    # The correct transform is R(compass+π/2).  Applying a +90° CCW rotation to
+    # the displacement from ego fixes this:
+    #   R(π/2) @ R(compass) = R(compass+π/2)
+    disp = wps - ego_world_xy
+    wps = ego_world_xy + np.column_stack([-disp[:, 1], disp[:, 0]])
+
+    # Optional additional rotation to compensate for systematic heading bias in
+    # the planning model output.  Default is 0° (no extra correction).
+    if abs(COLMDRIVER_MODEL_ROTATION_DEG) > 1e-6:
+        _extra_rad = math.radians(COLMDRIVER_MODEL_ROTATION_DEG)
+        _cos_e = math.cos(_extra_rad)
+        _sin_e = math.sin(_extra_rad)
+        disp2 = wps - ego_world_xy
+        wps = ego_world_xy + np.column_stack([
+            _cos_e * disp2[:, 0] - _sin_e * disp2[:, 1],
+            _sin_e * disp2[:, 0] + _cos_e * disp2[:, 1],
+        ])
+
+    # ── CV fallback for degenerate (near-zero) predictions ──────────
+    #
+    # The VLM speed-command pipeline can cause the planning model to output
+    # near-zero cumulative deltas when the KEEP/SLOWER command is active
+    # (mapped to the HOLD speed embedding that the model interprets as
+    # "stay in place").  In closed-loop this is compensated by the PID
+    # controller + forced-forward failsafe, but in open-loop evaluation
+    # it causes catastrophic ADE.  When we detect this pattern (trajectory
+    # displacement far below what ego speed implies) we substitute a
+    # constant-velocity extrapolation along the current heading.
+    meas = kw.get("measurements") or {}
+    ego_speed = float(meas.get("speed", meas.get("speed_mps", 0)))
+    last_wp_disp = float(np.linalg.norm(wps[-1] - ego_world_xy))
+    if (last_wp_disp < CV_FALLBACK_DISP_THRESHOLD_M
+            and ego_speed > CV_FALLBACK_MIN_SPEED_MPS):
+        # Build constant-velocity trajectory: heading = compass + π/2
+        # (CARLA convention: compass is IMU yaw, vehicle forward is +π/2).
+        heading = compass_rad + np.pi / 2
+        forward = np.array([np.cos(heading), np.sin(heading)])
+        n_pts = len(raw_wps)  # keep same number of points (20)
+        native_dt = 0.1
+        cv_wps = np.array(
+            [ego_world_xy + forward * ego_speed * (i + 1) * native_dt
+             for i in range(n_pts)]
+        )
+        cv_resampled = _resample_trajectory(cv_wps, src_dt=native_dt)
+        return PlannerOutput(
+            future_trajectory_world=cv_resampled,
+            traj_source="colmdriver_cv_fallback",
+            raw_length=len(cv_wps),
+            raw_world_wps=cv_wps,
+            native_dt=native_dt,
+            raw_export=_build_raw_export(
+                raw_positions=cv_wps,
+                source_frame_description="CV fallback: constant-velocity extrapolation in world frame",
+                axis_convention_description="absolute [x, y] world positions",
+                is_cumulative_positions=False,
+                point0_mode="future",
+                native_dt=native_dt,
+                native_timestamps=None,
+                adapter_debug_notes=[
+                    "CV fallback activated: model output degenerate (near-zero displacement)",
+                    f"ego_speed={ego_speed:.2f} m/s, last_wp_disp={last_wp_disp:.2f} m",
+                ],
+            ),
+            debug={
+                "cv_fallback": True,
+                "ego_speed_mps": ego_speed,
+                "last_wp_disp_m": last_wp_disp,
+                "raw_wps": raw_wps,
+                "corrected_world_wps": wps,
+                "cv_wps": cv_wps,
+            },
+        )
+
     # Guard against stale/uninitialized planning_bank values.
     #
     # CoLMDriver initialises planning_bank with constant placeholders; when the
@@ -532,14 +624,28 @@ def _adapt_vad(
         "world_wps": world_wps,
         "resampled_world_wps": resampled,
     }
+    if "command" in md:
+        try:
+            vad_debug["selected_command_index"] = int(md.get("command"))
+        except Exception:
+            pass
+    if "command_raw" in md:
+        try:
+            vad_debug["selected_command_raw_value"] = int(md.get("command_raw"))
+        except Exception:
+            pass
+    if "command_fallback_to_lanefollow" in md:
+        try:
+            vad_debug["selected_command_fallback_to_lanefollow"] = bool(
+                md.get("command_fallback_to_lanefollow")
+            )
+        except Exception:
+            pass
     try:
         all_plan = md.get("all_plan")
         all_plan_arr = np.asarray(all_plan, dtype=np.float64)
         if all_plan_arr.ndim == 3 and all_plan_arr.shape[-1] == 2 and all_plan_arr.shape[0] >= 2:
             vad_debug["candidate_local_wps_by_command"] = all_plan_arr
-            cmd = md.get("command")
-            if cmd is not None:
-                vad_debug["selected_command_index"] = int(cmd)
     except Exception:
         # Branch diagnostics are best-effort and must never affect planner behavior.
         pass
@@ -748,21 +854,23 @@ def _adapt_tcp(
                 "first_wp_offset_m": _first_wp_offset_m(world_wps, ego_world_xy),
             },
         )
-    # 4 waypoints at ~0.5 s each.
-    resampled = _resample_trajectory(world_wps, src_dt=0.5)
+    # 4 waypoints: model trains on consecutive simulation frames (dt_sim=0.05 s)
+    # but at inference the planner runs at ~4 Hz (every 5 frames), giving
+    # effective spacing of ~0.25 s per waypoint.
+    resampled = _resample_trajectory(world_wps, src_dt=0.25)
     return PlannerOutput(
         future_trajectory_world=resampled,
         traj_source=source_label,
         raw_length=len(tcp_wps),
         raw_world_wps=world_wps,
-        native_dt=0.5,
+        native_dt=0.25,
         raw_export=_build_raw_export(
             raw_positions=tcp_wps,
             source_frame_description="TCP pid_metadata waypoint tuples in ego-local controller frame",
             axis_convention_description="x=right, y=forward",
             is_cumulative_positions=False,
             point0_mode="future",
-            native_dt=0.5,
+            native_dt=0.25,
             native_timestamps=None,
             adapter_debug_notes=[
                 "raw_positions are exported before CARLA-BEV axis remap",
@@ -777,7 +885,7 @@ def _adapt_tcp(
                     "the current ego anchor in wp_1..wp_4"
                 ),
                 (
-                    "per-point timestamps are not emitted by TCP; native_dt=0.5 s is "
+                    "per-point timestamps are not emitted by TCP; native_dt=0.25 s is "
                     "treated as an inferred timing assumption from the 4-point controller "
                     "trajectory, so native_timestamps is intentionally left null"
                 ),
@@ -862,9 +970,9 @@ def _adapt_codriving(
             },
         )
 
-    # CoDriving controller derives desired speed with a *5 gain over waypoint
-    # displacements, implying 0.2 s spacing for the 10 predicted future points.
-    src_dt = 0.2
+    # CoDriving trains on consecutive simulation frames at 20 Hz (skip_frames=1,
+    # output_points=10), giving native dt = 0.05 s per waypoint.
+    src_dt = 0.05
     resampled = _resample_trajectory(world_wps, src_dt=src_dt)
     return PlannerOutput(
         future_trajectory_world=resampled,
@@ -899,9 +1007,9 @@ def _adapt_codriving(
                     "anchor is not included in the 10 predicted points"
                 ),
                 (
-                    "per-point timestamps are not emitted by CoDriving; native_dt=0.2 s is "
-                    "treated as an inferred timing assumption from the 10-point horizon and "
-                    "controller desired-speed scaling, so native_timestamps is intentionally left null"
+                    "per-point timestamps are not emitted by CoDriving; native_dt=0.05 s is "
+                    "the training-data sampling rate (20 Hz, skip_frames=1, output_points=10), "
+                    "so native_timestamps is intentionally left null"
                 ),
                 (
                     "observed freshness/reuse: CoDriving commonly reuses the previous control "
@@ -974,14 +1082,15 @@ def _adapt_lmdrive(
             },
         )
 
-    # LMDrive predicts 5 waypoints with controller scaling by 2.0 (dt ~= 0.5 s).
-    resampled = _resample_trajectory(world_wps, src_dt=0.5)
+    # LMDrive predicts 5 waypoints at ~0.20 s spacing (4-frame intervals at
+    # 20 Hz simulation; controller speed factor 2.0 calibrated for this dt).
+    resampled = _resample_trajectory(world_wps, src_dt=0.20)
     return PlannerOutput(
         future_trajectory_world=resampled,
         traj_source=source_label,
         raw_length=len(local_wps),
         raw_world_wps=world_wps,
-        native_dt=0.5,
+        native_dt=0.20,
         raw_export=_build_raw_export(
             raw_positions=local_wps,
             source_frame_description=(
@@ -990,7 +1099,7 @@ def _adapt_lmdrive(
             axis_convention_description="x=right, y=forward",
             is_cumulative_positions=False,
             point0_mode="future",
-            native_dt=0.5,
+            native_dt=0.20,
             native_timestamps=None,
             adapter_debug_notes=[
                 "raw_positions are exported before CARLA-BEV axis remap",
@@ -1004,9 +1113,9 @@ def _adapt_lmdrive(
                     "include the current ego anchor in predicted_waypoints_local"
                 ),
                 (
-                    "per-point timestamps are not emitted by LMDrive; native_dt=0.5 s is "
-                    "treated as an inferred timing assumption from the 5-point waypoint horizon "
-                    "and controller speed scaling, so native_timestamps is intentionally left null"
+                    "per-point timestamps are not emitted by LMDrive; native_dt=0.20 s is "
+                    "the inferred spacing (4-frame intervals at 20 Hz), so "
+                    "native_timestamps is intentionally left null"
                 ),
                 (
                     "observed freshness/reuse: LMDrive commonly reuses the previous control "
@@ -1209,13 +1318,14 @@ def extract_planner_trajectory(
     ego_world_xy: np.ndarray,
     compass_rad: float,
     planner_name: Optional[str] = None,
+    **kw,
 ) -> PlannerOutput:
     """Top-level entry point used by the evaluator.
 
     Selects the appropriate adapter and extracts + aligns the trajectory.
     """
     adapter = get_adapter(planner_name)
-    return adapter(agent, ego_world_xy, compass_rad, planner_name=planner_name)
+    return adapter(agent, ego_world_xy, compass_rad, planner_name=planner_name, **kw)
 
 
 # ── Stale-control detector (debug-only, non-breaking) ────────

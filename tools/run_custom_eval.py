@@ -47,8 +47,11 @@ from setup_scenario_from_zip import prepare_routes_from_zip, parse_route_metadat
 try:
     from common.carla_connection_events import (
         create_logged_client,
+        get_logged_client_id,
         install_process_lifecycle_logging,
         log_carla_event,
+        log_client_release_begin,
+        log_client_release_end,
         log_client_retry,
         log_client_rpc_ready,
         log_process_exception,
@@ -81,6 +84,29 @@ except Exception:  # pragma: no cover - logger is optional outside launcher work
 
     def log_carla_event(event_type: str, *, process_name: str | None = None, **fields: Any) -> None:
         del event_type, process_name, fields
+
+    def get_logged_client_id(client: Any | None) -> str | None:
+        del client
+        return None
+
+    def log_client_release_begin(
+        client: Any | None,
+        *,
+        context: str = "",
+        process_name: str | None = None,
+        reason: str = "",
+    ) -> str | None:
+        del client, context, process_name, reason
+        return None
+
+    def log_client_release_end(
+        client_id: str | None,
+        *,
+        context: str = "",
+        process_name: str | None = None,
+        reason: str = "",
+    ) -> None:
+        del client_id, context, process_name, reason
 
     def log_client_retry(
         *,
@@ -832,6 +858,30 @@ def parse_args() -> argparse.Namespace:
         help="Agent configuration file (overrides --planner default).",
     )
     parser.add_argument("--repetitions", type=int, default=1, help="Route repetitions.")
+    parser.add_argument(
+        "--repro-reruns",
+        "--rerun-same-scenario",
+        dest="repro_reruns",
+        type=int,
+        default=1,
+        help=(
+            "Launcher-level reruns of the same planner/routes invocation for reproduction. "
+            "Unlike --repetitions, this reruns the full run_custom_eval harness as separate "
+            "attempts with distinct result subdirectories."
+        ),
+    )
+    parser.add_argument(
+        "--repro-rerun-index",
+        type=int,
+        default=0,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--repro-rerun-total",
+        type=int,
+        default=0,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--track", default="SENSORS", help="Leaderboard track name.")
     parser.add_argument("--timeout", type=float, default=600.0, help="Route timeout.")
     parser.add_argument("--debug", action="store_true", help="Enable debug output.")
@@ -1726,6 +1776,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("--checkpoint-max-count must be >= 0.")
     if int(args.planner_replay_window) <= 0:
         parser.error("--planner-replay-window must be positive.")
+    if int(args.repro_reruns) <= 0:
+        parser.error("--repro-reruns must be positive.")
+    if int(args.repro_rerun_index) < 0:
+        parser.error("--repro-rerun-index must be non-negative.")
+    if int(args.repro_rerun_total) < 0:
+        parser.error("--repro-rerun-total must be non-negative.")
+    if int(args.repro_rerun_index) > 0 and int(args.repro_rerun_total) <= 0:
+        parser.error("--repro-rerun-total must be positive when --repro-rerun-index is set.")
     args.recovery_mode = str(args.recovery_mode or "off").strip().lower()
     if args.disable_checkpoint_recovery:
         args.recovery_mode = "off"
@@ -1966,6 +2024,7 @@ def wait_for_carla_rpc_ready(host: str, port: int, timeout: float = 60.0) -> boo
     last_exc: Exception | None = None
     while time.monotonic() < deadline:
         attempt += 1
+        client = None
         try:
             client = create_logged_client(
                 carla,
@@ -1976,6 +2035,7 @@ def wait_for_carla_rpc_ready(host: str, port: int, timeout: float = 60.0) -> boo
                 attempt=attempt,
                 process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
             )
+            probe_client_id = get_logged_client_id(client)
             client.get_world()
             log_client_rpc_ready(
                 host=host,
@@ -1983,6 +2043,7 @@ def wait_for_carla_rpc_ready(host: str, port: int, timeout: float = 60.0) -> boo
                 context="startup_rpc_probe",
                 attempt=attempt,
                 process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
+                client_id=probe_client_id,
             )
             print(f"[CARLA CONNECT attempt={attempt}] RPC ready on {host}:{port}")
             return True
@@ -2000,6 +2061,20 @@ def wait_for_carla_rpc_ready(host: str, port: int, timeout: float = 60.0) -> boo
             )
             print(f"[CARLA CONNECT attempt={attempt}] exception={exc_type}: {exc}")
             time.sleep(1.0)
+        finally:
+            release_client_id = log_client_release_begin(
+                client,
+                context="startup_rpc_probe",
+                process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
+                reason="startup_rpc_probe_attempt_end",
+            )
+            client = None
+            log_client_release_end(
+                release_client_id,
+                context="startup_rpc_probe",
+                process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
+                reason="startup_rpc_probe_attempt_end",
+            )
 
     print(
         f"[CARLA CONNECT] RPC not ready after {attempt} attempt(s) "
@@ -6298,6 +6373,10 @@ def combine_results_subdir(base_subdir: str | None, leaf: str) -> str:
     return f"{base_subdir.rstrip('/')}/{leaf}"
 
 
+def format_repro_rerun_label(index: int) -> str:
+    return f"repro_rerun_{max(1, int(index)):03d}"
+
+
 def iter_variant_result_tags(
     effective_results_tag: str,
     args: argparse.Namespace,
@@ -6411,6 +6490,88 @@ def build_child_argv(
     )
     child_argv.extend(replacements)
     return child_argv
+
+
+def dispatch_repro_reruns(
+    *,
+    args: argparse.Namespace,
+    base_argv: Sequence[str],
+    repo_root: Path,
+) -> int:
+    total = max(1, int(args.repro_reruns))
+    if total <= 1:
+        return 0
+
+    if not args.start_carla:
+        print(
+            "[WARN] --repro-reruns is active without --start-carla. "
+            "Each rerun will reuse the same external CARLA session unless you restart it yourself."
+        )
+
+    script_path = Path(__file__).resolve()
+    failures: List[Tuple[int, int | None]] = []
+    print(
+        "[INFO] Reproduction mode enabled: "
+        f"launching {total} isolated run_custom_eval reruns of the same invocation."
+    )
+    for rerun_index in range(1, total + 1):
+        rerun_label = format_repro_rerun_label(rerun_index)
+        rerun_results_subdir = combine_results_subdir(args.results_subdir, rerun_label)
+        child_argv = build_child_argv(
+            base_argv,
+            replacements=[
+                "--results-subdir",
+                rerun_results_subdir,
+                "--repro-rerun-index",
+                str(rerun_index),
+                "--repro-rerun-total",
+                str(total),
+            ],
+            value_options_to_remove=[
+                "--results-subdir",
+                "--repro-reruns",
+                "--rerun-same-scenario",
+                "--repro-rerun-index",
+                "--repro-rerun-total",
+            ],
+        )
+        cmd = [sys.executable, str(script_path), *child_argv]
+        print(f"\n{'=' * 72}")
+        print(f"REPRO RERUN {rerun_index}/{total}")
+        print(f"{'=' * 72}")
+        print("Results subdir:", rerun_results_subdir)
+        print("Command:")
+        print("  " + " ".join(cmd))
+        if args.dry_run:
+            continue
+
+        result = MonitoredSubprocessRunner(
+            cmd,
+            env=os.environ.copy(),
+            cwd=repo_root,
+            timeout_s=None,
+            stall_output_timeout_s=0.0,
+            output_prefix=f"[repro:{rerun_index:03d}] ",
+            show_carla_diag=False,
+        ).run()
+        if result.returncode != 0:
+            failures.append((rerun_index, result.returncode))
+
+    if args.dry_run:
+        print("[INFO] Dry run: reproduction rerun commands were printed but not executed.")
+        return 0
+
+    if failures:
+        summary = ", ".join(
+            f"{format_repro_rerun_label(index)}:returncode={returncode}"
+            for index, returncode in failures
+        )
+        print(f"[ERROR] Reproduction reruns completed with failures: {summary}")
+        first_code = failures[0][1]
+        return int(first_code) if first_code not in (None, 0) else 1
+
+    print(f"[INFO] Completed {total} reproduction reruns successfully.")
+    return 0
 
 
 def add_suffix_to_path(path: Path, suffix: str) -> Path:
@@ -6617,9 +6778,21 @@ class UCLAV2CrosswalkWorker:
                         self._warned_cache_miss = True
                 time.sleep(self.poll_sec)
         finally:
+            release_client_id = log_client_release_begin(
+                client,
+                context="ucla_v2_crosswalk_worker",
+                process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
+                reason="crosswalk_worker_scope_end",
+            )
             # Release the libcarla C++ object so its destructor closes the TCP
             # socket synchronously (CPython refcount drops to zero here).
             client = None  # noqa: F841
+            log_client_release_end(
+                release_client_id,
+                context="ucla_v2_crosswalk_worker",
+                process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
+                reason="crosswalk_worker_scope_end",
+            )
 
         try:
             cw.save_surface_z_cache(self.cache_file, cache)
@@ -7151,10 +7324,22 @@ def align_ego_routes_in_directory(
         print(f"[WARN] Ego route alignment failed to initialize CARLA/GRP: {exc}")
         return
     finally:
+        release_client_id = log_client_release_begin(
+            client,
+            context="align_ego_routes",
+            process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
+            reason="align_ego_routes_scope_end",
+        )
         # Release libcarla C++ object so its destructor closes the TCP socket
         # synchronously. carla_map/grp/world are kept alive by their own
         # references and do not hold the client socket open.
         client = None  # noqa: F841
+        log_client_release_end(
+            release_client_id,
+            context="align_ego_routes",
+            process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
+            reason="align_ego_routes_scope_end",
+        )
 
     ego_xmls: List[Path] = []
     for xml_path in routes_dir.glob("*.xml"):
@@ -7525,6 +7710,22 @@ def main() -> None:
             _forensics_note(f"[INFO] Core dump limit update: {core_detail}")
         else:
             _forensics_note(f"[WARN] Core dump limit update failed: {core_detail}")
+
+    if int(args.repro_rerun_total) > 0 and int(args.repro_rerun_index) > 0:
+        print(
+            "[INFO] Reproduction rerun context: "
+            f"{int(args.repro_rerun_index)}/{int(args.repro_rerun_total)} "
+            f"label={format_repro_rerun_label(int(args.repro_rerun_index))}"
+        )
+
+    if int(args.repro_reruns) > 1 and int(args.repro_rerun_index) == 0:
+        raise SystemExit(
+            dispatch_repro_reruns(
+                args=args,
+                base_argv=base_argv,
+                repo_root=repo_root,
+            )
+        )
 
     runtime_env = _build_runtime_env(args, os.environ.copy())
     dashboard_status_path = get_dashboard_status_path(runtime_env)

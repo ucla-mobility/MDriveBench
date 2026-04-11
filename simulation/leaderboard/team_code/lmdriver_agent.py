@@ -258,9 +258,10 @@ class LMDriveAgent(autonomous_agent.AutonomousAgent):
 		self.debug_collapse_waypoint_norm = float(os.environ.get("LMDRIVE_DEBUG_COLLAPSE_WAYPOINT_NORM", "0.35"))
 		self.debug_weak_recovery_steer = float(os.environ.get("LMDRIVE_DEBUG_WEAK_RECOVERY_STEER", "0.10"))
 		self.debug_nearby_actor_radius = float(os.environ.get("LMDRIVE_DEBUG_NEARBY_RADIUS", "35.0"))
-		self.debug_force_fresh_control = str(
-			os.environ.get("LMDRIVE_DEBUG_FORCE_FRESH_CONTROL", "0")
-		).lower() in ("1", "true", "yes")
+		self.debug_force_fresh_control = (
+			str(os.environ.get("LMDRIVE_DEBUG_FORCE_FRESH_CONTROL", "0")).lower() in ("1", "true", "yes")
+			or str(os.environ.get("OPENLOOP_FORCE_FRESH_INFERENCE", "0")).lower() in ("1", "true", "yes")
+		)
 		self.enable_misleading_instruction = str(
 			os.environ.get("LMDRIVE_ENABLE_MISLEADING_INSTRUCTION", "0")
 		).lower() in ("1", "true", "yes")
@@ -411,11 +412,11 @@ class LMDriveAgent(autonomous_agent.AutonomousAgent):
 		gps = (gps - self._route_planner.mean) * self._route_planner.scale
 		return gps
 
-		def _debug(self, message):
-			debug_stdout = str(os.environ.get("LMDRIVE_DEBUG_STDOUT", "0")).lower() in ("1", "true", "yes")
-			if not getattr(self, "route_debug_enabled", LMDRIVE_ROUTE_DEBUG_FLAG) and not debug_stdout:
-				return
-			print(f"[DEBUG LMDRIVE] {message}", flush=True)
+	def _debug(self, message):
+		debug_stdout = str(os.environ.get("LMDRIVE_DEBUG_STDOUT", "0")).lower() in ("1", "true", "yes")
+		if not getattr(self, "route_debug_enabled", LMDRIVE_ROUTE_DEBUG_FLAG) and not debug_stdout:
+			return
+		print(f"[DEBUG LMDRIVE] {message}", flush=True)
 
 	def _json_safe(self, value):
 		if isinstance(value, dict):

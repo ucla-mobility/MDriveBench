@@ -512,10 +512,14 @@ class VadAgent(autonomous_agent.AutonomousAgent):
 
         
         realtime_mode = os.environ.get('REALTIME_MODE', '0')
+        force_fresh_every_frame = (
+            os.environ.get('VAD_FORCE_FRESH_INFERENCE', '0') == '1'
+            or os.environ.get('OPENLOOP_FORCE_FRESH_INFERENCE', '0') == '1'
+        )
         if realtime_mode == '1':
             if self.step <= self.next_action_step[ego_id]:
                 return self.prev_control[ego_id]
-        if realtime_mode != '1':
+        if realtime_mode != '1' and not force_fresh_every_frame:
             if self.step % 4 != 1 and self.step:
                 return self.prev_control[ego_id]
 
@@ -564,7 +568,9 @@ class VadAgent(autonomous_agent.AutonomousAgent):
         else:
             ego_lcf_feat[8] = self.prev_control_cache[ego_id][0].steer
 
-        command = tick_data['command_near'].value
+        command_raw = int(tick_data['command_near'].value)
+        command_fallback_to_lanefollow = bool(command_raw < 0)
+        command = command_raw
         if command < 0:
             command = 4
         command -= 1
@@ -640,6 +646,8 @@ class VadAgent(autonomous_agent.AutonomousAgent):
         self.pid_metadata['brake_traj'] = float(brake_traj)
         self.pid_metadata['plan'] = out_truck.tolist()
         self.pid_metadata['command'] = command
+        self.pid_metadata['command_raw'] = int(command_raw)
+        self.pid_metadata['command_fallback_to_lanefollow'] = bool(command_fallback_to_lanefollow)
         self.pid_metadata['all_plan'] = all_out_truck.tolist()
         if self.debug_log and (self.step % self.log_every == 0):
             self._log(f"[CTRL][ego={ego_id}] can_pos=({can_bus[0]:.2f},{can_bus[1]:.2f}) "

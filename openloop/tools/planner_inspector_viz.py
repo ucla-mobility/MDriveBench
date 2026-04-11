@@ -12,18 +12,22 @@ Per-frame pages show EVERYTHING fed into and produced by the planner:
     PID control rollout, surrounding actor bounding boxes
   • Coordinate transform chain: raw planner output → carla_bev → world → resampled
   • VAD-only: all 6 command branch trajectories in ego-local frame
+  • Input audit panel: measurement fields, input file paths, run_step payload schema,
+    camera/lidar sanity statistics, VAD branch consistency checks
+  • LiDAR top-down panel (from recorded .bin input path)
   • Ego state: speed, compass rose, steer/throttle/brake, latency, staleness
   • ADE breakdown: per-step L2 bar chart (native vs extrapolated steps colored differently)
   • Per-step canonical table: predicted xy, GT xy, validity flags, L2 distance
   • Provenance debug notes from pipeline
-  • (Optional) Camera images from scenario YAML
+  • (Optional) Camera images (loaded from debug-recorded input paths, with scenario fallback)
 
 Usage:
   python planner_inspector_viz.py \\
     --debug-frames /path/to/frames.jsonl \\
-    --planner tcp|vad \\
+    --planner <planner_name> \\
     --out-dir /tmp/inspector_tcp \\
     [--scenario-dir /path/to/yamldir] \\
+    [--frame-idx 123]      # exact frame index (repeatable)
     [--frame-stride N]       # sample every N-th frame
     [--max-frames N]         # cap on per-frame figures (default 40)
 """
@@ -34,7 +38,7 @@ import math
 import os
 import pathlib
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib
 matplotlib.use('Agg')
@@ -54,9 +58,33 @@ C_EXTRAP   = '#e67e22'   # dark orange — extrapolated prediction points
 C_STALE    = '#bdc3c7'   # light gray  — stale frame marker
 C_ACTOR    = '#8e44ad'   # purple      — surrounding vehicle bounding boxes
 
+# VAD branch index ordering follows RoadOption(value)-1:
+#   0=LEFT, 1=RIGHT, 2=STRAIGHT, 3=LANEFOLLOW, 4=CHANGELANELEFT, 5=CHANGELANERIGHT
 VAD_CMD_NAMES  = ['Turn Left', 'Turn Right', 'Go Straight',
-                  'Lane Change L', 'Lane Change R', 'Follow']
+                  'Lane Follow', 'Lane Change L', 'Lane Change R']
 VAD_CMD_COLORS = ['#e74c3c', '#e67e22', '#2ecc71', '#3498db', '#9b59b6', '#f39c12']
+
+
+def _planner_family(planner: str) -> str:
+    tag = str(planner or '').lower()
+    if 'colmdriver_rulebase' in tag:
+        return 'colmdriver'
+    if 'colmdriver' in tag:
+        return 'colmdriver'
+    if 'vad' in tag:
+        return 'vad'
+    if 'tcp' in tag:
+        return 'tcp'
+    return 'generic'
+
+
+def _first_existing_key(payload: Dict[str, Any], candidates: List[str]) -> str:
+    for key in candidates:
+        if key in payload:
+            arr = _arr(payload.get(key))
+            if arr is not None:
+                return key
+    return candidates[0]
 
 # ── geometry helpers ───────────────────────────────────────────────────────────
 
@@ -127,6 +155,32 @@ def _load_yaml(scenario_dir: str, frame_idx: int) -> Optional[Dict]:
         return yaml.safe_load(f)
 
 
+def _load_yaml_from_frame(
+    frame: Dict[str, Any],
+    scenario_dir: Optional[str],
+    frame_idx: int,
+) -> Optional[Dict]:
+    """Best-effort YAML loader using explicit scenario_dir or debug-recorded path."""
+    if scenario_dir:
+        y = _load_yaml(scenario_dir, frame_idx)
+        if y is not None:
+            return y
+    input_files = frame.get('input_files') or {}
+    yaml_cur = input_files.get('yaml') if isinstance(input_files, dict) else None
+    if not yaml_cur:
+        return None
+    try:
+        p = pathlib.Path(str(yaml_cur))
+        yp = p.with_name(f"{int(frame_idx):06d}.yaml")
+        if not yp.exists():
+            return None
+        with open(yp) as f:
+            import yaml
+            return yaml.safe_load(f)
+    except Exception:
+        return None
+
+
 # ── shared drawing primitives ─────────────────────────────────────────────────
 
 def _draw_ego_arrow(ax, x: float, y: float, yaw_deg: float,
@@ -161,6 +215,128 @@ def _draw_actor_boxes(ax, yaml_data: Optional[Dict], label: bool = True):
             ax.plot(corners[:, 0], corners[:, 1], **kw)
 
 
+def _get_vehicle_entry(yaml_data: Optional[Dict], actor_id: Optional[int]) -> Optional[Dict]:
+    if yaml_data is None or actor_id is None:
+        return None
+    vehicles = yaml_data.get('vehicles') or {}
+    if not isinstance(vehicles, dict):
+        return None
+    if actor_id in vehicles:
+        v = vehicles.get(actor_id)
+        return v if isinstance(v, dict) else None
+    s = str(actor_id)
+    if s in vehicles:
+        v = vehicles.get(s)
+        return v if isinstance(v, dict) else None
+    return None
+
+
+def _draw_collision_actor_box(
+    ax,
+    yaml_data: Optional[Dict],
+    actor_id: Optional[int],
+    *,
+    color: str = '#ff2d2d',
+    label: bool = True,
+) -> bool:
+    v = _get_vehicle_entry(yaml_data, actor_id)
+    if not isinstance(v, dict):
+        return False
+    loc = v.get('location', [0, 0, 0])
+    ext = v.get('extent', [1, 0.5, 0.5])
+    ang = v.get('angle', [0, 0, 0])
+    yaw = ang[1] if len(ang) > 1 else 0.0
+    corners = _obb_corners(loc[0], loc[1], ext[0], ext[1], yaw)
+    kw = dict(color=color, alpha=0.95, lw=2.2, linestyle='--')
+    if label:
+        ax.plot(corners[:, 0], corners[:, 1], label=f'Collision actor id={actor_id}', **kw)
+    else:
+        ax.plot(corners[:, 0], corners[:, 1], **kw)
+    ax.scatter([float(loc[0])], [float(loc[1])], s=35, color=color, marker='x', zorder=7)
+    ax.annotate(
+        f'coll actor {actor_id}',
+        (float(loc[0]), float(loc[1])),
+        fontsize=6,
+        color=color,
+        xytext=(3, 3),
+        textcoords='offset points',
+    )
+    return True
+
+
+def _infer_collision_actor_from_frame(
+    frame: Dict[str, Any],
+    scenario_dir: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """Fallback collision-actor inference for legacy debug files without collision_debug."""
+    can = frame.get('canonical_scoring_metrics') or {}
+    if not bool(can.get('collision')):
+        return None
+    pred = _arr(can.get('predicted_canonical_points'))
+    if pred is None or pred.ndim != 2 or len(pred) < 1:
+        return None
+    pose = frame.get('pose_world') or []
+    if len(pose) < 5:
+        return None
+    fi = int(frame.get('frame_idx', 0))
+    ego_id = frame.get('ego_actor_id')
+    try:
+        ego_id_int = int(ego_id)
+    except Exception:
+        ego_id_int = None
+
+    step_index = 0
+    frame_delta = 5  # 0.5 s at 10 Hz
+    future_fi = fi + frame_delta
+    yaml_future = _load_yaml_from_frame(frame, scenario_dir, future_fi)
+    if yaml_future is None:
+        return None
+    vehicles = yaml_future.get('vehicles') or {}
+    if not isinstance(vehicles, dict) or not vehicles:
+        return None
+
+    yaw = math.radians(float(pose[4]))
+    sin_y = math.sin(yaw)
+    cos_y = math.cos(yaw)
+    pred0 = np.asarray(pred[0, :2], dtype=float)
+    best = None
+    for aid_raw, v in vehicles.items():
+        if not isinstance(v, dict):
+            continue
+        try:
+            aid = int(aid_raw)
+        except Exception:
+            continue
+        if ego_id_int is not None and aid == ego_id_int:
+            continue
+        loc = v.get('location')
+        if not isinstance(loc, (list, tuple)) or len(loc) < 2:
+            continue
+        actor_xy = np.asarray([float(loc[0]), float(loc[1])], dtype=float)
+        diff = pred0 - actor_xy
+        lateral = abs(-sin_y * diff[0] + cos_y * diff[1])
+        if lateral >= 3.5:
+            continue
+        longitudinal = float(cos_y * diff[0] + sin_y * diff[1])
+        euclidean = float(np.linalg.norm(diff))
+        cand = {
+            "collision": True,
+            "actor_id": int(aid),
+            "step_index": int(step_index),
+            "frame_delta": int(frame_delta),
+            "t_seconds": 0.5,
+            "lateral_m": float(lateral),
+            "longitudinal_m": float(longitudinal),
+            "euclidean_m": euclidean,
+            "pred_world_xy": [float(pred0[0]), float(pred0[1])],
+            "actor_world_xy": [float(actor_xy[0]), float(actor_xy[1])],
+            "inferred_from_legacy_record": True,
+        }
+        if best is None or float(cand["lateral_m"]) < float(best["lateral_m"]):
+            best = cand
+    return best
+
+
 def _compass_rose(ax, heading_rad: float):
     """Draw a self-contained compass rose on the given axis."""
     ax.set_xlim(-1.5, 1.5)
@@ -190,14 +366,21 @@ def _make_perframe_fig(frame: Dict, all_frames: List[Dict], planner: str,
     can     = frame.get('canonical_scoring_metrics') or {}
     pad     = frame.get('planner_adapter_debug') or {}
     meas    = frame.get('measurements') or {}
-    is_vad  = (planner.lower() == 'vad')
-    has_cams = bool(scenario_dir)
+    planner_family = _planner_family(planner)
+    is_vad  = (planner_family == 'vad')
+    input_files = frame.get('input_files') or {}
+    debug_cam_paths = input_files.get('camera_images') if isinstance(input_files, dict) else {}
+    has_cams = bool(scenario_dir) or any(
+        isinstance(debug_cam_paths, dict) and debug_cam_paths.get(d)
+        for d in ('front', 'left', 'right', 'rear')
+    )
     has_vad  = is_vad and bool(pad.get('candidate_local_wps_by_command'))
 
     # Row heights (in inches)
     row_h = [5.0,   # BEV
              3.5,   # transform chain
              2.8,   # ego state + ADE breakdown
+             3.1,   # input audit + lidar topdown
              2.5,   # canonical table + provenance
              ]
     if has_vad:
@@ -235,7 +418,14 @@ def _make_perframe_fig(frame: Dict, all_frames: List[Dict], planner: str,
     _panel_ade_breakdown(ax_ade, frame, planner)
     row += 1
 
-    # ── Row 3/4: left=canonical table | right=provenance notes ───────────────
+    # ── Row 3/4: left=input audit | right=lidar topdown ──────────────────────
+    ax_input = fig.add_subplot(gs[row, :2])
+    ax_lidar = fig.add_subplot(gs[row, 2:])
+    _panel_input_audit(ax_input, frame, planner)
+    _panel_lidar_topdown(ax_lidar, frame)
+    row += 1
+
+    # ── Row 4/5: left=canonical table | right=provenance notes ───────────────
     ax_table = fig.add_subplot(gs[row, :2])
     ax_prov  = fig.add_subplot(gs[row, 2:])
     _panel_canonical_table(ax_table, frame)
@@ -292,8 +482,54 @@ def _panel_bev(ax, frame, all_frames, planner, scenario_dir):
                         color=C_EGO, size=2.5, label=f'Ego (fr {fi})')
 
     # Surrounding actors from YAML
-    yaml_d = _load_yaml(scenario_dir, fi) if scenario_dir else None
+    yaml_d = _load_yaml_from_frame(frame, scenario_dir, fi)
     _draw_actor_boxes(ax, yaml_d, label=True)
+
+    # Collision trigger actor highlight (if collision debug identifies one).
+    coll_dbg = can.get('collision_debug') or {}
+    if not coll_dbg and bool(can.get('collision')):
+        coll_dbg = _infer_collision_actor_from_frame(frame, scenario_dir) or {}
+    coll_actor_id = coll_dbg.get('actor_id')
+    coll_step = coll_dbg.get('step_index')
+    coll_frame_delta = coll_dbg.get('frame_delta')
+    if (
+        can.get('collision')
+        and isinstance(coll_actor_id, (int, np.integer))
+        and isinstance(coll_step, (int, np.integer))
+    ):
+        if not isinstance(coll_frame_delta, (int, np.integer)):
+            coll_frame_delta = int((int(coll_step) + 1) * 5)
+        coll_frame_idx = int(fi) + int(coll_frame_delta)
+        yaml_coll = _load_yaml_from_frame(frame, scenario_dir, coll_frame_idx)
+        drew = _draw_collision_actor_box(
+            ax,
+            yaml_coll,
+            int(coll_actor_id),
+            label=True,
+        )
+        if drew:
+            lat = coll_dbg.get('lateral_m')
+            lon = coll_dbg.get('longitudinal_m')
+            euc = coll_dbg.get('euclidean_m')
+            tsec = coll_dbg.get('t_seconds')
+            ax.text(
+                0.01, 0.02,
+                (
+                    f"collision trigger: actor={int(coll_actor_id)}  "
+                    f"step={int(coll_step)}  t={float(tsec):.2f}s  "
+                    f"lat={float(lat):.2f}m  lon={float(lon):.2f}m  "
+                    f"dist={float(euc):.2f}m"
+                    if isinstance(lat, (int, float))
+                    and isinstance(lon, (int, float))
+                    and isinstance(euc, (int, float))
+                    and isinstance(tsec, (int, float))
+                    else f"collision trigger: actor={int(coll_actor_id)} step={int(coll_step)}"
+                ),
+                transform=ax.transAxes,
+                fontsize=6.5,
+                color='#b30000',
+                bbox=dict(boxstyle='round,pad=0.25', facecolor='white', alpha=0.88),
+            )
 
     # GT canonical 6-point targets
     gt_pts = _arr(can.get('gt_canonical_points') or frame.get('gt_future_world'))
@@ -307,7 +543,7 @@ def _panel_bev(ax, frame, all_frames, planner, scenario_dir):
 
     # Predicted waypoints (pred_world_used) — native vs extrapolated coloring
     pred = _arr(frame.get('pred_world_used'))
-    native_len = frame.get('planner_raw_length', 4 if planner.lower() == 'tcp' else 6)
+    native_len = frame.get('planner_raw_length', 4 if _planner_family(planner) == 'tcp' else 6)
     extra_legend_handles = []
     if pred is not None and pred.ndim == 2:
         ax.plot(pred[:, 0], pred[:, 1], color=C_PRED, lw=1.8, alpha=0.85, zorder=4,
@@ -354,21 +590,54 @@ def _panel_bev(ax, frame, all_frames, planner, scenario_dir):
 def _panel_transform_chain(axes, frame, planner):
     pad        = frame.get('planner_adapter_debug') or {}
     ego_world  = _arr(frame.get('ego_world_xy'))
-    is_vad     = (planner.lower() == 'vad')
-    native_len = frame.get('planner_raw_length', 4 if not is_vad else 6)
+    planner_family = _planner_family(planner)
+    is_vad = (planner_family == 'vad')
+    native_len = frame.get('planner_raw_length', 4 if planner_family == 'tcp' else 6)
 
-    raw_key   = 'local_wps' if is_vad else 'tcp_wps_raw'
-    raw_label = ('local_wps\n(ego-local, VAD output)'
-                 if is_vad else 'tcp_wps_raw\n(ego-local, before axis swap)')
-
-    steps = [
-        (raw_key,             raw_label,                                'local'),
-        ('carla_bev_wps',     'carla_bev_wps\n(axis-swapped / BEV)',   'local'),
-        ('world_wps',         'world_wps\n(world, native horizon)',     'world'),
-        ('resampled_world_wps',
-         f'resampled_world_wps\n(world, 6 canonical pts,\n'
-         f'≥{native_len} = extrapolated)', 'world'),
-    ]
+    if planner_family == 'vad':
+        steps = [
+            ('local_wps',         'local_wps\n(ego-local, VAD output)',     'local'),
+            ('carla_bev_wps',     'carla_bev_wps\n(axis-swapped / BEV)',    'local'),
+            ('world_wps',         'world_wps\n(world, native horizon)',      'world'),
+            ('resampled_world_wps',
+             f'resampled_world_wps\n(world, 6 canonical pts,\n'
+             f'≥{native_len} = extrapolated)', 'world'),
+        ]
+    elif planner_family == 'colmdriver':
+        steps = [
+            ('raw_wps',               'raw_wps\n(mapped world-like planner frame)', 'mapped'),
+            ('corrected_world_wps',   'corrected_world_wps\n(world after origin correction)', 'world'),
+            ('world_wps',             'world_wps\n(world, native horizon)',          'world'),
+            ('resampled_world_wps',
+             f'resampled_world_wps\n(world, 6 canonical pts,\n'
+             f'≥{native_len} = extrapolated)', 'world'),
+        ]
+    else:
+        raw_key = _first_existing_key(pad, ['tcp_wps_raw', 'local_wps', 'raw_wps'])
+        if raw_key == 'tcp_wps_raw':
+            raw_label = 'tcp_wps_raw\n(ego-local, before axis swap)'
+            raw_frame = 'local'
+        elif raw_key == 'local_wps':
+            raw_label = 'local_wps\n(ego-local planner output)'
+            raw_frame = 'local'
+        else:
+            raw_label = 'raw_wps\n(planner-native frame)'
+            raw_frame = 'mapped'
+        mid_key = _first_existing_key(pad, ['carla_bev_wps', 'corrected_world_wps'])
+        if mid_key == 'carla_bev_wps':
+            mid_label = 'carla_bev_wps\n(axis-swapped / BEV)'
+            mid_frame = 'local'
+        else:
+            mid_label = 'corrected_world_wps\n(world corrected)'
+            mid_frame = 'world'
+        steps = [
+            (raw_key,             raw_label,                                 raw_frame),
+            (mid_key,             mid_label,                                 mid_frame),
+            ('world_wps',         'world_wps\n(world, native horizon)',      'world'),
+            ('resampled_world_wps',
+             f'resampled_world_wps\n(world, 6 canonical pts,\n'
+             f'≥{native_len} = extrapolated)', 'world'),
+        ]
 
     for ax, (key, title, frame_type) in zip(axes, steps):
         pts = _arr(pad.get(key))
@@ -456,8 +725,21 @@ def _panel_vad_branches(ax, frame):
     ax.set_xlabel('X local (m)', fontsize=7)
     ax.set_ylabel('Y local (m)', fontsize=7)
     sel_name = VAD_CMD_NAMES[selected] if 0 <= selected < len(VAD_CMD_NAMES) else '?'
-    ax.set_title(f'VAD: All {len(branches)} Command Branches in Ego-Local Frame  '
-                 f'—  selected={selected} ({sel_name})', fontsize=9)
+    vad_diag = frame.get('vad_branch_diagnostics') or {}
+    best_idx = vad_diag.get('best_branch_index_by_local_ade')
+    if isinstance(best_idx, (int, np.integer)) and 0 <= int(best_idx) < len(VAD_CMD_NAMES):
+        best_name = VAD_CMD_NAMES[int(best_idx)]
+        ax.set_title(
+            f'VAD: All {len(branches)} Command Branches in Ego-Local Frame  '
+            f'—  selected={selected} ({sel_name})  best={int(best_idx)} ({best_name})',
+            fontsize=9,
+        )
+    else:
+        ax.set_title(
+            f'VAD: All {len(branches)} Command Branches in Ego-Local Frame  '
+            f'—  selected={selected} ({sel_name})',
+            fontsize=9,
+        )
     ax.legend(loc='upper left', fontsize=6, ncol=3, framealpha=0.7)
     ax.grid(True, alpha=0.2)
     _pad_limits(ax, *all_pts, frac=0.15)
@@ -522,11 +804,251 @@ def _panel_ego_state(ax, frame):
     ax.set_title('Ego State & Control Inputs', fontsize=8)
 
 
+def _panel_input_audit(ax, frame, planner):
+    """Dense text panel for input provenance and consistency checks."""
+    meas = frame.get('measurements') or {}
+    stats = frame.get('sensor_stats') or {}
+    input_files = frame.get('input_files') or {}
+    input_data_overview = frame.get('input_data_overview') or {}
+    pad = frame.get('planner_adapter_debug') or {}
+
+    def _fmt_float(v, nd=3):
+        try:
+            fv = float(v)
+        except Exception:
+            return "n/a"
+        if not np.isfinite(fv):
+            return "n/a"
+        return f"{fv:.{nd}f}"
+
+    def _fmt_path(p):
+        if not p:
+            return "n/a"
+        s = str(p)
+        return s if len(s) <= 95 else ("..." + s[-92:])
+
+    lines = []
+    lines.append("Input Provenance")
+    lines.append(f"  yaml      : {_fmt_path(input_files.get('yaml'))}")
+    lines.append(f"  lidar_bin : {_fmt_path(input_files.get('lidar_bin'))}")
+    cam_imgs = input_files.get('camera_images') or {}
+    for d in ("front", "left", "right", "rear"):
+        lines.append(f"  cam_{d:<5}: {_fmt_path(cam_imgs.get(d))}")
+
+    lines.append("")
+    lines.append("Planner Inputs (measurement fields)")
+    lines.append(
+        f"  speed={_fmt_float(meas.get('speed_mps'))} m/s  "
+        f"gps=({_fmt_float(meas.get('gps_x'))}, {_fmt_float(meas.get('gps_y'))})  "
+        f"compass={_fmt_float(meas.get('compass'), nd=5)} rad"
+    )
+    lines.append(
+        f"  command={meas.get('command', 'n/a')}  "
+        f"target_point={meas.get('target_point', 'n/a')}"
+    )
+    lines.append(
+        f"  lidar_pose=({_fmt_float(meas.get('lidar_pose_x'))}, "
+        f"{_fmt_float(meas.get('lidar_pose_y'))}, {_fmt_float(meas.get('lidar_pose_z'))})"
+    )
+
+    lidar_stats = stats.get('lidar') or {}
+    if lidar_stats:
+        lines.append("")
+        lines.append("Sensor Stats")
+        lines.append(
+            f"  lidar shape={lidar_stats.get('shape', '?')}  "
+            f"pts={lidar_stats.get('num_points', '?')}  "
+            f"xy_range=[{_fmt_float(lidar_stats.get('xy_range_min'))}, "
+            f"{_fmt_float(lidar_stats.get('xy_range_max'))}] m"
+        )
+        if lidar_stats.get('xyz_min') is not None and lidar_stats.get('xyz_max') is not None:
+            xyz_min = lidar_stats.get('xyz_min')
+            xyz_max = lidar_stats.get('xyz_max')
+            lines.append(
+                f"  lidar xyz_min={xyz_min}  xyz_max={xyz_max}"
+            )
+    cam_stats = (stats.get('cameras') or {}) if isinstance(stats, dict) else {}
+    for d in ("front", "left", "right", "rear"):
+        c = cam_stats.get(d) or {}
+        if c.get('available'):
+            lines.append(
+                f"  cam_{d:<5} shape={c.get('shape', '?')}  "
+                f"mean={_fmt_float(c.get('mean'), nd=2)}  "
+                f"std={_fmt_float(c.get('std'), nd=2)}  "
+                f"nz={_fmt_float(c.get('nonzero_fraction'), nd=3)}"
+            )
+        else:
+            lines.append(f"  cam_{d:<5} unavailable")
+
+    lines.append("")
+    keys = sorted(input_data_overview.keys())
+    preview = ", ".join(keys[:10]) + (" ..." if len(keys) > 10 else "")
+    lines.append(f"run_step input_data keys ({len(keys)}): {preview}")
+
+    if _planner_family(planner) == 'vad':
+        local = _arr(pad.get('local_wps'))
+        branches = _arr(pad.get('candidate_local_wps_by_command'))
+        selected = pad.get('selected_command_index')
+        vad_diag = frame.get('vad_branch_diagnostics') or {}
+        branch_msg = "n/a"
+        try:
+            cmd = int(selected)
+        except Exception:
+            cmd = -1
+        if local is not None and branches is not None and branches.ndim == 3 and 0 <= cmd < len(branches):
+            n = min(len(local), len(branches[cmd]))
+            if n > 0:
+                diff = np.linalg.norm(local[:n] - branches[cmd][:n], axis=1)
+                branch_msg = (
+                    f"selected={cmd}  mean_l2={np.mean(diff):.4f} m  "
+                    f"max_l2={np.max(diff):.4f} m"
+                )
+        lines.append(f"VAD branch consistency: {branch_msg}")
+        if vad_diag:
+            route_val = vad_diag.get('route_command_value')
+            route_name = vad_diag.get('route_command_name')
+            sel_idx = vad_diag.get('selected_branch_index')
+            sel_name = vad_diag.get('selected_command_name')
+            sel_raw = vad_diag.get('selected_command_raw_value')
+            sel_fallback = vad_diag.get('selected_command_fallback_to_lanefollow')
+            best_idx = vad_diag.get('best_branch_index_by_local_ade')
+            best_name = vad_diag.get('best_command_name_by_local_ade')
+            sel_ade = vad_diag.get('selected_branch_local_ade_m')
+            best_ade = vad_diag.get('best_branch_local_ade_m')
+            gap = vad_diag.get('selected_minus_best_local_ade_m')
+
+            def _f(v):
+                try:
+                    fv = float(v)
+                except Exception:
+                    return "n/a"
+                return f"{fv:.3f}" if np.isfinite(fv) else "n/a"
+
+            lines.append(
+                "VAD route/select: "
+                f"route_cmd={route_val}({route_name})  "
+                f"selected={sel_idx}({sel_name})  "
+                f"best={best_idx}({best_name})"
+            )
+            lines.append(
+                "VAD command raw/fallback: "
+                f"raw={sel_raw}  fallback_to_lanefollow={sel_fallback}"
+            )
+            lines.append(
+                "VAD local-ADE: "
+                f"selected={_f(sel_ade)} m  best={_f(best_ade)} m  "
+                f"gap={_f(gap)} m"
+            )
+
+    can = frame.get('canonical_scoring_metrics') or {}
+    coll_dbg = can.get('collision_debug') or {}
+    if not coll_dbg and bool(can.get('collision')):
+        coll_dbg = _infer_collision_actor_from_frame(frame, None) or {}
+    coll_actor = coll_dbg.get('actor_id')
+    coll_step = coll_dbg.get('step_index')
+    if (
+        bool(can.get('collision'))
+        and isinstance(coll_actor, (int, np.integer))
+        and isinstance(coll_step, (int, np.integer))
+    ):
+        frame_delta = coll_dbg.get('frame_delta')
+        if not isinstance(frame_delta, (int, np.integer)):
+            frame_delta = int((int(coll_step) + 1) * 5)
+        collision_frame_idx = int(frame.get('frame_idx', 0)) + int(frame_delta)
+        yaml_coll = _load_yaml_from_frame(frame, None, collision_frame_idx)
+        veh = _get_vehicle_entry(yaml_coll, int(coll_actor))
+        lines.append("")
+        lines.append("Collision Trigger Actor")
+        lines.append(
+            f"  actor_id={int(coll_actor)}  step={int(coll_step)}  "
+            f"frame={collision_frame_idx}  t={_fmt_float(coll_dbg.get('t_seconds'))} s"
+        )
+        if bool(coll_dbg.get('inferred_from_legacy_record')):
+            lines.append("  source=legacy fallback inference (collision_debug missing)")
+        lines.append(
+            f"  lateral={_fmt_float(coll_dbg.get('lateral_m'))} m  "
+            f"longitudinal={_fmt_float(coll_dbg.get('longitudinal_m'))} m  "
+            f"euclidean={_fmt_float(coll_dbg.get('euclidean_m'))} m"
+        )
+        if isinstance(veh, dict):
+            lines.append(f"  obj_type={veh.get('obj_type', 'n/a')}  attr={veh.get('attribute', 'n/a')}")
+            lines.append(f"  location={veh.get('location', 'n/a')}")
+            lines.append(f"  angle={veh.get('angle', 'n/a')}")
+            lines.append(f"  extent={veh.get('extent', 'n/a')}")
+            for k in sorted(veh.keys()):
+                if k in {"obj_type", "attribute", "location", "angle", "extent"}:
+                    continue
+                lines.append(f"  {k}={veh.get(k)}")
+        else:
+            lines.append("  actor metadata unavailable in collision-step YAML")
+
+    ax.axis('off')
+    ax.text(0.02, 0.97, "\n".join(lines),
+            va='top', ha='left', transform=ax.transAxes,
+            fontsize=6.4, family='monospace',
+            bbox=dict(boxstyle='round,pad=0.42', facecolor='#f8fbff', alpha=0.9))
+    ax.set_title('Input Audit (Files, Measurements, Sensor Stats)', fontsize=8)
+
+
+def _panel_lidar_topdown(ax, frame):
+    """Top-down LiDAR quicklook for one frame (best-effort)."""
+    input_files = frame.get('input_files') or {}
+    lidar_path = input_files.get('lidar_bin')
+    if not lidar_path:
+        ax.axis('off')
+        ax.text(0.5, 0.5, 'No lidar path in debug frame',
+                ha='center', va='center', transform=ax.transAxes,
+                fontsize=8, color='gray')
+        ax.set_title('LiDAR Top-Down', fontsize=8)
+        return
+    p = pathlib.Path(str(lidar_path))
+    if not p.exists():
+        ax.axis('off')
+        ax.text(0.5, 0.5, f'LiDAR file missing:\n{p}',
+                ha='center', va='center', transform=ax.transAxes,
+                fontsize=7, color='gray')
+        ax.set_title('LiDAR Top-Down', fontsize=8)
+        return
+
+    try:
+        arr = np.fromfile(str(p), dtype=np.float32)
+        if arr.size < 4:
+            raise ValueError("empty or malformed .bin file")
+        arr = arr.reshape(-1, 4)
+        xyz = arr[:, :3]
+        finite = np.isfinite(xyz).all(axis=1)
+        xyz = xyz[finite]
+        if len(xyz) == 0:
+            raise ValueError("no finite xyz points")
+
+        max_pts = 60000
+        if len(xyz) > max_pts:
+            keep = np.linspace(0, len(xyz) - 1, max_pts).astype(int)
+            xyz = xyz[keep]
+
+        sc = ax.scatter(xyz[:, 0], xyz[:, 1], c=xyz[:, 2],
+                        s=0.8, alpha=0.55, cmap='viridis', linewidths=0)
+        plt.colorbar(sc, ax=ax, fraction=0.045, pad=0.02, label='z (m)')
+        ax.scatter([0], [0], c='red', s=35, marker='x', label='ego lidar origin', zorder=5)
+        ax.set_aspect('equal', adjustable='datalim')
+        ax.set_xlabel('lidar x (m)', fontsize=7)
+        ax.set_ylabel('lidar y (m)', fontsize=7)
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc='upper right', fontsize=6, framealpha=0.7)
+        ax.set_title(f'LiDAR Top-Down (from {p.name})', fontsize=8)
+    except Exception as exc:
+        ax.axis('off')
+        ax.text(0.5, 0.5, f'Failed to load LiDAR:\n{exc}',
+                ha='center', va='center', transform=ax.transAxes,
+                fontsize=8, color='gray')
+        ax.set_title('LiDAR Top-Down', fontsize=8)
+
+
 # ── Panel: ADE breakdown ──────────────────────────────────────────────────────
 
 def _panel_ade_breakdown(ax, frame, planner):
     can         = frame.get('canonical_scoring_metrics') or {}
-    native_len  = frame.get('planner_raw_length', 4 if planner.lower() == 'tcp' else 6)
+    native_len  = frame.get('planner_raw_length', 4 if _planner_family(planner) == 'tcp' else 6)
     breakdown   = can.get('ade_breakdown_m')
 
     if not breakdown:
@@ -592,7 +1114,14 @@ def _panel_canonical_table(ax, frame):
             gx, gy = '?', '?'
         v  = '✓' if i < len(valid)  and valid[i]  else '✗'
         gv = '✓' if i < len(gt_v)   and gt_v[i]   else '✗'
-        l2 = f'{bkdn[i]:.3f}' if i < len(bkdn) else '—'
+        l2 = '—'
+        if i < len(bkdn):
+            try:
+                l2_val = float(bkdn[i])
+            except (TypeError, ValueError):
+                l2_val = float('nan')
+            if np.isfinite(l2_val):
+                l2 = f'{l2_val:.3f}'
         rows.append([str(i), t, px, py, gx, gy, v, gv, l2])
 
     ax.axis('off')
@@ -608,7 +1137,9 @@ def _panel_canonical_table(ax, frame):
     for i, row in enumerate(rows):
         try:
             val = float(row[-1])
-        except ValueError:
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(val):
             continue
         cell = tbl[i + 1, len(col_labels) - 1]  # +1 for header
         r = min(val / 15.0, 1.0)   # 0→white, 15m→red
@@ -646,9 +1177,23 @@ def _panel_cameras(axes, frame, scenario_dir):
     except ImportError:
         pil_ok = False
 
-    yaml_d = _load_yaml(scenario_dir, fi)
+    yaml_d = _load_yaml(scenario_dir, fi) if scenario_dir else None
+    input_files = frame.get('input_files') or {}
+    cam_paths = input_files.get('camera_images') if isinstance(input_files, dict) else {}
 
-    for ax, cam_key in zip(axes, ['cam1', 'cam2', 'cam3', 'cam4']):
+    debug_has_directional = (
+        isinstance(cam_paths, dict)
+        and any(cam_paths.get(d) for d in ('front', 'left', 'right', 'rear'))
+    )
+    if debug_has_directional:
+        camera_slots = [('front', cam_paths.get('front')),
+                        ('left', cam_paths.get('left')),
+                        ('right', cam_paths.get('right')),
+                        ('rear', cam_paths.get('rear'))]
+    else:
+        camera_slots = [('cam1', None), ('cam2', None), ('cam3', None), ('cam4', None)]
+
+    for ax, (cam_key, debug_path) in zip(axes, camera_slots):
         ax.axis('off')
         if not pil_ok:
             ax.text(0.5, 0.5, f'{cam_key}\n(Pillow not installed)',
@@ -656,9 +1201,11 @@ def _panel_cameras(axes, frame, scenario_dir):
             ax.set_title(cam_key, fontsize=7)
             continue
 
-        # Resolve image path from YAML or by convention
+        # Resolve image path from frame-debug manifest first, then scenario fallback.
         img_path = None
-        if yaml_d:
+        if debug_path and os.path.exists(str(debug_path)):
+            img_path = str(debug_path)
+        if img_path is None and yaml_d and cam_key in {'cam1', 'cam2', 'cam3', 'cam4'}:
             raw = yaml_d.get(cam_key, '')
             if isinstance(raw, dict):
                 raw = raw.get('file', '')
@@ -666,16 +1213,12 @@ def _panel_cameras(axes, frame, scenario_dir):
                 cand = raw if os.path.isabs(raw) else os.path.join(scenario_dir, raw)
                 if os.path.exists(cand):
                     img_path = cand
-        if img_path is None:
-            cand = os.path.join(scenario_dir, f'{fi:06d}_{cam_key}.jpeg')
-            if os.path.exists(cand):
-                img_path = cand
-            else:
-                for ext in ('.jpg', '.png', '.jpeg'):
-                    cand = os.path.join(scenario_dir, f'{fi:06d}_{cam_key}{ext}')
-                    if os.path.exists(cand):
-                        img_path = cand
-                        break
+        if img_path is None and scenario_dir:
+            for ext in ('.jpg', '.png', '.jpeg', '.JPG', '.PNG', '.JPEG'):
+                cand = os.path.join(scenario_dir, f'{fi:06d}_{cam_key}{ext}')
+                if os.path.exists(cand):
+                    img_path = cand
+                    break
 
         if img_path:
             try:
@@ -711,7 +1254,7 @@ def make_summary_figure(frames: List[Dict], planner: str, out_path: str):
     _sum_ade_timeline(ax_ade, frames)
     _sum_speed_profile(ax_speed, frames)
     _sum_inclusion_histogram(ax_inc, frames)
-    _sum_transform_fidelity(ax_fit, frames)
+    _sum_transform_fidelity(ax_fit, frames, planner)
     _sum_ade_heatmap(ax_heat, frames)
 
     scen_id = frames[0].get('scenario', '?')
@@ -889,13 +1432,16 @@ def _sum_inclusion_histogram(ax, frames):
     ax.grid(axis='y', alpha=0.25)
 
 
-def _sum_transform_fidelity(ax, frames):
-    """Scatter: raw output distance from ego vs world output distance from ego.
-    Both should be equal if the ego→world rotation was lossless."""
+def _sum_transform_fidelity(ax, frames, planner):
+    """Scatter: planner-frame distance from ego vs world-frame distance from ego."""
+    planner_family = _planner_family(planner)
     raw_dist, world_dist = [], []
     for f in frames:
         pad  = f.get('planner_adapter_debug') or {}
-        raw  = _arr(pad.get('tcp_wps_raw') or pad.get('local_wps'))
+        if planner_family == 'colmdriver':
+            raw = _arr(pad.get('corrected_world_wps'))
+        else:
+            raw = _arr(pad.get('tcp_wps_raw') or pad.get('local_wps'))
         wld  = _arr(pad.get('world_wps'))
         ego  = _arr(f.get('ego_world_xy'))
         if raw is None or wld is None or ego is None:
@@ -904,7 +1450,10 @@ def _sum_transform_fidelity(ax, frames):
             continue
         n = min(len(raw), len(wld))
         for i in range(n):
-            raw_dist.append(float(np.linalg.norm(raw[i])))
+            if planner_family == 'colmdriver':
+                raw_dist.append(float(np.linalg.norm(raw[i] - ego)))
+            else:
+                raw_dist.append(float(np.linalg.norm(raw[i])))
             world_dist.append(float(np.linalg.norm(wld[i] - ego)))
 
     if raw_dist:
@@ -918,9 +1467,14 @@ def _sum_transform_fidelity(ax, frames):
                              f'Mean |residual|: {np.abs(residuals).mean():.4f} m',
                 va='top', ha='left', transform=ax.transAxes, fontsize=7,
                 bbox=dict(facecolor='white', alpha=0.7))
-    ax.set_xlabel('||raw_pt_i|| — dist from ego, local (m)', fontsize=7)
-    ax.set_ylabel('||world_pt_i − ego|| — dist from ego, world (m)', fontsize=7)
-    ax.set_title('Transform Fidelity: local dist = world dist?', fontsize=9)
+    if planner_family == 'colmdriver':
+        ax.set_xlabel('||corrected_world_pt_i − ego|| (m)', fontsize=7)
+        ax.set_ylabel('||world_pt_i − ego|| (m)', fontsize=7)
+        ax.set_title('Transform Fidelity: corrected-world vs world', fontsize=9)
+    else:
+        ax.set_xlabel('||raw_pt_i|| — dist from ego, local (m)', fontsize=7)
+        ax.set_ylabel('||world_pt_i − ego|| — dist from ego, world (m)', fontsize=7)
+        ax.set_title('Transform Fidelity: local dist = world dist?', fontsize=9)
     ax.legend(fontsize=7)
     ax.grid(True, alpha=0.2)
 
@@ -981,13 +1535,16 @@ def _parse_args():
         description='Comprehensive planner data inspector visualization')
     p.add_argument('--debug-frames', required=True,
                    help='Path to debug_frames JSONL file')
-    p.add_argument('--planner', required=True, choices=['tcp', 'vad'],
-                   help='Planner name')
+    p.add_argument('--planner', required=True,
+                   help='Planner name (any label; unknown families use generic panels)')
     p.add_argument('--out-dir', required=True,
                    help='Output directory for PNG figures')
     p.add_argument('--scenario-dir', default=None,
                    help='Optional path to scenario YAML/image directory '
                         '(for camera images and actor bounding boxes)')
+    p.add_argument('--frame-idx', type=int, action='append', default=None,
+                   help='Exact frame index to render (repeatable). '
+                        'When set, takes precedence over stride/all-frames.')
     p.add_argument('--frame-stride', type=int, default=None,
                    help='Sample every N-th frame for per-frame pages '
                         '(default: scored ±1 + first/last 3)')
@@ -1020,7 +1577,15 @@ def main():
     make_summary_figure(frames, args.planner, str(out / 'summary.png'))
 
     # ── Per-frame figures ─────────────────────────────────────────────────────
-    if args.all_frames:
+    if args.frame_idx:
+        wanted = set(int(v) for v in args.frame_idx)
+        selected = [f for f in frames if int(f.get('frame_idx', -1)) in wanted]
+        selected = sorted(selected, key=lambda x: x['frame_idx'])
+        found = {int(f['frame_idx']) for f in selected}
+        missing = sorted(wanted - found)
+        if missing:
+            print(f'  [warn] requested frame(s) not found: {missing}')
+    elif args.all_frames:
         selected = frames
     else:
         selected = _select_frames(frames, args.frame_stride, args.max_frames)
@@ -1030,15 +1595,18 @@ def main():
         fi       = frame['frame_idx']
         out_path = str(out / f'frame_{fi:04d}.png')
         print(f'  [{idx+1:3d}/{len(selected)}] frame {fi:4d} ... ', end='', flush=True)
+        fig = None
         try:
             fig = _make_perframe_fig(frame, frames, args.planner, args.scenario_dir)
             fig.savefig(out_path, dpi=110, bbox_inches='tight')
-            plt.close(fig)
             print('OK')
         except Exception:
             import traceback
             print('ERROR')
             traceback.print_exc()
+        finally:
+            if fig is not None:
+                plt.close(fig)
 
     all_out = sorted(out.glob('*.png'))
     print(f'\nDone.  {len(all_out)} figures written to {out}/')

@@ -49,6 +49,8 @@ _EVENT_SPECIALTY_FILES: "dict[str, list[str]]" = {
     "CLIENT_CONNECT_FAIL":          ["connection_events.log", "rpc_activity.log"],
     "CLIENT_LIFETIME_START":        ["connection_events.log"],
     "CLIENT_LIFETIME_END":          ["connection_events.log"],
+    "CLIENT_RELEASE_BEGIN":         ["connection_events.log"],
+    "CLIENT_RELEASE_END":           ["connection_events.log"],
     "EVALUATOR_INIT":               ["connection_events.log", "rpc_activity.log"],
     "CLIENT_RPC_READY":             ["connection_events.log", "rpc_activity.log"],
     "CLIENT_RETRY":                 ["connection_events.log", "rpc_activity.log"],
@@ -116,6 +118,8 @@ _SOCKET_SNAPSHOT_INSTALLED = False
 
 _CLIENT_LIFETIME_LOCK = threading.Lock()
 _CLIENT_LIFETIMES: "dict[str, float]" = {}  # client_id → start monotonic
+_CLIENT_OBJECT_META_LOCK = threading.Lock()
+_CLIENT_OBJECT_META: "dict[int, dict[str, Any]]" = {}  # id(client) → metadata
 
 
 def _sanitize(value: Any) -> str:
@@ -362,6 +366,7 @@ def create_logged_client(
     attempt: int | None = None,
     process_name: str | None = None,
 ) -> Any:
+    client_id = str(_uuid.uuid4())[:8]
     log_carla_event(
         "CLIENT_CREATE",
         process_name=process_name,
@@ -369,11 +374,27 @@ def create_logged_client(
         port=int(port),
         context=context,
         attempt=attempt,
+        client_id=client_id,
     )
     try:
         client = carla_module.Client(host, int(port))
         if timeout_s is not None:
             client.set_timeout(float(timeout_s))
+        log_client_lifetime_start(
+            host=host,
+            port=int(port),
+            context=context,
+            process_name=process_name,
+            client_id=client_id,
+        )
+        with _CLIENT_OBJECT_META_LOCK:
+            _CLIENT_OBJECT_META[id(client)] = {
+                "client_id": client_id,
+                "host": str(host),
+                "port": int(port),
+                "context": str(context),
+                "attempt": attempt,
+            }
         log_carla_event(
             "CLIENT_CONNECTED",
             process_name=process_name,
@@ -382,6 +403,7 @@ def create_logged_client(
             context=context,
             attempt=attempt,
             timeout_s=timeout_s,
+            client_id=client_id,
         )
         return client
     except Exception as exc:
@@ -392,6 +414,7 @@ def create_logged_client(
             port=int(port),
             context=context,
             attempt=attempt,
+            client_id=client_id,
             error_type=type(exc).__name__,
             error=str(exc),
         )
@@ -405,6 +428,7 @@ def log_client_rpc_ready(
     context: str = "",
     attempt: int | None = None,
     process_name: str | None = None,
+    client_id: str | None = None,
 ) -> None:
     log_carla_event(
         "CLIENT_RPC_READY",
@@ -413,6 +437,7 @@ def log_client_rpc_ready(
         port=int(port),
         context=context,
         attempt=attempt,
+        client_id=client_id,
     )
 
 
@@ -540,13 +565,14 @@ def log_client_lifetime_start(
     port: int,
     context: str = "",
     process_name: "str | None" = None,
+    client_id: str | None = None,
 ) -> str:
     """
     Record the start of a CARLA client session.
     Returns a short client_id UUID string to pass to log_client_lifetime_end().
     Also writes CLIENT_LIFETIME_START to connection_events.log.
     """
-    client_id = str(_uuid.uuid4())[:8]
+    client_id = client_id or str(_uuid.uuid4())[:8]
     with _CLIENT_LIFETIME_LOCK:
         _CLIENT_LIFETIMES[client_id] = _time.monotonic()
     log_carla_event(
@@ -581,6 +607,71 @@ def log_client_lifetime_end(
         client_id=client_id,
         duration_s=duration_s,
     )
+
+
+def get_logged_client_id(client: Any | None) -> str | None:
+    if client is None:
+        return None
+    with _CLIENT_OBJECT_META_LOCK:
+        meta = _CLIENT_OBJECT_META.get(id(client))
+    if meta is None:
+        return None
+    return str(meta.get("client_id", "")) or None
+
+
+def _pop_logged_client_meta(client: Any | None) -> dict[str, Any] | None:
+    if client is None:
+        return None
+    with _CLIENT_OBJECT_META_LOCK:
+        return _CLIENT_OBJECT_META.pop(id(client), None)
+
+
+def log_client_release_begin(
+    client: Any | None,
+    *,
+    context: str = "",
+    process_name: "str | None" = None,
+    reason: str = "",
+) -> str | None:
+    """
+    Mark the point where a caller intentionally drops its last expected
+    reference to a logged CARLA client object.
+    """
+    meta = _pop_logged_client_meta(client)
+    if meta is None:
+        return None
+    client_id = str(meta.get("client_id", "")) or None
+    log_carla_event(
+        "CLIENT_RELEASE_BEGIN",
+        process_name=process_name,
+        client_id=client_id,
+        host=meta.get("host"),
+        port=meta.get("port"),
+        create_context=meta.get("context"),
+        release_context=context,
+        attempt=meta.get("attempt"),
+        reason=reason,
+    )
+    return client_id
+
+
+def log_client_release_end(
+    client_id: str | None,
+    *,
+    context: str = "",
+    process_name: "str | None" = None,
+    reason: str = "",
+) -> None:
+    if not client_id:
+        return
+    log_carla_event(
+        "CLIENT_RELEASE_END",
+        process_name=process_name,
+        client_id=client_id,
+        release_context=context,
+        reason=reason,
+    )
+    log_client_lifetime_end(client_id, process_name=process_name)
 
 
 # =============================================================================

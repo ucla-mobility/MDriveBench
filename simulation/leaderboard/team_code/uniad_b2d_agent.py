@@ -380,13 +380,17 @@ class UniadAgent(autonomous_agent.AutonomousAgent):
 		
 		# Frame skipping logic based on environment variable
 		realtime_mode = os.environ.get('REALTIME_MODE', '0')
+		force_fresh_every_frame = (
+			os.environ.get('UNIAD_FORCE_FRESH_INFERENCE', '0') == '1'
+			or os.environ.get('OPENLOOP_FORCE_FRESH_INFERENCE', '0') == '1'
+		)
 		if realtime_mode == '1':
 			# REAL-TIME simulation
 			if self.step < self.next_action_step[ego_id] and self.step:
 				return self.prev_control[ego_id]
 		else:
 			# NON-REAL-TIME simulation
-			if self.step % 4 != 1 and self.step:
+			if not force_fresh_every_frame and self.step % 4 != 1 and self.step:
 				return self.prev_control[ego_id]
 
 		
