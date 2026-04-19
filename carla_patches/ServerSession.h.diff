@@ -1,0 +1,11 @@
+--- ServerSession.h.original	2026-04-13 17:57:07.368012292 -0700
++++ ServerSession.h.patched	2026-04-13 17:56:32.015491516 -0700
+@@ -103,6 +103,8 @@
+ 
+     bool _is_writing = false;
+ 
++    /// Guard against double-close race (patched Apr 2026).
++    bool _is_closed = false;
+   };
+ 
+ } // namespace tcp

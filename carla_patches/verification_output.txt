@@ -1,0 +1,20 @@
+[carla_rpc_fix] === CARLA RPC fix shim loading (v2, Apr 2026) ===
+[carla_rpc_fix] Fix 1 (close EBADF suppress): active (always via LD_PRELOAD)
+[carla_rpc_fix] Fix 2 (deregister null-deref): applying...
+[carla_rpc_fix] Fix 2: OK (trampoline at 0x9ba0000)
+[carla_rpc_fix] Fix 3 (do_read trailing close): applying...
+[carla_rpc_fix] Fix 3: OK (NOP'd 5 bytes at 0x5baa46a)
+[carla_rpc_fix] Fix 4 (close lambda is_open guard): applying...
+[carla_rpc_fix] Fix 4: OK (trampoline at 0x9baa000)
+[carla_rpc_fix] === all patches applied ===
+[carla_rpc_fix] === CARLA RPC fix shim loading (v2, Apr 2026) ===
+[carla_rpc_fix] Fix 1 (close EBADF suppress): active (always via LD_PRELOAD)
+[carla_rpc_fix] Fix 2 (deregister null-deref): applying...
+[carla_rpc_fix] mprotect(0x5ba0000, 0x1000) failed: Cannot allocate memory
+[carla_rpc_fix] Fix 2: SKIP (mprotect crash site)
+[carla_rpc_fix] Fix 3 (do_read trailing close): applying...
+[carla_rpc_fix] mprotect(0x5baa000, 0x1000) failed: Cannot allocate memory
+[carla_rpc_fix] Fix 3: SKIP (mprotect)
+[carla_rpc_fix] Fix 4 (close lambda is_open guard): applying...
+[carla_rpc_fix] mprotect(0x5baa000, 0x1000) failed: Cannot allocate memory
+[carla_rpc_fix] Fix 4: SKIP (mprotect)

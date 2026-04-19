@@ -154,9 +154,17 @@ def _candidate_log_paths() -> list[Path]:
     return deduped
 
 
-def _write_line(path: Path, line: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(path), os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
+def _write_line(path: Path, line: str, *, create_parents: bool = False) -> None:
+    if create_parents:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return
+    try:
+        fd = os.open(str(path), os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
+    except FileNotFoundError:
+        # Parent directory does not exist (possibly renamed away during rootcause annotation).
+        return
     try:
         if fcntl is not None:
             fcntl.flock(fd, fcntl.LOCK_EX)

@@ -21,6 +21,8 @@ Options:
   --startup-timeout N Seconds to wait for CARLA child PID under gdb (default: 180)
   --core-wait-seconds N
                       Seconds to wait for a core file after CARLA exits in core mode (default: 15)
+  --no-ebadf-suppressor
+                      Disable close_ebadf_suppress.so injection for A/B mechanism testing
   --stop-after-eval   Stop CARLA/gdb once --eval-cmd finishes instead of waiting for CARLA to exit
   --repeat-eval-until-crash
                       Keep rerunning --eval-cmd until CARLA exits or gdb stops on a crash
@@ -58,6 +60,7 @@ DIAG_PY_OVERRIDE="${CARLA_DIAG_PYTHON:-}"
 DIAG_INTERVAL=2
 STARTUP_TIMEOUT_SEC=180
 CORE_WAIT_SECONDS=15
+ENABLE_EBADF_SUPPRESSOR=1
 STOP_AFTER_EVAL=0
 REPEAT_EVAL_UNTIL_CRASH=0
 REPEAT_EVAL_DELAY_SECONDS=0
@@ -147,6 +150,10 @@ while [[ $# -gt 0 ]]; do
       CORE_WAIT_SECONDS="$2"
       shift 2
       ;;
+    --no-ebadf-suppressor)
+      ENABLE_EBADF_SUPPRESSOR=0
+      shift
+      ;;
     --stop-after-eval)
       STOP_AFTER_EVAL=1
       shift
@@ -187,7 +194,11 @@ done
 if [[ -z "$LOGDIR" ]]; then
   LOGDIR="/data2/marco/CoLMDriver/rootcause_$(date +%Y%m%d_%H%M%S)"
 fi
+if [[ "$LOGDIR" != /* ]]; then
+  LOGDIR="$(pwd -P)/$LOGDIR"
+fi
 mkdir -p "$LOGDIR"
+LOGDIR="$(cd "$LOGDIR" && pwd -P)"
 REQUESTED_PORT="$PORT"
 
 if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
@@ -916,19 +927,32 @@ launch_carla_under_gdb() {
   fi
 
   log_note "[ROOTCAUSE] starting gdb..."
-  # Inject close() EBADF shim to suppress the double-close race in clmdep_asio
   local _ebadf_so="$SCRIPT_DIR/close_ebadf_suppress.so"
   local -a gdb_cmd=(gdb -q -x "$GDB_CMD_FILE" --args "$CARLA_BIN" "CarlaUE4" "-carla-rpc-port=$PORT" "${CARLA_EXTRA_ARGS[@]}")
   if [[ -n "$GPU_VALUE" ]]; then
-    (
-      cd "$CARLA_ROOT"
-      env CUDA_VISIBLE_DEVICES="$GPU_VALUE" LD_PRELOAD="${_ebadf_so}${LD_PRELOAD:+:$LD_PRELOAD}" "${gdb_cmd[@]}"
-    ) >"$LOGDIR/gdb_console.log" 2>&1 &
+    if (( ENABLE_EBADF_SUPPRESSOR == 1 )) && [[ -f "$_ebadf_so" ]]; then
+      (
+        cd "$CARLA_ROOT"
+        exec env CUDA_VISIBLE_DEVICES="$GPU_VALUE" LD_PRELOAD="${_ebadf_so}${LD_PRELOAD:+:$LD_PRELOAD}" "${gdb_cmd[@]}"
+      ) >"$LOGDIR/gdb_console.log" 2>&1 &
+    else
+      (
+        cd "$CARLA_ROOT"
+        exec env -u LD_PRELOAD CUDA_VISIBLE_DEVICES="$GPU_VALUE" "${gdb_cmd[@]}"
+      ) >"$LOGDIR/gdb_console.log" 2>&1 &
+    fi
   else
-    (
-      cd "$CARLA_ROOT"
-      env LD_PRELOAD="${_ebadf_so}${LD_PRELOAD:+:$LD_PRELOAD}" "${gdb_cmd[@]}"
-    ) >"$LOGDIR/gdb_console.log" 2>&1 &
+    if (( ENABLE_EBADF_SUPPRESSOR == 1 )) && [[ -f "$_ebadf_so" ]]; then
+      (
+        cd "$CARLA_ROOT"
+        exec env LD_PRELOAD="${_ebadf_so}${LD_PRELOAD:+:$LD_PRELOAD}" "${gdb_cmd[@]}"
+      ) >"$LOGDIR/gdb_console.log" 2>&1 &
+    else
+      (
+        cd "$CARLA_ROOT"
+        exec env -u LD_PRELOAD "${gdb_cmd[@]}"
+      ) >"$LOGDIR/gdb_console.log" 2>&1 &
+    fi
   fi
   GDB_PID=$!
   echo "gdb_pid=$GDB_PID" >>"$LOGDIR/run_meta.txt"
@@ -965,18 +989,31 @@ launch_carla_under_gdb() {
 launch_carla_direct() {
   LAST_ERROR=""
   log_note "[ROOTCAUSE] starting CARLA directly for core/postmortem capture..."
-  # Inject close() EBADF shim to suppress the double-close race in clmdep_asio
   local _ebadf_so="$SCRIPT_DIR/close_ebadf_suppress.so"
   if [[ -n "$GPU_VALUE" ]]; then
-    (
-      cd "$CARLA_ROOT"
-      env CUDA_VISIBLE_DEVICES="$GPU_VALUE" LD_PRELOAD="${_ebadf_so}${LD_PRELOAD:+:$LD_PRELOAD}" "$CARLA_BIN" "CarlaUE4" "-carla-rpc-port=$PORT" "${CARLA_EXTRA_ARGS[@]}"
-    ) >"$CARLA_CONSOLE_LOG" 2>&1 &
+    if (( ENABLE_EBADF_SUPPRESSOR == 1 )) && [[ -f "$_ebadf_so" ]]; then
+      (
+        cd "$CARLA_ROOT"
+        exec env CUDA_VISIBLE_DEVICES="$GPU_VALUE" LD_PRELOAD="${_ebadf_so}${LD_PRELOAD:+:$LD_PRELOAD}" "$CARLA_BIN" "CarlaUE4" "-carla-rpc-port=$PORT" "${CARLA_EXTRA_ARGS[@]}"
+      ) >"$CARLA_CONSOLE_LOG" 2>&1 &
+    else
+      (
+        cd "$CARLA_ROOT"
+        exec env -u LD_PRELOAD CUDA_VISIBLE_DEVICES="$GPU_VALUE" "$CARLA_BIN" "CarlaUE4" "-carla-rpc-port=$PORT" "${CARLA_EXTRA_ARGS[@]}"
+      ) >"$CARLA_CONSOLE_LOG" 2>&1 &
+    fi
   else
-    (
-      cd "$CARLA_ROOT"
-      env LD_PRELOAD="${_ebadf_so}${LD_PRELOAD:+:$LD_PRELOAD}" "$CARLA_BIN" "CarlaUE4" "-carla-rpc-port=$PORT" "${CARLA_EXTRA_ARGS[@]}"
-    ) >"$CARLA_CONSOLE_LOG" 2>&1 &
+    if (( ENABLE_EBADF_SUPPRESSOR == 1 )) && [[ -f "$_ebadf_so" ]]; then
+      (
+        cd "$CARLA_ROOT"
+        exec env LD_PRELOAD="${_ebadf_so}${LD_PRELOAD:+:$LD_PRELOAD}" "$CARLA_BIN" "CarlaUE4" "-carla-rpc-port=$PORT" "${CARLA_EXTRA_ARGS[@]}"
+      ) >"$CARLA_CONSOLE_LOG" 2>&1 &
+    else
+      (
+        cd "$CARLA_ROOT"
+        exec env -u LD_PRELOAD "$CARLA_BIN" "CarlaUE4" "-carla-rpc-port=$PORT" "${CARLA_EXTRA_ARGS[@]}"
+      ) >"$CARLA_CONSOLE_LOG" 2>&1 &
+    fi
   fi
   CARLA_PID=$!
   TRACE_MODE_USED="core"
@@ -1050,16 +1087,25 @@ cleanup() {
 
   if pid_is_alive "${DIAG_PID:-}"; then
     kill "$DIAG_PID" >/dev/null 2>&1 || true
+    if ! wait_for_pid_exit "$DIAG_PID" 5; then
+      kill -KILL "$DIAG_PID" >/dev/null 2>&1 || true
+    fi
     wait "$DIAG_PID" >/dev/null 2>&1 || true
   fi
 
   if pid_is_alive "${GDB_PID:-}"; then
     kill -INT "$GDB_PID" >/dev/null 2>&1 || true
+    if ! wait_for_pid_exit "$GDB_PID" 10; then
+      kill -KILL "$GDB_PID" >/dev/null 2>&1 || true
+    fi
     wait "$GDB_PID" >/dev/null 2>&1 || true
   fi
 
   if [[ -z "${GDB_PID:-}" ]] && pid_is_alive "${CARLA_PID:-}"; then
     kill "$CARLA_PID" >/dev/null 2>&1 || true
+    if ! wait_for_pid_exit "$CARLA_PID" 5; then
+      kill -KILL "$CARLA_PID" >/dev/null 2>&1 || true
+    fi
     wait "$CARLA_PID" >/dev/null 2>&1 || true
   fi
 
@@ -1077,6 +1123,7 @@ cleanup() {
   {
     echo "finished=$(date -Iseconds)"
     echo "exit_code=$rc"
+    echo "ebadf_suppressor=$ENABLE_EBADF_SUPPRESSOR"
   } >>"$LOGDIR/run_meta.txt"
 
   generate_combined_log
@@ -1120,11 +1167,21 @@ if ! ulimit -c unlimited 2>/dev/null; then
   echo "[WARN] Could not set 'ulimit -c unlimited'; core dumps may be disabled." >&2
 fi
 
+if (( ENABLE_EBADF_SUPPRESSOR == 1 )) && [[ ! -f "$SCRIPT_DIR/close_ebadf_suppress.so" ]]; then
+  echo "[WARN] close_ebadf_suppress.so not found at $SCRIPT_DIR/close_ebadf_suppress.so; continuing without it." >&2
+fi
+
+if (( ENABLE_EBADF_SUPPRESSOR == 1 )); then
+  GDB_LD_PRELOAD_LINE="set env LD_PRELOAD $SCRIPT_DIR/close_ebadf_suppress.so"
+else
+  GDB_LD_PRELOAD_LINE="unset env LD_PRELOAD"
+fi
+
 cat >"$GDB_CMD_FILE" <<EOF_GDB
 set pagination off
 set confirm off
 set print thread-events off
-set env LD_PRELOAD $SCRIPT_DIR/close_ebadf_suppress.so
+$GDB_LD_PRELOAD_LINE
 set follow-fork-mode parent
 set detach-on-fork on
 set follow-exec-mode same
@@ -1139,7 +1196,58 @@ handle SIGSEGV stop print nopass
 handle SIGABRT stop print nopass
 handle SIGBUS stop print nopass
 handle SIGILL stop print nopass
-run
+starti
+python
+import struct, gdb
+TAG = "[carla_rpc_fix_gdb] "
+inf = gdb.selected_inferior()
+def _nop(addr, exp, name):
+    try:
+        actual = bytes(inf.read_memory(addr, len(exp)))
+        if actual == exp:
+            inf.write_memory(addr, b'\\x90' * len(exp))
+            gdb.write("%s%s: OK (NOP'd %d bytes at 0x%x)\\n" % (TAG, name, len(exp), addr))
+            return True
+        gdb.write("%s%s: SKIP (bytes mismatch at 0x%x: expected %s got %s)\\n" % (TAG, name, addr, exp.hex(), actual.hex()))
+    except Exception as e:
+        gdb.write("%s%s: ERROR (%s)\\n" % (TAG, name, str(e)))
+    return False
+# Fix 3 (ROOT CAUSE): NOP out do_read() trailing unserialized socket_.close()
+# Original: e8 b1 4a 00 00 = call basic_socket::close @ 0x5baef20
+_nop(0x5baa46a, bytes([0xe8, 0xb1, 0x4a, 0x00, 0x00]), "Fix 3 (do_read close NOP)")
+# Fix 2: null-guard deregister_descriptor via INT3 cave trampoline
+try:
+    CRASH = 0x5ba0ca3; SAFE_EXIT = 0x5ba0e48; CONT = 0x5ba0cad; CAVE = 0x5ba0c43
+    CAVE_NEED = 22
+    exp_crash = bytes([0x48,0x8b,0x00, 0xf6,0x80,0x90,0x00,0x00,0x00,0x01])
+    c_actual = bytes(inf.read_memory(CRASH, 10))
+    cave_actual = bytes(inf.read_memory(CAVE, CAVE_NEED))
+    if c_actual != exp_crash:
+        gdb.write("%sFix 2: SKIP (crash-site bytes mismatch)\\n" % TAG)
+    elif not all(b == 0xcc for b in cave_actual):
+        gdb.write("%sFix 2: SKIP (cave has non-INT3 bytes in %d-byte range)\\n" % (TAG, CAVE_NEED))
+    else:
+        t = bytearray(CAVE_NEED)
+        t[0:3] = b'\\x48\\x8b\\x00'                # mov (%rax),%rax
+        t[3:6] = b'\\x48\\x85\\xc0'                # test %rax,%rax
+        t[6:8] = b'\\x75\\x05'                     # jnz +5 -> testb
+        t[8] = 0xe9                                 # jmp near
+        t[9:13] = struct.pack('<i', SAFE_EXIT - (CAVE + 13))
+        t[13:20] = b'\\xf6\\x80\\x90\\x00\\x00\\x00\\x01'  # testb \$0x1,0x90(%rax)
+        t[20] = 0xeb                                # jmp short
+        t[21] = (CONT - (CAVE + 22)) & 0xff        # -> 0x5ba0cad
+        inf.write_memory(CAVE, bytes(t))
+        redir = bytearray(10)
+        redir[0] = 0xe9
+        redir[1:5] = struct.pack('<i', CAVE - (CRASH + 5))
+        redir[5:10] = b'\\x90' * 5
+        inf.write_memory(CRASH, bytes(redir))
+        gdb.write("%sFix 2: OK (cave trampoline at 0x%x)\\n" % (TAG, CAVE))
+except Exception as e:
+    gdb.write("%sFix 2: ERROR (%s)\\n" % (TAG, str(e)))
+gdb.write("%sAll GDB-side patches done.\\n" % TAG)
+end
+continue
 echo \n===== GDB_STOP_CONTEXT =====\n
 info program
 bt full

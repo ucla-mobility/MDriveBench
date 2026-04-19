@@ -1,0 +1,26 @@
+--- ServerSession.cpp.original	2026-04-13 17:57:07.392012644 -0700
++++ ServerSession.cpp.patched	2026-04-13 17:56:32.019491575 -0700
+@@ -207,7 +207,11 @@
+   }
+ 
+   void ServerSession::Close() {
+-    boost::asio::post(_strand, [self=shared_from_this()]() { self->CloseNow(); });
++    boost::asio::post(_strand, [self=shared_from_this()]() {
++      if (!self->_is_closed) {
++        self->CloseNow();
++      }
++    });
+   }
+ 
+   void ServerSession::StartTimer() {
+@@ -226,6 +230,10 @@
+   }
+ 
+   void ServerSession::CloseNow() {
++    if (_is_closed) {
++      return;  // Idempotent: already closed (patched Apr 2026).
++    }
++    _is_closed = true;
+     _deadline.cancel();
+     if (_socket.is_open()) {
+       _socket.close();

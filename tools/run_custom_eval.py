@@ -21,7 +21,7 @@ import tempfile
 import threading
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Sequence, TextIO, Tuple
 
@@ -226,6 +226,45 @@ AUTO_WORKERS_PER_GPU_MIN_FREE_MIB_DEFAULT = 6144
 AUTO_WORKERS_PER_GPU_STABLE_SAMPLES_DEFAULT = 2
 AUTO_WORKERS_PER_GPU_POLL_SECONDS_DEFAULT = 2.0
 AUTO_WORKERS_PER_GPU_STABLE_TOLERANCE_MIB_DEFAULT = 512
+AUTO_WORKERS_MAX_PER_GPU_DEFAULT = 2
+OOM_CONCURRENCY_BACKOFF_STEP_DEFAULT = 1
+OOM_FREE_MIB_PENALTY_STEP_DEFAULT = 2048
+OOM_RECOVERY_SUCCESS_STREAK_DEFAULT = 2
+OOM_RECOVERY_PENALTY_DECAY_STEP_DEFAULT = 1024
+OOM_BACKOFF_DECAY_SECONDS_DEFAULT = 600.0  # stale OOM penalty fully decays after this many seconds
+
+# --- VRAM-aware scheduler defaults ------------------------------------------------
+CARLA_FIXED_VRAM_MIB_DEFAULT = 4096
+VRAM_SAFETY_BUFFER_MIB_DEFAULT = 2048
+VRAM_SAFETY_BUFFER_AGGRESSIVE_MIB_DEFAULT = 512
+MIN_FREE_AGGRESSIVE_MIB_DEFAULT = 1024
+GPU_MONITOR_POLL_SECONDS_DEFAULT = 2.0
+SCHEDULER_TICK_POLL_TIMEOUT_S_DEFAULT = 0.5
+VRAM_ESTIMATE_CACHE_DEFAULT = str(
+    Path.home() / ".cache" / "colmdriver" / "planner_vram_estimates.json"
+)
+VRAM_ESTIMATE_EMA_ALPHA_DEFAULT = 0.4  # weight for the new observation when updating
+
+# Conservative a-priori VRAM estimates (MiB) for each planner's client footprint
+# on top of the managed CARLA's fixed overhead.  These are used as the initial
+# seed when no persistent observation exists yet; the scheduler refines them
+# automatically via :class:`PlannerVramEstimator`.
+PLANNER_VRAM_ESTIMATE_MIB: Dict[str, int] = {
+    "autopilot": 1500,
+    "log-replay": 1500,
+    "minimal": 1500,
+    "tcp": 3500,
+    "codriving": 6000,
+    "vad": 10000,
+    "uniad": 12000,
+    "lmdrive": 20000,
+    "colmdriver": 6000,
+    "colmdriver_rulebase": 6000,
+}
+PLANNER_VRAM_DEFAULT_FALLBACK_MIB = 8000
+PLANNER_RETRY_LIMIT_DEFAULT = 3
+GPU_QUERY_CACHE_TTL_S_DEFAULT = 1.0
+MULTI_PLANNER_STATUS_SNAPSHOT_INTERVAL_S_DEFAULT = 2.0
 UCLA_V2_CROSSWALK_MAP_TOKEN = "ucla_v2"
 UCLA_V2_CROSSWALK_Z_MODE_DEFAULT = "hybrid_raycast"
 UCLA_V2_CROSSWALK_TRIM_DEFAULT = 1
@@ -240,6 +279,7 @@ STALLED_NEAR_END_MIN_ROUTE_SCORE_DEFAULT = 90.0
 STALLED_NEAR_END_LOG_TAIL_BYTES_DEFAULT = 512 * 1024
 RESULT_LOG_FALLBACK_TAIL_BYTES_DEFAULT = 2 * 1024 * 1024
 MULTI_PLANNER_CHILD_SCENARIO_RETRY_BURST_DEFAULT = 3
+SCENARIO_RETRY_HARD_CEILING = 5  # absolute max retries even when --scenario-retry-limit is unlimited
 CARLA_DOWN_ABORT_GRACE_S = 15.0
 CARLA_TEARDOWN_GATE_TIMEOUT_DEFAULT = 20.0
 CARLA_TEARDOWN_GATE_POLL_S_DEFAULT = 0.25
@@ -269,6 +309,11 @@ GENERIC_SCENARIO_FAILURE_RETRY_ATTEMPTS = 2
 RUN_CUSTOM_EVAL_PROCESS_NAME = "run_custom_eval"
 _TEARDOWN_GATE_BASELINES_LOCK = threading.Lock()
 _TEARDOWN_GATE_BASELINES: Dict[str, int] = {}
+_PERF_LOCK = threading.Lock()
+_PERF_COUNTERS: "PerformanceCounters | None" = None
+_GPU_QUERY_CACHE_LOCK = threading.Lock()
+_GPU_QUERY_CACHE: Dict[str, tuple[float, Dict[str, "GPUMemoryStats"]]] = {}
+_GPU_QUERY_CACHE_TTL_S = GPU_QUERY_CACHE_TTL_S_DEFAULT
 
 
 @dataclass
@@ -299,6 +344,7 @@ class PlannerRequest:
     name: str
     conda_env: str | None = None
     run_id: str | None = None
+    scenario_shard: str | None = None  # "INDEX/COUNT" for scenario-level sharding
 
 
 @dataclass(frozen=True)
@@ -358,6 +404,22 @@ class GPUPlannerState:
     telemetry_available: bool = False
     last_stats: GPUMemoryStats | None = None
     last_probe_source: str = "static"
+    max_concurrency: int = 1
+    oom_penalty_mib: int = 0
+    success_streak: int = 0
+    failure_streak: int = 0
+    last_failure_kind: str = ""
+    last_failure_monotonic: float = 0.0
+    # MiB that the scheduler has "promised" to the planners currently running
+    # or launching on this GPU.  Used to bin-pack more jobs before nvidia-smi
+    # catches up to reflect the new allocation.
+    reserved_mib: int = 0
+    # Peak observed VRAM during the most recent planner lifecycle (per-planner
+    # observations are merged into PlannerVramEstimator).
+    last_baseline_mib: int | None = None
+    # Tracks which run_ids are currently occupying this GPU so the peak
+    # observation loop can attribute usage.
+    active_run_ids: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -368,6 +430,7 @@ class PlannerThreadResult:
     ports: PortBundle
     returncode: int | None = None
     error: str | None = None
+    failure_kind: str = ""
 
 
 @dataclass
@@ -422,6 +485,32 @@ class ResultRootProgress:
     terminal_state: str = ""
     started: bool = False
     completed: bool = False
+
+
+@dataclass
+class PerformanceCounters:
+    nvidia_smi_calls: int = 0
+    nvidia_smi_time_s: float = 0.0
+    gpu_settle_calls: int = 0
+    gpu_settle_time_s: float = 0.0
+    gpu_settle_timeouts: int = 0
+    teardown_gate_calls: int = 0
+    teardown_gate_time_s: float = 0.0
+    teardown_gate_timeouts: int = 0
+    carla_start_calls: int = 0
+    carla_start_time_s: float = 0.0
+    carla_restart_calls: int = 0
+    carla_restart_time_s: float = 0.0
+    child_runs: int = 0
+    child_run_time_s: float = 0.0
+    child_output_lines: int = 0
+    child_diag_lines: int = 0
+    retry_events: int = 0
+    retries_by_kind: Dict[str, int] = field(default_factory=dict)
+    retries_by_outcome: Dict[str, int] = field(default_factory=dict)
+
+
+_PERF_COUNTERS = PerformanceCounters()
 
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
@@ -773,6 +862,29 @@ def parse_args() -> argparse.Namespace:
         help="Disable adaptive per-GPU planner concurrency and run at most one planner per GPU.",
     )
     parser.add_argument(
+        "--max-multiprocess",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable maximal safe multiprocessing. Aggressively packs evaluations onto GPUs "
+            "up to the VRAM limit with reduced safety margins. Implies "
+            "--allow-multiple-carlas-per-gpu. Lowers --vram-safety-buffer-mib and "
+            "--auto-workers-min-free-mib to aggressive defaults for maximum concurrency."
+        ),
+    )
+    parser.add_argument(
+        "--scenario-shard",
+        type=str,
+        default=None,
+        metavar="INDEX/COUNT",
+        help=(
+            "Run only a subset of scenarios.  INDEX/COUNT means this worker "
+            "handles scenarios where (scenario_index %% COUNT) == INDEX.  "
+            "E.g. --scenario-shard 0/4 runs scenarios 0, 4, 8, … "
+            "Used internally by --max-multiprocess for scenario-level parallelism."
+        ),
+    )
+    parser.add_argument(
         "--allow-multiple-carlas-per-gpu",
         action="store_true",
         help=(
@@ -823,6 +935,162 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Allowed change in free VRAM (MiB) between consecutive settle samples "
             f"(default: {AUTO_WORKERS_PER_GPU_STABLE_TOLERANCE_MIB_DEFAULT})."
+        ),
+    )
+    parser.add_argument(
+        "--auto-workers-max-per-gpu",
+        type=int,
+        default=AUTO_WORKERS_MAX_PER_GPU_DEFAULT,
+        help=(
+            "Upper bound on concurrent planner workers per GPU when auto-workers are enabled "
+            f"(default: {AUTO_WORKERS_MAX_PER_GPU_DEFAULT})."
+        ),
+    )
+    parser.add_argument(
+        "--oom-concurrency-backoff-step",
+        type=int,
+        default=OOM_CONCURRENCY_BACKOFF_STEP_DEFAULT,
+        help=(
+            "How many worker slots to remove from a GPU after an OOM-class failure "
+            f"(default: {OOM_CONCURRENCY_BACKOFF_STEP_DEFAULT})."
+        ),
+    )
+    parser.add_argument(
+        "--oom-free-mib-penalty-step",
+        type=int,
+        default=OOM_FREE_MIB_PENALTY_STEP_DEFAULT,
+        help=(
+            "Extra free-VRAM requirement (MiB) added per OOM on the same GPU "
+            f"(default: {OOM_FREE_MIB_PENALTY_STEP_DEFAULT})."
+        ),
+    )
+    parser.add_argument(
+        "--oom-recovery-success-streak",
+        type=int,
+        default=OOM_RECOVERY_SUCCESS_STREAK_DEFAULT,
+        help=(
+            "Number of consecutive successful completions on a GPU before relaxing OOM penalties "
+            f"(default: {OOM_RECOVERY_SUCCESS_STREAK_DEFAULT})."
+        ),
+    )
+    parser.add_argument(
+        "--oom-recovery-penalty-decay-step",
+        type=int,
+        default=OOM_RECOVERY_PENALTY_DECAY_STEP_DEFAULT,
+        help=(
+            "How much OOM VRAM penalty (MiB) to remove after each recovery streak "
+            f"(default: {OOM_RECOVERY_PENALTY_DECAY_STEP_DEFAULT})."
+        ),
+    )
+    parser.add_argument(
+        "--oom-backoff-decay-seconds",
+        type=float,
+        default=OOM_BACKOFF_DECAY_SECONDS_DEFAULT,
+        help=(
+            "Seconds after which a stale OOM penalty on an idle GPU is fully forgotten "
+            f"(default: {OOM_BACKOFF_DECAY_SECONDS_DEFAULT:.0f}s). Set to 0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--vram-aware-scheduler",
+        dest="vram_aware_scheduler",
+        action="store_true",
+        default=True,
+        help=(
+            "Use the dynamic, bin-packing, VRAM-aware multi-planner scheduler. "
+            "This is the default; disable with --no-vram-aware-scheduler for the "
+            "legacy one-planner-per-GPU code path."
+        ),
+    )
+    parser.add_argument(
+        "--no-vram-aware-scheduler",
+        dest="vram_aware_scheduler",
+        action="store_false",
+        help="Disable the dynamic VRAM-aware scheduler (fall back to legacy policy).",
+    )
+    parser.add_argument(
+        "--planner-vram-estimate-cache",
+        default=VRAM_ESTIMATE_CACHE_DEFAULT,
+        help=(
+            "Path to persistent per-planner VRAM estimate cache (JSON). "
+            "Observations from each run are merged back into this file. "
+            f"Default: {VRAM_ESTIMATE_CACHE_DEFAULT}"
+        ),
+    )
+    parser.add_argument(
+        "--planner-vram-estimate-mib",
+        action="append",
+        default=[],
+        metavar="NAME=MIB",
+        help=(
+            "Override a planner's VRAM estimate for this run (repeatable). "
+            "Example: --planner-vram-estimate-mib uniad=14000"
+        ),
+    )
+    parser.add_argument(
+        "--carla-vram-estimate-mib",
+        type=int,
+        default=CARLA_FIXED_VRAM_MIB_DEFAULT,
+        help=(
+            "Estimated VRAM (MiB) that a single managed CARLA server consumes on a GPU. "
+            "Subtracted from per-GPU headroom when the first planner on that GPU launches "
+            f"(default: {CARLA_FIXED_VRAM_MIB_DEFAULT})."
+        ),
+    )
+    parser.add_argument(
+        "--vram-safety-buffer-mib",
+        type=int,
+        default=VRAM_SAFETY_BUFFER_MIB_DEFAULT,
+        help=(
+            "Extra VRAM safety margin (MiB) held back on every GPU on top of "
+            "--auto-workers-min-free-mib. Raises this floor to reduce OOM risk "
+            f"(default: {VRAM_SAFETY_BUFFER_MIB_DEFAULT})."
+        ),
+    )
+    parser.add_argument(
+        "--gpu-monitor-poll-seconds",
+        type=float,
+        default=GPU_MONITOR_POLL_SECONDS_DEFAULT,
+        help=(
+            "Background GPU-memory monitor polling interval (seconds). Replaces the "
+            "inline blocking nvidia-smi settle waits in the scheduler hot path "
+            f"(default: {GPU_MONITOR_POLL_SECONDS_DEFAULT:.1f}s)."
+        ),
+    )
+    parser.add_argument(
+        "--scheduler-tick-log",
+        default=None,
+        help=(
+            "Optional path to write per-tick JSONL scheduler decisions and snapshots. "
+            "Intended for verifying that GPUs are saturated and jobs aren't stalling."
+        ),
+    )
+    parser.add_argument(
+        "--scheduler-tick-interval",
+        type=float,
+        default=SCHEDULER_TICK_POLL_TIMEOUT_S_DEFAULT,
+        help=(
+            "Maximum idle time (seconds) the scheduler spends waiting for completions "
+            "before re-evaluating the packing plan. Lower values react faster to freed "
+            f"VRAM (default: {SCHEDULER_TICK_POLL_TIMEOUT_S_DEFAULT:.2f}s)."
+        ),
+    )
+    parser.add_argument(
+        "--gpu-query-cache-ttl",
+        type=float,
+        default=GPU_QUERY_CACHE_TTL_S_DEFAULT,
+        help=(
+            "Reuse nvidia-smi samples younger than this many seconds to reduce probing overhead "
+            f"(default: {GPU_QUERY_CACHE_TTL_S_DEFAULT:.1f}s)."
+        ),
+    )
+    parser.add_argument(
+        "--planner-status-snapshot-interval",
+        type=float,
+        default=MULTI_PLANNER_STATUS_SNAPSHOT_INTERVAL_S_DEFAULT,
+        help=(
+            "Minimum interval in seconds between planner child status-file reads in the dashboard "
+            f"(default: {MULTI_PLANNER_STATUS_SNAPSHOT_INTERVAL_S_DEFAULT:.1f}s)."
         ),
     )
     parser.add_argument(
@@ -1469,6 +1737,22 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--defer-colmdriver-vllm-start",
+        dest="defer_colmdriver_vllm_start",
+        action="store_true",
+        default=True,
+        help=(
+            "In mixed multi-planner batches, queue CoLMDriver planners after non-CoLMDriver "
+            "planners and delay CoLMDriver vLLM startup until that deferred phase begins."
+        ),
+    )
+    parser.add_argument(
+        "--no-defer-colmdriver-vllm-start",
+        dest="defer_colmdriver_vllm_start",
+        action="store_false",
+        help="Disable deferred CoLMDriver phase scheduling and start shared vLLM services immediately.",
+    )
+    parser.add_argument(
         "--show-carla-diag",
         action="store_true",
         help=(
@@ -1528,7 +1812,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Disable fallback position-based stall detection in ScenarioManager "
             "(prevents auto-terminating routes when all egos appear stationary). "
-            "Default behavior keeps stall detection enabled."
+            "This is the default behavior."
         ),
     )
     parser.add_argument(
@@ -1537,7 +1821,7 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help=(
             "Re-enable ScenarioManager position-based stall detection "
-            "(this is the default behavior)."
+            "(overrides the default of stall detection being disabled)."
         ),
     )
     parser.add_argument(
@@ -1629,6 +1913,23 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Maximum restart attempts for one stuck scenario before giving up. "
             "Use 0 or a negative value for unlimited retries."
+        ),
+    )
+    parser.add_argument(
+        "--planner-retry-limit",
+        type=int,
+        default=PLANNER_RETRY_LIMIT_DEFAULT,
+        help=(
+            "Maximum parent-level relaunch attempts per planner worker in multi-planner mode. "
+            "Use 0 or a negative value for unlimited relaunches."
+        ),
+    )
+    parser.add_argument(
+        "--perf-report-file",
+        default="_launcher_perf.json",
+        help=(
+            "File name (or absolute path) for launcher bottleneck timing report. "
+            "Use empty string to disable."
         ),
     )
     parser.add_argument(
@@ -1737,7 +2038,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.set_defaults(
         inject_ucla_v2_crosswalk=False,
-        disable_stall_detection=False,
+        disable_stall_detection=True,
     )
     # Be tolerant to pasted unicode dashes/zero-width chars in CLI flags.
     dash_map = str.maketrans(
@@ -1784,11 +2085,59 @@ def parse_args() -> argparse.Namespace:
         parser.error("--repro-rerun-total must be non-negative.")
     if int(args.repro_rerun_index) > 0 and int(args.repro_rerun_total) <= 0:
         parser.error("--repro-rerun-total must be positive when --repro-rerun-index is set.")
+    if int(args.auto_workers_max_per_gpu) <= 0:
+        parser.error("--auto-workers-max-per-gpu must be positive.")
+    if int(args.oom_concurrency_backoff_step) <= 0:
+        parser.error("--oom-concurrency-backoff-step must be positive.")
+    if int(args.oom_free_mib_penalty_step) < 0:
+        parser.error("--oom-free-mib-penalty-step must be non-negative.")
+    if int(args.oom_recovery_success_streak) <= 0:
+        parser.error("--oom-recovery-success-streak must be positive.")
+    if int(args.oom_recovery_penalty_decay_step) < 0:
+        parser.error("--oom-recovery-penalty-decay-step must be non-negative.")
+    if float(args.gpu_query_cache_ttl) < 0.0:
+        parser.error("--gpu-query-cache-ttl must be >= 0.")
+    if float(args.planner_status_snapshot_interval) <= 0.0:
+        parser.error("--planner-status-snapshot-interval must be > 0.")
     args.recovery_mode = str(args.recovery_mode or "off").strip().lower()
     if args.disable_checkpoint_recovery:
         args.recovery_mode = "off"
     if args.recovery_mode == "publication_safe" and args.accept_stalled_near_end_failures:
         parser.error("--accept-stalled-near-end-failures is not allowed in publication_safe recovery mode.")
+    args.perf_report_file = str(args.perf_report_file or "").strip()
+
+    # --max-multiprocess: apply aggressive defaults for maximal safe concurrency.
+    if getattr(args, "max_multiprocess", False):
+        args.allow_multiple_carlas_per_gpu = True
+        args.vram_aware_scheduler = True
+        args.auto_workers_per_gpu = True
+        # Lower safety margins to pack GPUs more aggressively.
+        if args.vram_safety_buffer_mib == VRAM_SAFETY_BUFFER_MIB_DEFAULT:
+            args.vram_safety_buffer_mib = VRAM_SAFETY_BUFFER_AGGRESSIVE_MIB_DEFAULT
+        if args.auto_workers_min_free_mib == AUTO_WORKERS_PER_GPU_MIN_FREE_MIB_DEFAULT:
+            args.auto_workers_min_free_mib = MIN_FREE_AGGRESSIVE_MIB_DEFAULT
+
+    # Parse --scenario-shard INDEX/COUNT into (index, count) or None.
+    args._scenario_shard_parsed = None
+    if args.scenario_shard is not None:
+        _shard_parts = str(args.scenario_shard).split("/")
+        if len(_shard_parts) == 2:
+            try:
+                _shard_idx = int(_shard_parts[0])
+                _shard_cnt = int(_shard_parts[1])
+                if 0 <= _shard_idx < _shard_cnt and _shard_cnt > 0:
+                    args._scenario_shard_parsed = (_shard_idx, _shard_cnt)
+                else:
+                    raise ValueError(
+                        f"--scenario-shard INDEX must be in [0, COUNT): got {args.scenario_shard}"
+                    )
+            except ValueError as exc:
+                raise ValueError(f"Invalid --scenario-shard value: {args.scenario_shard}") from exc
+        else:
+            raise ValueError(
+                f"--scenario-shard must be INDEX/COUNT (e.g. 0/4): got {args.scenario_shard}"
+            )
+
     setattr(args, "_normalized_argv", normalized_argv)
     return args
 
@@ -2562,7 +2911,10 @@ def wait_for_carla_teardown_gate(
     timeout_s: float = CARLA_TEARDOWN_GATE_TIMEOUT_DEFAULT,
     poll_s: float = CARLA_TEARDOWN_GATE_POLL_S_DEFAULT,
     stable_samples: int = CARLA_TEARDOWN_GATE_STABLE_SAMPLES_DEFAULT,
+    quiet: bool = False,
 ) -> bool:
+    begin_t = time.monotonic()
+    _perf_add("teardown_gate_calls", 1)
     tracked_ports = {
         int(world_port),
         int(tm_port),
@@ -2570,6 +2922,7 @@ def wait_for_carla_teardown_gate(
     }
     tracked_ports = {port for port in tracked_ports if port > 0}
     if not tracked_ports:
+        _perf_add("teardown_gate_time_s", time.monotonic() - begin_t)
         return True
 
     gate_key = _teardown_gate_key(str(host), tracked_ports)
@@ -2585,6 +2938,7 @@ def wait_for_carla_teardown_gate(
             world_port=int(world_port),
             tm_port=int(tm_port),
         )
+        _perf_add("teardown_gate_time_s", time.monotonic() - begin_t)
         return True
 
     begin_message = (
@@ -2592,7 +2946,8 @@ def wait_for_carla_teardown_gate(
         f"(context={context}, ports={sorted(tracked_ports)}, baseline_active="
         f"{'unset' if baseline_active is None else int(baseline_active)})."
     )
-    print(begin_message)
+    if not quiet:
+        print(begin_message)
     log_carla_event(
         "EVALUATOR_START_GATE_BEGIN",
         process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
@@ -2621,10 +2976,12 @@ def wait_for_carla_teardown_gate(
                 status="unavailable",
                 snapshots=int(snapshots),
             )
-            print(
-                "[WARN] Teardown gate socket snapshot unavailable; "
-                "continuing without strict socket-state gating."
-            )
+            if not quiet:
+                print(
+                    "[WARN] Teardown gate socket snapshot unavailable; "
+                    "continuing without strict socket-state gating."
+                )
+            _perf_add("teardown_gate_time_s", time.monotonic() - begin_t)
             return True
 
         active = sum(counts.get(state, 0) for state in CARLA_ACTIVE_SOCKET_STATES)
@@ -2671,7 +3028,14 @@ def wait_for_carla_teardown_gate(
         else:
             stable = 0
 
-        if stable >= max(1, int(stable_samples)):
+        effective_stable_samples = max(1, int(stable_samples))
+        if int(baseline_active) == 0 and int(active) == 0:
+            # Fast-path: no active CARLA sockets at all. Waiting for extra
+            # stable samples adds ~poll_s * (stable_samples-1) launch latency
+            # without improving safety in this all-idle case.
+            effective_stable_samples = 1
+
+        if stable >= effective_stable_samples:
             duration_s = max(0.0, float(timeout_s) - max(0.0, deadline - time.monotonic()))
             log_carla_event(
                 "EVALUATOR_START_GATE_END",
@@ -2682,14 +3046,17 @@ def wait_for_carla_teardown_gate(
                 time_wait_connections=int(time_wait),
                 baseline_active=int(baseline_active),
                 ready_active_threshold=int(ready_active_threshold),
+                stable_samples_required=int(effective_stable_samples),
                 duration_s=duration_s,
                 snapshots=int(snapshots),
             )
-            print(
-                "[INFO] Teardown gate passed: CARLA connections quiesced "
-                f"(context={context}, active={active}, time_wait={time_wait}, "
-                f"baseline_active={baseline_active})."
-            )
+            if not quiet:
+                print(
+                    "[INFO] Teardown gate passed: CARLA connections quiesced "
+                    f"(context={context}, active={active}, time_wait={time_wait}, "
+                    f"baseline_active={baseline_active})."
+                )
+            _perf_add("teardown_gate_time_s", time.monotonic() - begin_t)
             return True
         time.sleep(max(0.05, float(poll_s)))
 
@@ -2710,11 +3077,14 @@ def wait_for_carla_teardown_gate(
         ready_active_threshold=int(max(0, int(final_baseline))),
         snapshots=int(snapshots),
     )
-    print(
-        "[WARN] Teardown gate timed out; not-ready "
-        f"(context={context}, active={final_active}, time_wait={final_time_wait}, "
-        f"baseline_active={final_baseline})."
-    )
+    if not quiet:
+        print(
+            "[WARN] Teardown gate timed out; not-ready "
+            f"(context={context}, active={final_active}, time_wait={final_time_wait}, "
+            f"baseline_active={final_baseline})."
+        )
+    _perf_add("teardown_gate_time_s", time.monotonic() - begin_t)
+    _perf_add("teardown_gate_timeouts", 1)
     return False
 
 
@@ -3374,11 +3744,16 @@ class MonitoredSubprocessRunner:
         proc = self.process
         if proc is None or proc.stdout is None:
             return
+        line_count = 0
+        diag_line_count = 0
         try:
             for raw_line in iter(proc.stdout.readline, ""):
                 if raw_line == "":
                     break
+                line_count += 1
                 is_diagnostic = CARLA_DIAG_MARKER in raw_line
+                if is_diagnostic:
+                    diag_line_count += 1
                 self._note_output(raw_line, diagnostic=is_diagnostic)
                 if self._log_handle is not None:
                     self._log_handle.write(raw_line)
@@ -3392,6 +3767,10 @@ class MonitoredSubprocessRunner:
                         sys.stdout.write(raw_line)
                     sys.stdout.flush()
         finally:
+            if line_count:
+                _perf_add("child_output_lines", line_count)
+            if diag_line_count:
+                _perf_add("child_diag_lines", diag_line_count)
             try:
                 proc.stdout.close()
             except Exception:
@@ -3443,6 +3822,7 @@ class MonitoredSubprocessRunner:
             return
 
     def run(self) -> MonitoredRunResult:
+        _perf_add("child_runs", 1)
         self._start_time = time.monotonic()
         self._last_output_time = self._start_time
         self._last_any_output_time = self._start_time
@@ -3519,6 +3899,7 @@ class MonitoredSubprocessRunner:
                     returncode=self.process.poll(),
                     error=f"{type(exc).__name__}: {exc}",
                 )
+                _perf_add("child_run_time_s", time.monotonic() - self._start_time)
                 raise
 
             self._stop_event.set()
@@ -3546,6 +3927,7 @@ class MonitoredSubprocessRunner:
                 stalled=bool(self._stalled.is_set()),
                 terminated_reason=self._termination_reason,
             )
+            _perf_add("child_run_time_s", elapsed_s)
             return MonitoredRunResult(
                 returncode=returncode,
                 stalled=self._stalled.is_set(),
@@ -3595,6 +3977,7 @@ class CarlaProcessManager:
         self.rootcause_last_logdir: Path | None = None
         self._rootcause_launch_count = 0
         self._pending_logdir_outcome: str | None = None
+        self._stopped = False
 
     def plan_logdir_outcome(self, outcome: str) -> None:
         """Schedule the current rootcause logdir to be renamed with *outcome* when stop() is called."""
@@ -4044,6 +4427,9 @@ class CarlaProcessManager:
         return True
 
     def start(self) -> PortBundle:
+        start_t = time.monotonic()
+        _perf_add("carla_start_calls", 1)
+        self._stopped = False
         log_carla_event(
             "CARLA_MANAGER_START_BEGIN",
             process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
@@ -4053,6 +4439,7 @@ class CarlaProcessManager:
             rootcause_mode=1 if self.rootcause_config is not None else 0,
         )
         if self.is_running():
+            _perf_add("carla_start_time_s", time.monotonic() - start_t)
             return PortBundle(port=self.port, tm_port=self.tm_port)
         if self.rootcause_config is not None:
             desired_bundle = PortBundle(port=self.port, tm_port=self.tm_port)
@@ -4065,7 +4452,9 @@ class CarlaProcessManager:
                     selected_tm_port=self.tm_port,
                     rootcause_mode=1,
                 )
+                _perf_add("carla_start_time_s", time.monotonic() - start_t)
                 return PortBundle(port=self.port, tm_port=self.tm_port)
+            _perf_add("carla_start_time_s", time.monotonic() - start_t)
             raise RuntimeError(
                 "CARLA root-cause wrapper failed to start the CARLA server "
                 f"(requested {desired_bundle.port}/{desired_bundle.tm_port})."
@@ -4123,6 +4512,7 @@ class CarlaProcessManager:
                     selected_tm_port=self.tm_port,
                     rootcause_mode=0,
                 )
+                _perf_add("carla_start_time_s", time.monotonic() - start_t)
                 return PortBundle(port=self.port, tm_port=self.tm_port)
             last_error = (
                 f"CARLA failed to open RPC port on {bundle.port}/{bundle.tm_port}. "
@@ -4130,12 +4520,16 @@ class CarlaProcessManager:
             )
             wait_for_port_close(self.host, bundle.port, timeout=5.0)
 
+        _perf_add("carla_start_time_s", time.monotonic() - start_t)
         raise RuntimeError(
             last_error
             or "CARLA failed to start on all candidate port sets."
         )
 
     def stop(self, timeout: float = 15.0) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
         current_bundle = PortBundle(port=self.port, tm_port=self.tm_port)
         log_carla_event(
             "CARLA_MANAGER_STOP_BEGIN",
@@ -4180,6 +4574,8 @@ class CarlaProcessManager:
         self.process = None
 
     def restart(self, wait_seconds: float, *, failure_reason: str | None = None) -> PortBundle:
+        restart_t = time.monotonic()
+        _perf_add("carla_restart_calls", 1)
         log_carla_event(
             "CARLA_MANAGER_RESTART_BEGIN",
             process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
@@ -4204,6 +4600,7 @@ class CarlaProcessManager:
             selected_tm_port=bundle.tm_port,
             rootcause_mode=1 if self.rootcause_config is not None else 0,
         )
+        _perf_add("carla_restart_time_s", time.monotonic() - restart_t)
         return bundle
 
 
@@ -4655,82 +5052,71 @@ def query_gpu_memory_stats(
     if not gpu_tokens:
         return {}
 
-    cmd = [
-        "nvidia-smi",
-        f"--id={','.join(gpu_tokens)}",
-        "--query-gpu=index,uuid,memory.total,memory.used,memory.free",
-        "--format=csv,noheader,nounits",
-    ]
-    try:
-        result = subprocess.run(
-            cmd,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10.0,
-        )
-    except Exception:
+    all_stats = _query_all_gpu_memory_stats(include_uuid_keys=True)
+    if not all_stats:
         return {}
 
-    rows: list[tuple[str, str, GPUMemoryStats]] = []
-    for raw_line in result.stdout.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        parts = [part.strip() for part in line.split(",")]
-        if len(parts) < 5:
-            continue
-        index, uuid, total_mib, used_mib, free_mib = parts[:5]
-        try:
-            rows.append(
-                (
-                    index,
-                    uuid,
-                    GPUMemoryStats(
-                        index=index,
-                        total_mib=int(total_mib),
-                        used_mib=int(used_mib),
-                        free_mib=int(free_mib),
-                    ),
-                )
-            )
-        except ValueError:
-            continue
-
     stats_by_requested: Dict[str, GPUMemoryStats] = {}
-    unmatched_rows = list(rows)
     for requested_gpu in gpu_tokens:
-        match_index = next(
-            (
-                row_index
-                for row_index, (gpu_index, gpu_uuid, _stats) in enumerate(unmatched_rows)
-                if requested_gpu == gpu_index or requested_gpu == gpu_uuid
-            ),
-            None,
-        )
-        if match_index is None:
-            continue
-        _gpu_index, _gpu_uuid, stats = unmatched_rows.pop(match_index)
-        stats_by_requested[requested_gpu] = stats
-
-    if not stats_by_requested and len(rows) == len(gpu_tokens):
-        for requested_gpu, (_gpu_index, _gpu_uuid, stats) in zip(gpu_tokens, rows):
+        stats = all_stats.get(requested_gpu)
+        if stats is not None:
             stats_by_requested[requested_gpu] = stats
+
+    # Fallback: when GPU IDs are remapped (e.g., container-visible IDs), match
+    # by order against the sorted physical indices that nvidia-smi reports.
+    if not stats_by_requested:
+        index_only = sorted(
+            {
+                stats.index: stats
+                for key, stats in all_stats.items()
+                if key == stats.index
+            }.items(),
+            key=lambda item: int(item[0]) if str(item[0]).isdigit() else item[0],
+        )
+        if len(index_only) >= len(gpu_tokens):
+            for requested_gpu, (_idx, stats) in zip(gpu_tokens, index_only):
+                stats_by_requested[requested_gpu] = stats
 
     return stats_by_requested
 
 
-def _query_all_gpu_memory_stats() -> Dict[str, GPUMemoryStats]:
-    """Query VRAM stats for every GPU visible to nvidia-smi (no --id filter)."""
+def _query_all_gpu_memory_stats(
+    *,
+    include_uuid_keys: bool = False,
+    force_refresh: bool = False,
+) -> Dict[str, GPUMemoryStats]:
+    """Query VRAM stats for every GPU visible to nvidia-smi."""
+    cache_ttl_s = max(0.0, float(_GPU_QUERY_CACHE_TTL_S))
+    cache_key = "all_gpu_memory_stats"
+    now = time.monotonic()
+    if not force_refresh and cache_ttl_s > 0.0:
+        with _GPU_QUERY_CACHE_LOCK:
+            cached = _GPU_QUERY_CACHE.get(cache_key)
+        if cached is not None:
+            cached_ts, cached_payload = cached
+            if now - cached_ts <= cache_ttl_s:
+                if include_uuid_keys:
+                    return dict(cached_payload)
+                return {
+                    key: value
+                    for key, value in cached_payload.items()
+                    if key == value.index
+                }
+
     cmd = [
         "nvidia-smi",
         "--query-gpu=index,uuid,memory.total,memory.used,memory.free",
         "--format=csv,noheader,nounits",
     ]
+    query_start = time.monotonic()
     try:
         result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=10.0)
     except Exception:
+        _perf_add("nvidia_smi_calls", 1)
+        _perf_add("nvidia_smi_time_s", time.monotonic() - query_start)
         return {}
+    _perf_add("nvidia_smi_calls", 1)
+    _perf_add("nvidia_smi_time_s", time.monotonic() - query_start)
     stats: Dict[str, GPUMemoryStats] = {}
     for raw_line in result.stdout.splitlines():
         line = raw_line.strip()
@@ -4741,15 +5127,27 @@ def _query_all_gpu_memory_stats() -> Dict[str, GPUMemoryStats]:
             continue
         index, uuid, total_mib, used_mib, free_mib = parts[:5]
         try:
-            stats[index] = GPUMemoryStats(
+            gpu_stats = GPUMemoryStats(
                 index=index,
                 total_mib=int(total_mib),
                 used_mib=int(used_mib),
                 free_mib=int(free_mib),
             )
+            stats[index] = gpu_stats
+            stats[uuid] = gpu_stats
         except ValueError:
             continue
-    return stats
+
+    with _GPU_QUERY_CACHE_LOCK:
+        _GPU_QUERY_CACHE[cache_key] = (time.monotonic(), dict(stats))
+
+    if include_uuid_keys:
+        return stats
+    return {
+        key: value
+        for key, value in stats.items()
+        if key == value.index
+    }
 
 
 def _pick_fallback_gpu(
@@ -4857,6 +5255,8 @@ def wait_for_gpu_memory_settle(
     stable_samples: int,
     stable_tolerance_mib: int,
 ) -> GPUMemoryStats | None:
+    begin_t = time.monotonic()
+    _perf_add("gpu_settle_calls", 1)
     stable_samples = max(1, int(stable_samples))
     settle_timeout_s = max(0.0, float(settle_timeout_s))
     poll_seconds = max(0.1, float(poll_seconds))
@@ -4870,6 +5270,7 @@ def wait_for_gpu_memory_settle(
     while True:
         stats = query_gpu_memory_stats([gpu]).get(gpu)
         if stats is None:
+            _perf_add("gpu_settle_time_s", time.monotonic() - begin_t)
             return latest_stats
         latest_stats = stats
 
@@ -4882,8 +5283,11 @@ def wait_for_gpu_memory_settle(
         last_free_mib = stats.free_mib
 
         if stable_count >= stable_samples:
+            _perf_add("gpu_settle_time_s", time.monotonic() - begin_t)
             return latest_stats
         if time.monotonic() >= deadline:
+            _perf_add("gpu_settle_time_s", time.monotonic() - begin_t)
+            _perf_add("gpu_settle_timeouts", 1)
             return latest_stats
         time.sleep(min(poll_seconds, max(0.0, deadline - time.monotonic())))
 
@@ -4931,20 +5335,273 @@ def select_colmdriver_vllm_gpus(
     )
 
 
+class PlannerVramEstimator:
+    """Persistent per-planner VRAM estimator.
+
+    Stores exponentially-smoothed peak-memory observations on disk so that
+    future scheduler runs bin-pack with realistic estimates from the start.
+    Thread-safe: internal lock guards both the in-memory dict and the file.
+    """
+
+    def __init__(
+        self,
+        cache_path: Path,
+        *,
+        ema_alpha: float = VRAM_ESTIMATE_EMA_ALPHA_DEFAULT,
+        seed: Dict[str, int] | None = None,
+    ) -> None:
+        self._cache_path = cache_path
+        self._ema_alpha = max(0.01, min(1.0, float(ema_alpha)))
+        self._lock = threading.Lock()
+        self._estimates: Dict[str, float] = {}
+        self._observation_counts: Dict[str, int] = {}
+        if seed:
+            for name, value in seed.items():
+                self._estimates[name] = float(max(0, int(value)))
+        self._load()
+
+    @property
+    def cache_path(self) -> Path:
+        return self._cache_path
+
+    def _load(self) -> None:
+        try:
+            if not self._cache_path.exists():
+                return
+            payload = json.loads(self._cache_path.read_text("utf-8"))
+        except Exception as exc:  # pylint: disable=broad-except
+            print(
+                f"[WARN] Unable to load planner VRAM estimate cache {self._cache_path}: {exc}"
+            )
+            return
+        entries = payload.get("planners") if isinstance(payload, dict) else None
+        if not isinstance(entries, dict):
+            return
+        for name, entry in entries.items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                mib = float(entry.get("estimate_mib", 0.0))
+                if mib <= 0:
+                    continue
+                self._estimates[str(name)] = mib
+                self._observation_counts[str(name)] = int(entry.get("observation_count", 0))
+            except (TypeError, ValueError):
+                continue
+
+    def _save_locked(self) -> None:
+        try:
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:  # pylint: disable=broad-except
+            return
+        payload = {
+            "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "planners": {
+                name: {
+                    "estimate_mib": int(round(value)),
+                    "observation_count": int(self._observation_counts.get(name, 0)),
+                }
+                for name, value in self._estimates.items()
+            },
+        }
+        try:
+            tmp_path = self._cache_path.with_suffix(self._cache_path.suffix + ".tmp")
+            tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), "utf-8")
+            tmp_path.replace(self._cache_path)
+        except Exception as exc:  # pylint: disable=broad-except
+            print(
+                f"[WARN] Unable to persist planner VRAM estimate cache {self._cache_path}: {exc}"
+            )
+
+    def estimate(self, planner_name: str) -> int:
+        with self._lock:
+            if planner_name in self._estimates:
+                return int(round(self._estimates[planner_name]))
+        return int(PLANNER_VRAM_ESTIMATE_MIB.get(planner_name, PLANNER_VRAM_DEFAULT_FALLBACK_MIB))
+
+    def observe_peak(self, planner_name: str, observed_mib: int) -> None:
+        """Merge an observed peak MiB into the running estimate."""
+        if observed_mib <= 0:
+            return
+        with self._lock:
+            current = float(self._estimates.get(planner_name, 0.0))
+            if current <= 0.0:
+                new_value = float(observed_mib)
+            else:
+                # Track the *upper envelope*: we can't under-estimate without
+                # risking OOM, so bias upward and decay only slowly.
+                if observed_mib > current:
+                    new_value = float(observed_mib)
+                else:
+                    new_value = (
+                        self._ema_alpha * float(observed_mib)
+                        + (1.0 - self._ema_alpha) * current
+                    )
+            self._estimates[planner_name] = new_value
+            self._observation_counts[planner_name] = (
+                int(self._observation_counts.get(planner_name, 0)) + 1
+            )
+            self._save_locked()
+
+    def bump_after_oom(self, planner_name: str, *, bump_mib: int) -> None:
+        """Raise the floor for a planner after an OOM."""
+        bump_mib = max(0, int(bump_mib))
+        if bump_mib <= 0:
+            return
+        with self._lock:
+            current = float(self._estimates.get(planner_name, 0.0))
+            if current <= 0.0:
+                current = float(
+                    PLANNER_VRAM_ESTIMATE_MIB.get(
+                        planner_name, PLANNER_VRAM_DEFAULT_FALLBACK_MIB
+                    )
+                )
+            new_value = current + float(bump_mib)
+            self._estimates[planner_name] = new_value
+            self._observation_counts[planner_name] = (
+                int(self._observation_counts.get(planner_name, 0)) + 1
+            )
+            self._save_locked()
+
+    def snapshot(self) -> Dict[str, int]:
+        with self._lock:
+            return {name: int(round(val)) for name, val in self._estimates.items()}
+
+
+class GPUMemoryMonitor(threading.Thread):
+    """Background nvidia-smi sampler.
+
+    Dispatchers read the latest snapshot via :meth:`snapshot` with O(1) cost.
+    Also tracks per-GPU peak ``used_mib`` since a baseline timestamp so the
+    scheduler can derive planner peak observations on completion.
+    """
+
+    def __init__(
+        self,
+        gpu_ids: Sequence[str],
+        *,
+        poll_seconds: float = GPU_MONITOR_POLL_SECONDS_DEFAULT,
+    ) -> None:
+        super().__init__(name="GPUMemoryMonitor", daemon=True)
+        self._gpu_ids = [str(g) for g in gpu_ids]
+        self._poll_seconds = max(0.25, float(poll_seconds))
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._latest: Dict[str, GPUMemoryStats] = {}
+        # baselines[gpu] = (baseline_used_mib, peak_used_mib_since_baseline)
+        self._peaks: Dict[str, Tuple[int, int]] = {}
+        self._last_update_monotonic: float = 0.0
+
+    def run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                stats_map = _query_all_gpu_memory_stats(self._gpu_ids) or {}
+            except Exception:  # pylint: disable=broad-except
+                stats_map = {}
+            now = time.monotonic()
+            with self._lock:
+                self._latest = dict(stats_map)
+                self._last_update_monotonic = now
+                for gpu_id, stats in stats_map.items():
+                    baseline, peak = self._peaks.get(gpu_id, (stats.used_mib, stats.used_mib))
+                    if stats.used_mib > peak:
+                        peak = stats.used_mib
+                    self._peaks[gpu_id] = (baseline, peak)
+            self._stop.wait(self._poll_seconds)
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def snapshot(self) -> Dict[str, GPUMemoryStats]:
+        with self._lock:
+            return dict(self._latest)
+
+    def stats_for(self, gpu_id: str | None) -> GPUMemoryStats | None:
+        if gpu_id is None:
+            return None
+        with self._lock:
+            return self._latest.get(str(gpu_id))
+
+    def last_update_age_s(self) -> float:
+        with self._lock:
+            if self._last_update_monotonic <= 0.0:
+                return float("inf")
+            return max(0.0, time.monotonic() - self._last_update_monotonic)
+
+    def reset_baseline(self, gpu_id: str) -> None:
+        with self._lock:
+            stats = self._latest.get(str(gpu_id))
+            baseline = int(stats.used_mib) if stats is not None else 0
+            self._peaks[str(gpu_id)] = (baseline, baseline)
+
+    def consume_peak_delta(self, gpu_id: str) -> int:
+        """Return and reset the peak delta (MiB) since the last baseline."""
+        with self._lock:
+            baseline, peak = self._peaks.get(str(gpu_id), (0, 0))
+            delta = max(0, int(peak) - int(baseline))
+            # Reset baseline to the latest live value so the next window
+            # starts fresh.
+            stats = self._latest.get(str(gpu_id))
+            new_baseline = int(stats.used_mib) if stats is not None else 0
+            self._peaks[str(gpu_id)] = (new_baseline, new_baseline)
+        return delta
+
+
+class SchedulerTickLogger:
+    """JSONL sink for scheduler decisions and snapshots."""
+
+    def __init__(self, path: Path | None) -> None:
+        self._path = path
+        self._lock = threading.Lock()
+        self._enabled = path is not None
+        if self._enabled:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:  # pylint: disable=broad-except
+                self._enabled = False
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def log(self, event: str, **fields: Any) -> None:
+        if not self._enabled:
+            return
+        payload = {
+            "ts": time.time(),
+            "ts_monotonic": time.monotonic(),
+            "event": event,
+        }
+        payload.update(fields)
+        line = json.dumps(payload, default=str, sort_keys=True)
+        with self._lock:
+            try:
+                with self._path.open("a", encoding="utf-8") as handle:
+                    handle.write(line + "\n")
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+
 def refresh_gpu_launch_capacity(
     gpu_state: GPUPlannerState,
     *,
     min_free_mib: int,
+    max_concurrency: int | None = None,
+    extra_min_free_mib: int = 0,
     settle_timeout_s: float,
     poll_seconds: float,
     stable_samples: int,
     stable_tolerance_mib: int,
 ) -> GPUPlannerState:
+    capped_max = None if max_concurrency is None else max(1, int(max_concurrency))
+    effective_min_free_mib = max(0, int(min_free_mib) + max(0, int(extra_min_free_mib)))
     if gpu_state.gpu is None:
         gpu_state.telemetry_available = False
         gpu_state.last_stats = None
         gpu_state.last_probe_source = "no_gpu"
         gpu_state.launch_capacity = max(1, gpu_state.active_count + 1)
+        if capped_max is not None:
+            gpu_state.launch_capacity = min(gpu_state.launch_capacity, capped_max)
         return gpu_state
 
     stats = wait_for_gpu_memory_settle(
@@ -4959,13 +5616,17 @@ def refresh_gpu_launch_capacity(
         gpu_state.last_stats = None
         gpu_state.last_probe_source = "nvidia_smi_unavailable"
         gpu_state.launch_capacity = max(1, gpu_state.active_count)
+        if capped_max is not None:
+            gpu_state.launch_capacity = min(gpu_state.launch_capacity, capped_max)
         return gpu_state
 
     gpu_state.telemetry_available = True
     gpu_state.last_stats = stats
     gpu_state.last_probe_source = "live"
-    has_capacity = stats.free_mib >= max(0, int(min_free_mib))
+    has_capacity = stats.free_mib >= effective_min_free_mib
     gpu_state.launch_capacity = gpu_state.active_count + (1 if has_capacity else 0)
+    if capped_max is not None:
+        gpu_state.launch_capacity = min(gpu_state.launch_capacity, capped_max)
     # Warn when a GPU passes the threshold but its free headroom is suspiciously
     # low relative to the total size (e.g. a 46 GiB GPU with only 8 GiB free
     # will not fit a 44 GiB model even though 8 GiB > auto_workers_min_free_mib
@@ -4975,7 +5636,7 @@ def refresh_gpu_launch_capacity(
             f"[WARN] GPU {gpu_state.gpu}: only {stats.free_mib} MiB free out of "
             f"{stats.total_mib} MiB total ({100*stats.free_mib//stats.total_mib}% free). "
             "This GPU passed the --auto-workers-min-free-mib threshold "
-            f"({min_free_mib} MiB) but may still OOM if the planner model is large. "
+            f"({effective_min_free_mib} MiB) but may still OOM if the planner model is large. "
             "Consider raising --auto-workers-min-free-mib (e.g. to 40000 for 44 GiB models)."
         )
     return gpu_state
@@ -4991,6 +5652,201 @@ def choose_force_launch_gpu(
             -(state.active_count),
         ),
     )
+
+
+def _perf_add(
+    field: str,
+    value: int | float = 1,
+) -> None:
+    with _PERF_LOCK:
+        current = getattr(_PERF_COUNTERS, field)
+        setattr(_PERF_COUNTERS, field, current + value)
+
+
+def _perf_add_retry(failure_kind: str, outcome: str) -> None:
+    normalized_kind = str(failure_kind or "unknown").strip() or "unknown"
+    normalized_outcome = str(outcome or "unknown").strip() or "unknown"
+    with _PERF_LOCK:
+        _PERF_COUNTERS.retry_events += 1
+        _PERF_COUNTERS.retries_by_kind[normalized_kind] = (
+            _PERF_COUNTERS.retries_by_kind.get(normalized_kind, 0) + 1
+        )
+        _PERF_COUNTERS.retries_by_outcome[normalized_outcome] = (
+            _PERF_COUNTERS.retries_by_outcome.get(normalized_outcome, 0) + 1
+        )
+
+
+def snapshot_performance_counters() -> Dict[str, Any]:
+    with _PERF_LOCK:
+        return {
+            "nvidia_smi_calls": int(_PERF_COUNTERS.nvidia_smi_calls),
+            "nvidia_smi_time_s": float(_PERF_COUNTERS.nvidia_smi_time_s),
+            "gpu_settle_calls": int(_PERF_COUNTERS.gpu_settle_calls),
+            "gpu_settle_time_s": float(_PERF_COUNTERS.gpu_settle_time_s),
+            "gpu_settle_timeouts": int(_PERF_COUNTERS.gpu_settle_timeouts),
+            "teardown_gate_calls": int(_PERF_COUNTERS.teardown_gate_calls),
+            "teardown_gate_time_s": float(_PERF_COUNTERS.teardown_gate_time_s),
+            "teardown_gate_timeouts": int(_PERF_COUNTERS.teardown_gate_timeouts),
+            "carla_start_calls": int(_PERF_COUNTERS.carla_start_calls),
+            "carla_start_time_s": float(_PERF_COUNTERS.carla_start_time_s),
+            "carla_restart_calls": int(_PERF_COUNTERS.carla_restart_calls),
+            "carla_restart_time_s": float(_PERF_COUNTERS.carla_restart_time_s),
+            "child_runs": int(_PERF_COUNTERS.child_runs),
+            "child_run_time_s": float(_PERF_COUNTERS.child_run_time_s),
+            "child_output_lines": int(_PERF_COUNTERS.child_output_lines),
+            "child_diag_lines": int(_PERF_COUNTERS.child_diag_lines),
+            "retry_events": int(_PERF_COUNTERS.retry_events),
+            "retries_by_kind": dict(_PERF_COUNTERS.retries_by_kind),
+            "retries_by_outcome": dict(_PERF_COUNTERS.retries_by_outcome),
+        }
+
+
+def format_performance_summary_lines(
+    *,
+    wall_clock_s: float | None = None,
+) -> List[str]:
+    perf = snapshot_performance_counters()
+    wall = max(0.0, float(wall_clock_s or 0.0))
+    child_time = float(perf.get("child_run_time_s", 0.0))
+    launch_overhead = max(0.0, wall - child_time)
+    lines = [
+        "[PERF] Launcher timing summary:",
+        (
+            f"[PERF] wall_clock_s={wall:.1f} child_runtime_s={child_time:.1f} "
+            f"launcher_overhead_s={launch_overhead:.1f}"
+        ),
+        (
+            f"[PERF] gpu_probes: nvidia_smi_calls={int(perf.get('nvidia_smi_calls', 0))} "
+            f"nvidia_smi_time_s={float(perf.get('nvidia_smi_time_s', 0.0)):.1f} "
+            f"settle_calls={int(perf.get('gpu_settle_calls', 0))} "
+            f"settle_time_s={float(perf.get('gpu_settle_time_s', 0.0)):.1f} "
+            f"settle_timeouts={int(perf.get('gpu_settle_timeouts', 0))}"
+        ),
+        (
+            f"[PERF] teardown_gate: calls={int(perf.get('teardown_gate_calls', 0))} "
+            f"time_s={float(perf.get('teardown_gate_time_s', 0.0)):.1f} "
+            f"timeouts={int(perf.get('teardown_gate_timeouts', 0))}"
+        ),
+        (
+            f"[PERF] carla_lifecycle: starts={int(perf.get('carla_start_calls', 0))} "
+            f"start_time_s={float(perf.get('carla_start_time_s', 0.0)):.1f} "
+            f"restarts={int(perf.get('carla_restart_calls', 0))} "
+            f"restart_time_s={float(perf.get('carla_restart_time_s', 0.0)):.1f}"
+        ),
+        (
+            f"[PERF] child_io: runs={int(perf.get('child_runs', 0))} "
+            f"output_lines={int(perf.get('child_output_lines', 0))} "
+            f"diag_lines={int(perf.get('child_diag_lines', 0))}"
+        ),
+        (
+            f"[PERF] retries: total={int(perf.get('retry_events', 0))} "
+            f"by_kind={json.dumps(perf.get('retries_by_kind', {}), sort_keys=True)} "
+            f"by_outcome={json.dumps(perf.get('retries_by_outcome', {}), sort_keys=True)}"
+        ),
+    ]
+    return lines
+
+
+def write_performance_report(
+    report_path: Path | None,
+    *,
+    wall_clock_s: float,
+    context: Dict[str, Any] | None = None,
+) -> None:
+    if report_path is None:
+        return
+    payload = {
+        "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "wall_clock_s": max(0.0, float(wall_clock_s)),
+        "performance": snapshot_performance_counters(),
+        "summary_lines": format_performance_summary_lines(wall_clock_s=wall_clock_s),
+    }
+    if context:
+        payload["context"] = dict(context)
+    try:
+        write_json_file_atomic(report_path, payload)
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"[WARN] Failed to write performance report {report_path}: {exc}")
+
+
+def append_retry_event(
+    retry_log_path: Path | None,
+    *,
+    scope: str,
+    attempt: int | None,
+    retry_limit: int | None,
+    failure_kind: str,
+    outcome: str,
+    details: str = "",
+    planner_run_id: str = "",
+    scenario_name: str = "",
+    gpu: str | None = None,
+    ports: PortBundle | None = None,
+) -> None:
+    _perf_add_retry(failure_kind, outcome)
+    if retry_log_path is None:
+        return
+    retry_log_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "timestamp": dt.datetime.now().isoformat(timespec="seconds"),
+        "scope": str(scope),
+        "attempt": None if attempt is None else int(attempt),
+        "retry_limit": None if retry_limit is None else int(retry_limit),
+        "failure_kind": str(failure_kind or "unknown"),
+        "outcome": str(outcome or "unknown"),
+        "details": str(details or ""),
+        "planner_run_id": str(planner_run_id or ""),
+        "scenario_name": str(scenario_name or ""),
+        "gpu": None if gpu is None else str(gpu),
+        "world_port": None if ports is None else int(ports.port),
+        "tm_port": None if ports is None else int(ports.tm_port),
+    }
+    try:
+        with retry_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"[WARN] Failed to append retry event {retry_log_path}: {exc}")
+
+
+def classify_failure_text_kind(text: str) -> str:
+    lowered = str(text or "").lower()
+    if "cuda_oom" in lowered or ("cuda" in lowered and "out of memory" in lowered):
+        return "cuda_oom"
+    if "no cuda gpus are available" in lowered or "cuda_unavailable" in lowered:
+        return "cuda_unavailable"
+    if "teardown_gate_timeout" in lowered:
+        return "teardown_gate_timeout"
+    if "connection refused" in lowered or "connection reset by peer" in lowered:
+        return "rpc_timeout"
+    if "sensorreceivednodata" in lowered or "sensor took too long" in lowered:
+        return "sensor_failure"
+    if "watchdog" in lowered or "timed out" in lowered or "timeout" in lowered:
+        return "timeout"
+    if "carla" in lowered and "crash" in lowered:
+        return "carla_crash"
+    if "planner_env_error" in lowered or "modulenotfounderror" in lowered:
+        return "planner_env_error"
+    return "generic"
+
+
+def infer_planner_thread_failure_kind(
+    completed: PlannerThreadResult,
+    *,
+    dashboard_state: PlannerDashboardState,
+) -> str:
+    if completed.failure_kind:
+        return str(completed.failure_kind)
+    reason = str(completed.error or "")
+    if not reason and completed.returncode is not None:
+        reason = f"exit_code={completed.returncode}"
+    inferred = classify_failure_text_kind(reason)
+    if inferred != "generic":
+        return inferred
+    tail = _read_text_tail(
+        dashboard_state.log_path,
+        max_bytes=RESULT_LOG_FALLBACK_TAIL_BYTES_DEFAULT,
+    )
+    return classify_failure_text_kind(tail)
 
 
 def load_json_file(path: Path) -> Dict[str, Any]:
@@ -5309,6 +6165,29 @@ def parse_live_ego_route_scores(payload: Dict[str, Any]) -> Dict[int, float]:
     return live_scores
 
 
+def filter_scenario_entries_for_shard(
+    entries: Sequence[Tuple[str, str]],
+    shard_str: str | None,
+) -> List[Tuple[str, str]]:
+    """Return the subset of *entries* that belongs to the given shard.
+
+    *shard_str* has the form ``"INDEX/COUNT"`` (0-based index).  When *None*
+    or when *entries* is empty, the full list is returned unchanged.
+    """
+    if not shard_str or not entries:
+        return list(entries)
+    try:
+        idx_s, cnt_s = shard_str.split("/", 1)
+        shard_idx, shard_cnt = int(idx_s), int(cnt_s)
+    except (ValueError, TypeError):
+        return list(entries)
+    if shard_cnt <= 1:
+        return list(entries)
+    return [
+        entry for i, entry in enumerate(entries) if i % shard_cnt == shard_idx
+    ]
+
+
 def abbreviate_dashboard_text(text: str, max_chars: int) -> str:
     text = str(text or "").strip()
     if len(text) <= max_chars:
@@ -5354,14 +6233,14 @@ def retry_limit_multiplier(retry_limit: int | None) -> int:
 def should_continue_retrying(current_attempt: int, retry_limit: int | None) -> bool:
     normalized = normalize_retry_limit(retry_limit)
     if normalized is None:
-        return True
+        return current_attempt < SCENARIO_RETRY_HARD_CEILING
     return current_attempt < normalized
 
 
 def format_attempt_counter(current_attempt: int, retry_limit: int | None) -> str:
     normalized = normalize_retry_limit(retry_limit)
     if normalized is None:
-        return str(current_attempt)
+        return f"{current_attempt}/{SCENARIO_RETRY_HARD_CEILING}"
     return f"{current_attempt}/{normalized}"
 
 
@@ -5826,7 +6705,11 @@ def validate_planner_child_results(
 
 def result_root_has_terminal_outcomes(result_root: Path, *, ego_count: int) -> bool:
     summary = collect_result_root_progress(result_root, ego_count=ego_count)
-    return summary.terminal_state in ("completed_clean", "completed_recovered")
+    return summary.terminal_state in (
+        "completed_clean",
+        "completed_recovered",
+        "failed_runtime",
+    )
 
 
 def result_roots_have_terminal_outcomes(
@@ -5988,10 +6871,312 @@ def should_retry_failure(
     if failure_kind in ("no_results_written", "no_route_execution", "invalid_no_record", "planner_env_error"):
         return False
     if normalized is None:
-        return True
+        return attempt < SCENARIO_RETRY_HARD_CEILING
     if failure_kind == "generic":
         return attempt < min(normalized, GENERIC_SCENARIO_FAILURE_RETRY_ATTEMPTS)
     return True
+
+
+def apply_gpu_failure_backoff(
+    gpu_state: GPUPlannerState,
+    *,
+    failure_kind: str,
+    args: argparse.Namespace,
+) -> None:
+    kind = str(failure_kind or "").strip().lower()
+    gpu_state.failure_streak += 1
+    gpu_state.success_streak = 0
+    gpu_state.last_failure_kind = kind
+    gpu_state.last_failure_monotonic = time.monotonic()
+    if kind not in {"cuda_oom", "cuda_unavailable"}:
+        return
+    backoff_step = max(1, int(args.oom_concurrency_backoff_step))
+    penalty_step = max(0, int(args.oom_free_mib_penalty_step))
+    old_cap = int(gpu_state.max_concurrency)
+    old_penalty = int(gpu_state.oom_penalty_mib)
+    gpu_state.max_concurrency = max(1, int(gpu_state.max_concurrency) - backoff_step)
+    gpu_state.oom_penalty_mib = max(0, int(gpu_state.oom_penalty_mib) + penalty_step)
+    gpu_state.launch_capacity = min(
+        gpu_state.launch_capacity,
+        max(1, int(gpu_state.max_concurrency)),
+    )
+    print(
+        "[WARN] GPU OOM backoff applied: "
+        f"gpu={gpu_state.gpu} failure={kind} "
+        f"max_concurrency {old_cap}->{gpu_state.max_concurrency}, "
+        f"oom_penalty_mib {old_penalty}->{gpu_state.oom_penalty_mib}."
+    )
+
+
+def apply_gpu_success_recovery(
+    gpu_state: GPUPlannerState,
+    *,
+    args: argparse.Namespace,
+) -> None:
+    gpu_state.success_streak += 1
+    gpu_state.failure_streak = 0
+    target_streak = max(1, int(args.oom_recovery_success_streak))
+    if gpu_state.success_streak < target_streak:
+        return
+    gpu_state.success_streak = 0
+    old_cap = int(gpu_state.max_concurrency)
+    old_penalty = int(gpu_state.oom_penalty_mib)
+    cap_limit = max(1, int(args.auto_workers_max_per_gpu))
+    penalty_decay = max(0, int(args.oom_recovery_penalty_decay_step))
+    gpu_state.max_concurrency = min(cap_limit, int(gpu_state.max_concurrency) + 1)
+    if penalty_decay > 0:
+        gpu_state.oom_penalty_mib = max(0, int(gpu_state.oom_penalty_mib) - penalty_decay)
+    if gpu_state.max_concurrency != old_cap or gpu_state.oom_penalty_mib != old_penalty:
+        print(
+            "[INFO] GPU recovery applied: "
+            f"gpu={gpu_state.gpu} max_concurrency {old_cap}->{gpu_state.max_concurrency}, "
+            f"oom_penalty_mib {old_penalty}->{gpu_state.oom_penalty_mib}."
+        )
+
+
+def decay_stale_oom_penalties(
+    gpu_states: Dict[str | None, GPUPlannerState],
+    *,
+    decay_seconds: float,
+    cap_limit: int,
+    tick_logger: "SchedulerTickLogger | None" = None,
+) -> None:
+    """Age out OOM penalties that have been idle for a while.
+
+    Prevents a single early OOM from permanently throttling a GPU that would
+    otherwise be healthy.  Fully restores ``max_concurrency`` to ``cap_limit``
+    and ``oom_penalty_mib`` to zero once no new failure has arrived in the
+    last ``decay_seconds`` and the GPU is currently idle.
+    """
+    if decay_seconds <= 0.0:
+        return
+    now = time.monotonic()
+    for state in gpu_states.values():
+        if state.gpu is None:
+            continue
+        if state.last_failure_monotonic <= 0.0:
+            continue
+        age_s = now - state.last_failure_monotonic
+        if age_s < decay_seconds:
+            continue
+        if state.active_count > 0:
+            # Don't relax while jobs are still running; wait for them to drain.
+            continue
+        old_cap = int(state.max_concurrency)
+        old_penalty = int(state.oom_penalty_mib)
+        if old_cap >= cap_limit and old_penalty <= 0:
+            continue
+        state.max_concurrency = max(1, int(cap_limit))
+        state.oom_penalty_mib = 0
+        state.failure_streak = 0
+        state.last_failure_kind = ""
+        state.last_failure_monotonic = 0.0
+        print(
+            "[INFO] GPU OOM backoff decayed: "
+            f"gpu={state.gpu} age={age_s:.0f}s "
+            f"max_concurrency {old_cap}->{state.max_concurrency} "
+            f"oom_penalty_mib {old_penalty}->{state.oom_penalty_mib}."
+        )
+        if tick_logger is not None and tick_logger.enabled:
+            tick_logger.log(
+                "oom_backoff_decayed",
+                gpu=str(state.gpu),
+                age_seconds=round(age_s, 2),
+                old_max_concurrency=old_cap,
+                new_max_concurrency=state.max_concurrency,
+                old_penalty_mib=old_penalty,
+            )
+
+
+def bin_pack_launch_plan(
+    *,
+    pending_requests: Sequence["PlannerRequest"],
+    gpu_states: Dict[str | None, GPUPlannerState],
+    gpu_monitor: "GPUMemoryMonitor | None",
+    vram_estimator: PlannerVramEstimator,
+    carla_fixed_mib: int,
+    safety_buffer_mib: int,
+    min_free_mib: int,
+    active_non_colmdriver_threads: int,
+    deferred_run_ids: set[str],
+    managed_carla_single_worker_mode: bool,
+    allow_multi_carla: bool,
+    start_carla: bool,
+    tick_logger: "SchedulerTickLogger | None",
+) -> Tuple[List[Tuple["PlannerRequest", str | None, int]], List[Dict[str, Any]]]:
+    """Compute which pending planners should launch this tick.
+
+    Returns a list of ``(planner_request, gpu_id, vram_reservation_mib)`` tuples
+    and a parallel list of rejection records (for debugging / instrumentation).
+
+    The packing strategy is First-Fit-Decreasing on estimated VRAM: the
+    biggest planner is placed on the GPU with the most remaining headroom
+    first, then smaller ones fill whatever gaps remain.  Reserved MiB is
+    tracked locally so a single dispatch tick can place multiple jobs
+    against a GPU before nvidia-smi catches up.
+    """
+    decisions: List[Tuple["PlannerRequest", str | None, int]] = []
+    rejections: List[Dict[str, Any]] = []
+
+    # Snapshot live GPU stats once for consistency across the tick.
+    gpu_snapshot: Dict[str | None, GPUMemoryStats | None] = {}
+    for gpu_id, state in gpu_states.items():
+        if gpu_id is None:
+            gpu_snapshot[None] = None
+            continue
+        if gpu_monitor is not None:
+            gpu_snapshot[gpu_id] = gpu_monitor.stats_for(gpu_id)
+        else:
+            gpu_snapshot[gpu_id] = state.last_stats
+
+    # Local copy of reservations so we can tentatively commit within this tick.
+    local_reserved: Dict[str | None, int] = {
+        gpu_id: int(state.reserved_mib) for gpu_id, state in gpu_states.items()
+    }
+    local_active: Dict[str | None, int] = {
+        gpu_id: int(state.active_count) for gpu_id, state in gpu_states.items()
+    }
+    # Track whether a CARLA server has already been counted on this GPU
+    # (either because one is running, or because we plan to launch one
+    # alongside a planner on it).
+    # When start_carla is True: each child launches its own CARLA, so we
+    # must account for CARLA VRAM per launch.
+    # When start_carla is False: external CARLA VRAM is already reflected
+    # in nvidia-smi's free_mib, so we add zero.
+    per_launch_carla_mib = int(carla_fixed_mib) if start_carla else 0
+
+    # Sort pending biggest-first; ties broken by original order for
+    # reproducibility.
+    sorted_pending = sorted(
+        enumerate(pending_requests),
+        key=lambda item: (
+            -int(vram_estimator.estimate(item[1].name)),
+            item[0],
+        ),
+    )
+
+    for _, req in sorted_pending:
+        # Deferred CoLMDriver gating: colmdriver variants cannot launch until
+        # all non-colmdriver planners have drained.
+        if req.run_id in deferred_run_ids and active_non_colmdriver_threads > 0:
+            rejections.append(
+                {
+                    "run_id": req.run_id,
+                    "reason": "deferred_phase_gating",
+                    "active_non_colmdriver_threads": active_non_colmdriver_threads,
+                }
+            )
+            continue
+
+        planner_vram = int(vram_estimator.estimate(req.name))
+        best_gpu_id: str | None = None
+        best_free_after: int | None = None
+        gpu_reject_reasons: List[Dict[str, Any]] = []
+
+        for gpu_id, state in gpu_states.items():
+            if state.gpu is None:
+                # No CUDA slot (e.g. dry run); allow at most one job total.
+                if local_active[gpu_id] >= state.max_concurrency:
+                    gpu_reject_reasons.append(
+                        {"gpu": None, "reason": "no_gpu_active_full"}
+                    )
+                    continue
+                best_gpu_id = None
+                best_free_after = None
+                break
+
+            max_concurrency = max(1, int(state.max_concurrency))
+            if managed_carla_single_worker_mode and not allow_multi_carla:
+                # Even in managed-single-carla mode, we can still bin-pack
+                # multiple planners against the same CARLA (they share it),
+                # but we cap at max_concurrency.
+                pass
+            if local_active[gpu_id] >= max_concurrency:
+                gpu_reject_reasons.append(
+                    {
+                        "gpu": gpu_id,
+                        "reason": "max_concurrency_reached",
+                        "active": local_active[gpu_id],
+                        "cap": max_concurrency,
+                    }
+                )
+                continue
+
+            stats = gpu_snapshot.get(gpu_id)
+            if stats is None:
+                gpu_reject_reasons.append(
+                    {"gpu": gpu_id, "reason": "no_vram_snapshot"}
+                )
+                continue
+
+            free_mib = int(stats.free_mib)
+            # Subtract reservations we haven't yet seen reflected by nvidia-smi.
+            # Active reservations already consume VRAM visible in stats.free_mib,
+            # so only the *delta* from launches within this tick matters.
+            pending_reservation = int(local_reserved[gpu_id]) - int(state.reserved_mib)
+            effective_free = free_mib - max(0, pending_reservation)
+
+            cost = planner_vram + per_launch_carla_mib
+            cost += int(state.oom_penalty_mib)
+
+            required_floor = int(min_free_mib) + int(safety_buffer_mib)
+            if effective_free - cost < required_floor:
+                gpu_reject_reasons.append(
+                    {
+                        "gpu": gpu_id,
+                        "reason": "insufficient_free_mib",
+                        "free_mib": free_mib,
+                        "effective_free_mib": effective_free,
+                        "planner_cost_mib": cost,
+                        "required_floor_mib": required_floor,
+                    }
+                )
+                continue
+
+            free_after = effective_free - cost
+            # Prefer the GPU that leaves the largest absolute headroom after
+            # placement (worst-fit from the chosen planner's perspective).
+            # This tends to leave room on the same GPU for a *different*
+            # planner later while still keeping concurrency high elsewhere.
+            if best_free_after is None or free_after > best_free_after:
+                best_free_after = free_after
+                best_gpu_id = gpu_id
+
+        if best_gpu_id is None:
+            rejections.append(
+                {
+                    "run_id": req.run_id,
+                    "planner": req.name,
+                    "planner_vram_estimate_mib": planner_vram,
+                    "gpu_rejections": gpu_reject_reasons,
+                }
+            )
+            continue
+
+        # Commit locally.
+        state = gpu_states[best_gpu_id]
+        cost = planner_vram + per_launch_carla_mib
+        cost += int(state.oom_penalty_mib)
+        local_reserved[best_gpu_id] = int(local_reserved[best_gpu_id]) + int(cost)
+        local_active[best_gpu_id] = int(local_active[best_gpu_id]) + 1
+        decisions.append((req, best_gpu_id, cost))
+
+        if tick_logger is not None and tick_logger.enabled:
+            stats = gpu_snapshot.get(best_gpu_id)
+            tick_logger.log(
+                "launch_decision",
+                run_id=req.run_id,
+                planner=req.name,
+                gpu=str(best_gpu_id) if best_gpu_id is not None else None,
+                planner_vram_estimate_mib=planner_vram,
+                reserved_mib=int(cost),
+                gpu_free_mib=int(stats.free_mib) if stats is not None else None,
+                gpu_used_mib=int(stats.used_mib) if stats is not None else None,
+                gpu_total_mib=int(stats.total_mib) if stats is not None else None,
+                active_after=int(local_active[best_gpu_id]),
+            )
+
+    return decisions, rejections
 
 
 class MultiPlannerDashboard:
@@ -6004,8 +7189,10 @@ class MultiPlannerDashboard:
         host: str,
         gpu_ids: Sequence[str],
         scenario_entries: Sequence[Tuple[str, str]],
+        per_planner_scenario_entries: Dict[str, List[Tuple[str, str]]] | None = None,
         state_lock: threading.Lock,
         refresh_seconds: float,
+        status_snapshot_interval_s: float,
         stall_output_timeout_s: float,
         enable: bool,
     ) -> None:
@@ -6015,46 +7202,44 @@ class MultiPlannerDashboard:
         self.host = str(host)
         self.gpu_ids = [str(gpu) for gpu in gpu_ids if str(gpu).strip()]
         self.scenario_entries = list(scenario_entries)
+        self._per_planner_scenario_entries: Dict[str, List[Tuple[str, str]]] = dict(per_planner_scenario_entries or {})
         self.state_lock = state_lock
         self.refresh_seconds = max(0.2, float(refresh_seconds))
+        self.status_snapshot_interval_s = max(0.0, float(status_snapshot_interval_s))
         self.stall_output_timeout_s = max(1.0, float(stall_output_timeout_s))
         self.enable = bool(enable and tqdm is not None)
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self._status_snapshot_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
         self._overview_bar = None
         self._planner_bars: Dict[str, Any] = {}
         self._ego_bars: Dict[Tuple[str, int], Any] = {}
-        self._overview_cache: str | None = None
         self._planner_cache: Dict[str, Tuple[str, float, float]] = {}
         self._ego_cache: Dict[Tuple[str, int], Tuple[str, int, int]] = {}
+        self._overview_cache: Tuple[str, int, int] | None = None
 
     def start(self) -> None:
         if not self.enable:
             return
 
-        term_cols = shutil.get_terminal_size((120, 30)).columns
-        dashboard_ncols = max(80, min(180, int(term_cols) - 2))
         position = 0
+        self._overview_bar = tqdm(
+            total=1,
+            position=position,
+            leave=True,
+            dynamic_ncols=True,
+            bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt}",
+        )
+        position += 1
         for run_id in self.planner_order:
             self._planner_bars[run_id] = tqdm(
                 total=1,
                 position=position,
                 leave=True,
-                dynamic_ncols=False,
-                ncols=dashboard_ncols,
+                dynamic_ncols=True,
                 bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt}",
             )
             position += 1
-            for ego_idx in range(self.ego_count):
-                self._ego_bars[(run_id, ego_idx)] = tqdm(
-                    total=100,
-                    position=position,
-                    leave=True,
-                    dynamic_ncols=False,
-                    ncols=dashboard_ncols,
-                    bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt}",
-                )
-                position += 1
 
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -6065,9 +7250,12 @@ class MultiPlannerDashboard:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=5.0)
-        for bar in [*self._planner_bars.values(), *self._ego_bars.values()]:
+        for bar in [self._overview_bar, *self._planner_bars.values()]:
             if bar is not None:
-                bar.close()
+                try:
+                    bar.close()
+                except Exception:  # pylint: disable=broad-except
+                    pass
 
     def _loop(self) -> None:
         while not self._stop_event.wait(self.refresh_seconds):
@@ -6083,6 +7271,7 @@ class MultiPlannerDashboard:
         running = 0
         finished = 0
         failed = 0
+        interrupted = 0
 
         with self.state_lock:
             snapshot = {
@@ -6121,7 +7310,17 @@ class MultiPlannerDashboard:
 
         for run_id in self.planner_order:
             state = snapshot[run_id]
-            status_payload = load_json_file(state.status_path)
+            now_mono = time.monotonic()
+            cached_status = self._status_snapshot_cache.get(run_id)
+            if (
+                cached_status is not None
+                and self.status_snapshot_interval_s > 0.0
+                and (now_mono - cached_status[0]) < self.status_snapshot_interval_s
+            ):
+                status_payload = dict(cached_status[1])
+            else:
+                status_payload = load_json_file(state.status_path)
+                self._status_snapshot_cache[run_id] = (now_mono, dict(status_payload))
             live_ego_route_scores: Dict[int, float] = {}
             if status_payload:
                 try:
@@ -6159,10 +7358,11 @@ class MultiPlannerDashboard:
                     pass
                 live_ego_route_scores = parse_live_ego_route_scores(status_payload)
 
-            if self.scenario_entries:
+            _planner_entries = self._per_planner_scenario_entries.get(run_id, self.scenario_entries)
+            if _planner_entries:
                 scenario_summaries: List[Tuple[str, str, ResultRootProgress]] = []
                 completed_scenarios = 0
-                for label, relative_dir in self.scenario_entries:
+                for label, relative_dir in _planner_entries:
                     summary = collect_result_root_progress(
                         state.results_dir / relative_dir,
                         ego_count=self.ego_count,
@@ -6200,8 +7400,8 @@ class MultiPlannerDashboard:
                     state.current_scenario_results_subdir = relative_dir
                     state.route_progress = summary.route_progress
                     state.entry_status = summary.entry_status or state.entry_status or state.phase
-                    state.ego_route_scores = dict(summary.ego_route_scores)
-                    state.ego_status = dict(summary.ego_status)
+                    state.ego_route_scores = {}
+                    state.ego_status = {}
             else:
                 active_relative_dir = state.current_scenario_results_subdir or state.default_results_subdir
                 active_root = state.results_dir / active_relative_dir if active_relative_dir else state.results_dir
@@ -6212,8 +7412,8 @@ class MultiPlannerDashboard:
                 )
                 state.route_progress = summary.route_progress
                 state.entry_status = summary.entry_status or state.entry_status or state.phase
-                state.ego_route_scores = dict(summary.ego_route_scores)
-                state.ego_status = dict(summary.ego_status)
+                state.ego_route_scores = {}
+                state.ego_status = {}
                 state.scenario_total = max(1, state.scenario_total)
                 if state.scenario_total <= 1:
                     state.scenario_index = 1 if state.phase != "queued" else 0
@@ -6248,8 +7448,12 @@ class MultiPlannerDashboard:
                     failed += 1
             elif phase == "failed":
                 failed += 1
+            elif phase == "interrupted":
+                interrupted += 1
 
-            planner_bar = self._planner_bars[run_id]
+            planner_bar = self._planner_bars.get(run_id)
+            if planner_bar is None:
+                continue
             route_total = max(1, int(state.route_progress[1]))
             route_value = max(0, min(int(state.route_progress[0]), route_total))
             live_route_scores = [
@@ -6286,15 +7490,15 @@ class MultiPlannerDashboard:
                 health = "ok" if state.returncode == 0 else "failed"
             elif phase == "failed":
                 health = "failed"
+            elif phase == "interrupted":
+                health = "interrupted"
             scenario_label = ""
             if state.scenario_total > 1:
                 scenario_idx = state.scenario_index or min(
                     state.completed_scenarios + 1,
                     state.scenario_total,
                 )
-                scenario_label = (
-                    f" scn={scenario_idx}/{state.scenario_total}"
-                )
+                scenario_label = f" scn={scenario_idx}/{state.scenario_total}"
             attempt_label = ""
             if state.current_attempt is not None:
                 attempt_label = (
@@ -6303,57 +7507,51 @@ class MultiPlannerDashboard:
             carla_status = "-"
             if phase in ("launching", "running"):
                 carla_status = "up" if state.carla_up else "down" if state.carla_up is not None else "-"
-            run_label = abbreviate_dashboard_text(run_id, 14)
             planner_line = (
-                f"{run_label:<14} {phase:<9} gpu={state.gpu or '-':<3} "
+                f"{run_id} {phase} gpu={state.gpu or '-'} "
                 f"carla={carla_status} health={health}"
                 f"{scenario_label}"
             )
+            if state.current_scenario:
+                planner_line += f" [{state.current_scenario}]"
             if live_route_score is not None:
                 planner_line += f" rc={live_route_score:4.1f}%"
             planner_line += attempt_label
-            planner_desc = abbreviate_dashboard_text(planner_line, 70)
-            planner_key = (planner_desc, planner_value, planner_total)
+            planner_key = (planner_line, planner_value, planner_total)
             if self._planner_cache.get(run_id) != planner_key:
                 planner_bar.total = planner_total
                 planner_bar.n = planner_value
-                planner_bar.set_description_str(planner_desc)
+                planner_bar.set_description_str(planner_line)
                 planner_bar.refresh()
                 self._planner_cache[run_id] = planner_key
 
-            for ego_idx in range(self.ego_count):
-                ego_bar = self._ego_bars[(run_id, ego_idx)]
-                ego_score = max(0.0, min(100.0, float(state.ego_route_scores.get(ego_idx, 0.0))))
-                ego_scenario = ""
-                if state.scenario_total > 1:
-                    scenario_idx = state.scenario_index or min(
-                        state.completed_scenarios + 1,
-                        state.scenario_total,
-                    )
-                    ego_scenario = (
-                        f"s{scenario_idx}/{state.scenario_total} "
-                        f"{abbreviate_dashboard_text(state.current_scenario or '-', 10)} "
-                    )
-                ego_status = format_dashboard_ego_status(
-                    state.ego_status.get(ego_idx, state.phase),
-                    state.phase,
+        # Overview bar: aggregate scenario progress across all planners.
+        total_scenario_work = 0
+        completed_scenario_work = 0
+        with self.state_lock:
+            for st in self.planner_states.values():
+                total_scenario_work += max(1, st.scenario_total)
+                completed_scenario_work += st.completed_scenarios
+        gpu_summary_parts: List[str] = []
+        for gpu_id in self.gpu_ids:
+            stats = gpu_stats.get(gpu_id)
+            if stats is not None:
+                used_pct = 100 * stats.used_mib // max(1, stats.total_mib)
+                gpu_summary_parts.append(
+                    f"GPU{gpu_id}:{stats.used_mib}MiB({used_pct}%)"
                 )
-                ego_desc = abbreviate_dashboard_text(
-                    (
-                        f"  {run_label}/ego{ego_idx:<2} "
-                        f"{abbreviate_dashboard_text(ego_scenario + ego_status, 26):<26} "
-                        f"rs={ego_score:5.1f}%"
-                    ),
-                    70,
-                )
-                ego_value = int(round(ego_score))
-                ego_key = (ego_desc, ego_value, 100)
-                if self._ego_cache.get((run_id, ego_idx)) != ego_key:
-                    ego_bar.n = ego_value
-                    ego_bar.total = 100
-                    ego_bar.set_description_str(ego_desc)
-                    ego_bar.refresh()
-                    self._ego_cache[(run_id, ego_idx)] = ego_key
+        gpu_suffix = f"  {' '.join(gpu_summary_parts)}" if gpu_summary_parts else ""
+        overview_desc = (
+            f"Overall run={running} q={queued} done={finished} fail={failed}"
+            f"{gpu_suffix}"
+        )
+        overview_key = (overview_desc, completed_scenario_work, max(1, total_scenario_work))
+        if self._overview_bar is not None and self._overview_cache != overview_key:
+            self._overview_bar.total = max(1, total_scenario_work)
+            self._overview_bar.n = min(completed_scenario_work, max(1, total_scenario_work))
+            self._overview_bar.set_description_str(overview_desc)
+            self._overview_bar.refresh()
+            self._overview_cache = overview_key
 
 def infer_base_results_tag(args: argparse.Namespace) -> str:
     if args.results_tag:
@@ -7535,6 +8733,7 @@ def allocate_planner_slots(
 
 def main() -> None:
     global _active_carla_manager, _active_crosswalk_worker, _active_colmdriver_vllm_manager
+    global _GPU_QUERY_CACHE_TTL_S
 
     # ---- FD tracker: activate via env var FD_TRACK=1 ----
     try:
@@ -7543,7 +8742,11 @@ def main() -> None:
     except Exception:
         _fdt = None  # type: ignore[assignment]
 
+    run_start_monotonic = time.monotonic()
     args = parse_args()
+    _GPU_QUERY_CACHE_TTL_S = max(0.0, float(args.gpu_query_cache_ttl))
+    with _GPU_QUERY_CACHE_LOCK:
+        _GPU_QUERY_CACHE.clear()
     os.environ["RUN_CUSTOM_EVAL_RECOVERY_MODE"] = str(args.recovery_mode or "off")
     os.environ["CARLA_RECOVERY_STRICT_RECORD_ACCOUNTING"] = (
         "1" if str(args.recovery_mode or "").strip().lower() == "publication_safe" else "0"
@@ -7748,14 +8951,30 @@ def main() -> None:
         tm_port_offset=tm_port_offset,
     )
 
+    multi_planner_mode = len(planner_requests) > 1 or any(
+        req.conda_env for req in planner_requests
+    )
     colmdriver_vllm_manager: ColmDriverVLLMManager | None = None
     colmdriver_vllm_needed = planner_requests_need_colmdriver_vllm(planner_requests)
+    defer_colmdriver_vllm_phase = False
+    colmdriver_vllm_started = True
+    colmdriver_planner_run_ids = {
+        req.run_id for req in planner_requests if req.name in COLMDRIVER_VLLM_PLANNERS
+    }
     if args.start_colmdriver_vllm and not colmdriver_vllm_needed:
         print(
             "[WARN] --start-colmdriver-vllm was provided, but no CoLMDriver planner "
             "was requested. Ignoring it."
         )
     if args.start_colmdriver_vllm and colmdriver_vllm_needed:
+        has_non_colmdriver_planners = any(
+            req.name not in COLMDRIVER_VLLM_PLANNERS for req in planner_requests
+        )
+        defer_colmdriver_vllm_phase = bool(
+            args.defer_colmdriver_vllm_start
+            and multi_planner_mode
+            and has_non_colmdriver_planners
+        )
         reservation = select_colmdriver_vllm_gpus(requested_gpus)
         planner_gpu_requests = list(reservation.scheduler_gpus)
         print(
@@ -7781,19 +9000,31 @@ def main() -> None:
             ),
         )
         if args.dry_run:
+            if defer_colmdriver_vllm_phase:
+                print(
+                    "[INFO] Dry run: would defer shared CoLMDriver vLLM startup until "
+                    "the deferred CoLMDriver planner phase begins "
+                    f"(VLM gpu={reservation.vlm_gpu} port={args.vlm_port}, "
+                    f"LLM gpu={reservation.llm_gpu} port={args.llm_port})."
+                )
+            else:
+                print(
+                    "[INFO] Dry run: would start shared CoLMDriver vLLM services on "
+                    f"VLM gpu={reservation.vlm_gpu} port={args.vlm_port} and "
+                    f"LLM gpu={reservation.llm_gpu} port={args.llm_port}."
+                )
+            colmdriver_vllm_started = True
+        elif defer_colmdriver_vllm_phase:
             print(
-                "[INFO] Dry run: would start shared CoLMDriver vLLM services on "
-                f"VLM gpu={reservation.vlm_gpu} port={args.vlm_port} and "
-                f"LLM gpu={reservation.llm_gpu} port={args.llm_port}."
+                "[INFO] Deferring shared CoLMDriver vLLM startup until non-CoLMDriver "
+                "planner queues are drained."
             )
+            colmdriver_vllm_started = False
         else:
             colmdriver_vllm_manager.start()
             _active_colmdriver_vllm_manager = colmdriver_vllm_manager
             _install_signal_handlers()
-
-    multi_planner_mode = len(planner_requests) > 1 or any(
-        req.conda_env for req in planner_requests
-    )
+            colmdriver_vllm_started = True
     if not multi_planner_mode and planner_gpu_requests:
         if len(planner_gpu_requests) == 1:
             chosen_gpu = planner_gpu_requests[0]
@@ -7814,7 +9045,20 @@ def main() -> None:
         print(f"[INFO] Using GPU {chosen_gpu} for this evaluation run.")
 
     if multi_planner_mode:
-        slot_count = max(1, len(planner_requests))
+        # Decouple slot count from planner count.  We allocate enough CARLA
+        # port bundles to support running up to ``per_gpu_cap * len(gpus)``
+        # concurrent jobs, so the scheduler can pack multiple planners onto
+        # the same GPU (and multiple CARLAs onto the same GPU) without ever
+        # hitting an artificial slot ceiling.  Each planner still lives in
+        # one slot at a time, so the effective ceiling is ``min(launchable,
+        # per_gpu_cap * num_gpus)``.
+        _per_gpu_cap_hint = max(1, int(args.auto_workers_max_per_gpu))
+        _num_gpus_hint = max(1, len(requested_gpus) if requested_gpus else 1)
+        slot_count = max(
+            len(planner_requests),
+            _per_gpu_cap_hint * _num_gpus_hint,
+        )
+        slot_count = max(1, slot_count)
         slot_templates = allocate_planner_slots(
             host=str(args.host),
             preferred_port=int(args.port),
@@ -7824,11 +9068,38 @@ def main() -> None:
             step=int(args.carla_port_step),
         )
         slot_pool: deque[PlannerSlot] = deque(slot_templates)
+        external_carla_mode = bool(not args.start_carla and not args.dry_run)
         if len(planner_requests) > 1 and not args.start_carla:
             print(
                 "[WARN] Multi-planner mode without --start-carla assumes external CARLA servers "
                 "exist on the assigned port pairs."
             )
+        if external_carla_mode:
+            reachable_slots: List[PlannerSlot] = []
+            unreachable_world_ports: List[int] = []
+            for slot in slot_templates:
+                world_port = int(slot.ports.port)
+                if is_port_open(str(args.host), world_port, timeout=1.0):
+                    reachable_slots.append(slot)
+                else:
+                    unreachable_world_ports.append(world_port)
+            if not reachable_slots:
+                checked_ports = ", ".join(
+                    str(int(slot.ports.port)) for slot in slot_templates
+                )
+                raise RuntimeError(
+                    "External CARLA preflight failed in multi-planner mode: "
+                    f"no world ports are reachable on host={args.host}. "
+                    f"Checked ports: [{checked_ports}]. "
+                    "Start external CARLA on these ports or rerun with --start-carla."
+                )
+            if len(reachable_slots) < len(slot_templates):
+                slot_pool = deque(reachable_slots)
+                dropped = ", ".join(str(port) for port in unreachable_world_ports)
+                print(
+                    "[WARN] External CARLA preflight filtered unavailable world ports: "
+                    f"{dropped}. Scheduler will use only reachable slots."
+                )
 
         planner_routes_dir: Path | None = None
         planner_scenario_name = args.scenario_name
@@ -7860,7 +9131,50 @@ def main() -> None:
         active_runners: list[MonitoredSubprocessRunner] = []
         active_runners_lock = threading.Lock()
         planner_state_lock = threading.Lock()
-        planner_pending: deque[PlannerRequest] = deque(planner_requests)
+        deferred_colmdriver_run_ids: set[str] = set()
+        if defer_colmdriver_vllm_phase:
+            non_colmdriver_requests = [
+                req for req in planner_requests if req.run_id not in colmdriver_planner_run_ids
+            ]
+            deferred_colmdriver_requests = [
+                req for req in planner_requests if req.run_id in colmdriver_planner_run_ids
+            ]
+            planner_pending: deque[PlannerRequest] = deque(non_colmdriver_requests)
+            planner_pending_deferred: deque[PlannerRequest] = deque(deferred_colmdriver_requests)
+            deferred_colmdriver_run_ids = {
+                req.run_id for req in deferred_colmdriver_requests
+            }
+            print(
+                "[INFO] Deferred CoLMDriver scheduler phase enabled: "
+                f"non_colmdriver={len(non_colmdriver_requests)} "
+                f"colmdriver_deferred={len(deferred_colmdriver_requests)}."
+            )
+        else:
+            planner_pending = deque(planner_requests)
+            planner_pending_deferred = deque()
+        active_non_colmdriver_threads = 0
+
+        def has_pending_planner_requests() -> bool:
+            return bool(planner_pending or planner_pending_deferred)
+
+        def has_launchable_planner_requests() -> bool:
+            if planner_pending:
+                return True
+            return bool(planner_pending_deferred) and active_non_colmdriver_threads <= 0
+
+        def pop_next_pending_planner() -> PlannerRequest | None:
+            if planner_pending:
+                return planner_pending.popleft()
+            if planner_pending_deferred and active_non_colmdriver_threads <= 0:
+                return planner_pending_deferred.popleft()
+            return None
+
+        def requeue_pending_planner(request: PlannerRequest) -> None:
+            if request.run_id in deferred_colmdriver_run_ids:
+                planner_pending_deferred.append(request)
+            else:
+                planner_pending.append(request)
+
         planner_relaunch_counts: Dict[str, int] = {
             planner_request.run_id: 0 for planner_request in planner_requests
         }
@@ -7879,6 +9193,16 @@ def main() -> None:
         planner_results_root = (
             repo_root / "results" / "results_driving_custom" / planner_base_results_tag
         )
+        planner_retry_log_path = planner_results_root / "_retry_events.jsonl"
+        planner_retry_limit = normalize_retry_limit(args.planner_retry_limit)
+        planner_perf_report_path: Path | None = None
+        if args.perf_report_file:
+            perf_candidate = Path(str(args.perf_report_file))
+            planner_perf_report_path = (
+                perf_candidate
+                if perf_candidate.is_absolute()
+                else planner_results_root / perf_candidate
+            )
         planner_logs_dir = planner_results_root / "_planner_logs"
         dashboard_enabled = bool(args.planner_dashboard and not args.dry_run and tqdm is not None)
         if args.planner_dashboard and not args.dry_run and tqdm is None:
@@ -7913,23 +9237,33 @@ def main() -> None:
                 "defaulting to 1."
             )
 
-        planner_dashboard_states: Dict[str, PlannerDashboardState] = {
-            planner_request.run_id: PlannerDashboardState(
+        # Compute per-planner scenario entries (sharded planners get their subset).
+        _per_planner_scenario_entries: Dict[str, List[Tuple[str, str]]] = {}
+        for planner_request in planner_requests:
+            _per_planner_scenario_entries[planner_request.run_id] = (
+                filter_scenario_entries_for_shard(
+                    dashboard_scenario_entries,
+                    planner_request.scenario_shard,
+                )
+            )
+
+        planner_dashboard_states: Dict[str, PlannerDashboardState] = {}
+        for planner_request in planner_requests:
+            _entries = _per_planner_scenario_entries[planner_request.run_id]
+            planner_dashboard_states[planner_request.run_id] = PlannerDashboardState(
                 planner_request=planner_request,
                 results_dir=planner_results_root / planner_request.run_id,
                 log_path=planner_logs_dir / f"{planner_request.run_id}.log",
                 status_path=planner_results_root / planner_request.run_id / "_dashboard_status.json",
                 default_results_subdir=str(args.results_subdir or ""),
-                scenario_total=max(1, len(dashboard_scenario_entries)),
-                current_scenario=dashboard_scenario_entries[0][0] if dashboard_scenario_entries else "",
+                scenario_total=max(1, len(_entries)),
+                current_scenario=_entries[0][0] if _entries else "",
                 current_scenario_results_subdir=(
-                    dashboard_scenario_entries[0][1]
-                    if dashboard_scenario_entries
+                    _entries[0][1]
+                    if _entries
                     else str(args.results_subdir or "")
                 ),
             )
-            for planner_request in planner_requests
-        }
         for dashboard_state in planner_dashboard_states.values():
             if not args.dry_run and dashboard_state.status_path.exists():
                 try:
@@ -7943,8 +9277,10 @@ def main() -> None:
             host=str(args.host),
             gpu_ids=planner_gpu_requests,
             scenario_entries=dashboard_scenario_entries,
+            per_planner_scenario_entries=_per_planner_scenario_entries,
             state_lock=planner_state_lock,
             refresh_seconds=float(args.planner_dashboard_refresh_seconds),
+            status_snapshot_interval_s=float(args.planner_status_snapshot_interval),
             stall_output_timeout_s=float(args.scenario_stall_output_timeout),
             enable=dashboard_enabled,
         )
@@ -7953,13 +9289,46 @@ def main() -> None:
             args.start_carla and not args.allow_multiple_carlas_per_gpu
         )
         scheduler_gpu_ids: List[str | None] = planner_gpu_requests[:] if planner_gpu_requests else [None]
+        default_gpu_max_concurrency = max(1, int(args.auto_workers_max_per_gpu))
+        # When the VRAM-aware scheduler is active (default), always start with
+        # the full cap — the bin-packer's VRAM checks are the real gate.
+        # Only fall back to 1 if VRAM-aware is disabled AND managed_carla mode
+        # would restrict concurrency.
+        _init_max_concurrency = default_gpu_max_concurrency
+        if not args.vram_aware_scheduler and managed_carla_single_worker_mode:
+            _init_max_concurrency = 1
         gpu_states: Dict[str | None, GPUPlannerState] = {
-            gpu: GPUPlannerState(gpu=gpu, launch_capacity=1)
+            gpu: GPUPlannerState(
+                gpu=gpu,
+                launch_capacity=1,
+                max_concurrency=_init_max_concurrency,
+            )
             for gpu in scheduler_gpu_ids
         }
 
         if planner_gpu_requests:
-            if managed_carla_single_worker_mode:
+            # When the VRAM-aware scheduler is active, skip expensive blocking
+            # settle probes.  A single fast nvidia-smi call primes the GPU
+            # stats; the background GPUMemoryMonitor refines them continuously.
+            if args.vram_aware_scheduler and not args.dry_run:
+                _fast_stats = query_gpu_memory_stats(planner_gpu_requests)
+                for gpu in planner_gpu_requests:
+                    gpu_state = gpu_states[gpu]
+                    stats = _fast_stats.get(gpu)
+                    if stats is not None:
+                        gpu_state.last_stats = stats
+                        gpu_state.telemetry_available = True
+                        gpu_state.last_probe_source = "fast_prime"
+                    else:
+                        gpu_state.last_probe_source = "fast_prime_unavailable"
+                    if stats is not None and not dashboard_enabled:
+                        print(
+                            f"[INFO] GPU {gpu}: free={stats.free_mib} MiB "
+                            f"used={stats.used_mib} MiB "
+                            f"total={stats.total_mib} MiB "
+                            f"max_concurrency={gpu_state.max_concurrency}"
+                        )
+            elif managed_carla_single_worker_mode:
                 if not dashboard_enabled:
                     print(
                         "[INFO] Managed CARLA multi-planner mode caps concurrency at one planner "
@@ -7970,9 +9339,12 @@ def main() -> None:
                         "managed CARLA each."
                     )
                 for gpu in planner_gpu_requests:
+                    gpu_state = gpu_states[gpu]
                     state = refresh_gpu_launch_capacity(
-                        gpu_states[gpu],
+                        gpu_state,
                         min_free_mib=int(args.auto_workers_min_free_mib),
+                        max_concurrency=gpu_state.max_concurrency,
+                        extra_min_free_mib=gpu_state.oom_penalty_mib,
                         settle_timeout_s=float(args.auto_workers_settle_timeout),
                         poll_seconds=float(args.auto_workers_poll_seconds),
                         stable_samples=int(args.auto_workers_stable_samples),
@@ -8016,9 +9388,12 @@ def main() -> None:
                         f"settle_timeout={float(args.auto_workers_settle_timeout):.1f}s)."
                     )
                 for gpu in planner_gpu_requests:
+                    gpu_state = gpu_states[gpu]
                     state = refresh_gpu_launch_capacity(
-                        gpu_states[gpu],
+                        gpu_state,
                         min_free_mib=int(args.auto_workers_min_free_mib),
+                        max_concurrency=gpu_state.max_concurrency,
+                        extra_min_free_mib=gpu_state.oom_penalty_mib,
                         settle_timeout_s=float(args.auto_workers_settle_timeout),
                         poll_seconds=float(args.auto_workers_poll_seconds),
                         stable_samples=int(args.auto_workers_stable_samples),
@@ -8030,7 +9405,9 @@ def main() -> None:
                             f"{gpu}: free={state.last_stats.free_mib} MiB "
                             f"used={state.last_stats.used_mib} MiB "
                             f"total={state.last_stats.total_mib} MiB "
-                            f"launch_capacity={state.launch_capacity}"
+                            f"launch_capacity={state.launch_capacity} "
+                            f"max_concurrency={state.max_concurrency} "
+                            f"oom_penalty_mib={state.oom_penalty_mib}"
                         )
                     elif not dashboard_enabled:
                         print(
@@ -8047,6 +9424,10 @@ def main() -> None:
                         forced_state.launch_capacity,
                         forced_state.active_count + 1,
                     )
+                    forced_state.launch_capacity = min(
+                        forced_state.launch_capacity,
+                        max(1, int(forced_state.max_concurrency)),
+                    )
                     if not dashboard_enabled:
                         print(
                             "[WARN] No GPU met the current free-VRAM threshold. "
@@ -8060,6 +9441,7 @@ def main() -> None:
                     )
                 for gpu in planner_gpu_requests:
                     gpu_states[gpu].launch_capacity = 1
+                    gpu_states[gpu].max_concurrency = 1
                     gpu_states[gpu].last_probe_source = (
                         "dry_run" if args.dry_run else "disabled"
                     )
@@ -8091,6 +9473,166 @@ def main() -> None:
                     )
                 scheduler_gpu_ids = sorted_ids
 
+        # ---- VRAM-aware scheduler infrastructure --------------------------------
+        vram_estimator_cache_path = Path(str(args.planner_vram_estimate_cache)).expanduser()
+        vram_estimator = PlannerVramEstimator(
+            cache_path=vram_estimator_cache_path,
+            seed=PLANNER_VRAM_ESTIMATE_MIB,
+        )
+        # Apply any command-line overrides.
+        for raw in args.planner_vram_estimate_mib or []:
+            raw_str = str(raw).strip()
+            if not raw_str or "=" not in raw_str:
+                continue
+            name_part, _, value_part = raw_str.partition("=")
+            name_part = name_part.strip()
+            try:
+                value_int = int(float(value_part.strip()))
+            except (TypeError, ValueError):
+                continue
+            if name_part and value_int > 0:
+                # Re-seed the in-memory estimate; the bump preserves the
+                # observation count so the cache stays meaningful.
+                vram_estimator.observe_peak(name_part, value_int)
+
+        # Background GPU memory monitor — replaces inline blocking nvidia-smi
+        # settle waits in the scheduler hot path.
+        gpu_monitor: GPUMemoryMonitor | None = None
+        if planner_gpu_requests and not args.dry_run:
+            gpu_monitor = GPUMemoryMonitor(
+                planner_gpu_requests,
+                poll_seconds=float(args.gpu_monitor_poll_seconds),
+            )
+            gpu_monitor.start()
+            # Pre-seed the monitor so the first scheduler tick has VRAM data
+            # immediately instead of waiting up to poll_seconds for the
+            # background thread's first cycle.
+            _preseed_stats = query_gpu_memory_stats(planner_gpu_requests)
+            if _preseed_stats:
+                with gpu_monitor._lock:
+                    gpu_monitor._latest = dict(_preseed_stats)
+                    gpu_monitor._last_update_monotonic = time.monotonic()
+                    for gpu_id, stats in _preseed_stats.items():
+                        gpu_monitor._peaks[gpu_id] = (stats.used_mib, stats.used_mib)
+
+        # Scheduler tick log (optional JSONL instrumentation).
+        _tick_log_path: Path | None = None
+        if args.scheduler_tick_log:
+            _raw_tick_path = Path(str(args.scheduler_tick_log)).expanduser()
+            _tick_log_path = (
+                _raw_tick_path
+                if _raw_tick_path.is_absolute()
+                else (planner_results_root / _raw_tick_path)
+            )
+        scheduler_tick_logger = SchedulerTickLogger(_tick_log_path)
+
+        # Human-readable orchestration log — always written, even with dashboard.
+        _sched_log_path: Path = planner_logs_dir / "_scheduler.log"
+
+        def _sched_log(msg: str) -> None:
+            """Append a timestamped line to the orchestration log."""
+            ts = time.strftime("%H:%M:%S")
+            _append_text_log_line(_sched_log_path, f"[{ts}] {msg}")
+
+        print(f"[INFO] Scheduler log: {_sched_log_path}")
+
+        vram_aware_scheduler = bool(args.vram_aware_scheduler) and not args.dry_run
+        if vram_aware_scheduler and not dashboard_enabled:
+            _max_mp_label = " [--max-multiprocess]" if getattr(args, "max_multiprocess", False) else ""
+            print(
+                f"[INFO] VRAM-aware scheduler enabled{_max_mp_label}: "
+                f"carla_vram={int(args.carla_vram_estimate_mib)} MiB "
+                f"(per_launch={'yes' if args.start_carla else 'external'}), "
+                f"safety_buffer={int(args.vram_safety_buffer_mib)} MiB, "
+                f"min_free={int(args.auto_workers_min_free_mib)} MiB, "
+                f"per_gpu_max_concurrency={int(args.auto_workers_max_per_gpu)}, "
+                f"slot_pool={len(slot_pool)}."
+            )
+            seed_snap = vram_estimator.snapshot()
+            if seed_snap:
+                print(
+                    "[INFO] Planner VRAM estimates (cached): "
+                    + ", ".join(f"{k}={v}MiB" for k, v in sorted(seed_snap.items()))
+                )
+        _sched_log(
+            f"SCHEDULER START workers={len(planner_requests)} "
+            f"gpus={[str(g) for g in scheduler_gpu_ids]} "
+            f"slots={len(slot_pool)} "
+            f"per_gpu_max={int(args.auto_workers_max_per_gpu)} "
+            f"vram_aware={vram_aware_scheduler} "
+            f"max_multiprocess={getattr(args, 'max_multiprocess', False)}"
+        )
+        if scheduler_tick_logger.enabled:
+            scheduler_tick_logger.log(
+                "scheduler_started",
+                gpu_ids=[str(g) for g in scheduler_gpu_ids],
+                slot_pool_size=len(slot_pool),
+                planner_count=len(planner_requests),
+                per_gpu_max_concurrency=int(args.auto_workers_max_per_gpu),
+                managed_carla_single_worker_mode=bool(managed_carla_single_worker_mode),
+                allow_multi_carla=bool(args.allow_multiple_carlas_per_gpu),
+                start_carla=bool(args.start_carla),
+                carla_vram_per_launch=bool(args.start_carla),
+                max_multiprocess=bool(getattr(args, "max_multiprocess", False)),
+                safety_buffer_mib=int(args.vram_safety_buffer_mib),
+                min_free_mib=int(args.auto_workers_min_free_mib),
+                carla_fixed_mib=int(args.carla_vram_estimate_mib),
+            )
+
+        # When VRAM-aware scheduling is enabled, lift the legacy "one planner
+        # per GPU" cap that ``managed_carla_single_worker_mode`` imposed.
+        # The bin-packer will make packing decisions against real VRAM
+        # snapshots and per-planner estimates instead.
+        if vram_aware_scheduler and planner_gpu_requests:
+            cap_limit = max(1, int(args.auto_workers_max_per_gpu))
+            for gpu_state in gpu_states.values():
+                gpu_state.max_concurrency = cap_limit
+                gpu_state.launch_capacity = max(gpu_state.launch_capacity, 1)
+
+        def _ensure_colmdriver_vllm_started(*, trigger: str) -> None:
+            nonlocal colmdriver_vllm_started
+            global _active_colmdriver_vllm_manager
+            if colmdriver_vllm_manager is None or colmdriver_vllm_started:
+                return
+            if args.dry_run:
+                colmdriver_vllm_started = True
+                return
+            print(
+                "[INFO] Starting deferred shared CoLMDriver vLLM services "
+                f"(trigger={trigger})."
+            )
+            colmdriver_vllm_manager.start()
+            _active_colmdriver_vllm_manager = colmdriver_vllm_manager
+            _install_signal_handlers()
+            colmdriver_vllm_started = True
+
+            # Shared CoLMDriver services consume substantial VRAM; refresh GPU
+            # launch capacities immediately so the scheduler rebalances safely.
+            if planner_gpu_requests and (
+                args.auto_workers_per_gpu or managed_carla_single_worker_mode
+            ):
+                for gpu in planner_gpu_requests:
+                    gpu_state = gpu_states.get(gpu)
+                    if gpu_state is None:
+                        continue
+                    state = refresh_gpu_launch_capacity(
+                        gpu_state,
+                        min_free_mib=int(args.auto_workers_min_free_mib),
+                        max_concurrency=gpu_state.max_concurrency,
+                        extra_min_free_mib=gpu_state.oom_penalty_mib,
+                        settle_timeout_s=float(args.auto_workers_settle_timeout),
+                        poll_seconds=float(args.auto_workers_poll_seconds),
+                        stable_samples=int(args.auto_workers_stable_samples),
+                        stable_tolerance_mib=int(args.auto_workers_stable_tolerance_mib),
+                    )
+                    if managed_carla_single_worker_mode and not vram_aware_scheduler:
+                        state.launch_capacity = min(state.launch_capacity, 1)
+                if not dashboard_enabled:
+                    print(
+                        "[INFO] Refreshed GPU launch capacities after deferred CoLMDriver "
+                        "vLLM startup."
+                    )
+
         def _collect_reserved_planner_ports(
             *,
             exclude_slot_index: int | None = None,
@@ -8114,6 +9656,12 @@ def main() -> None:
             return reserved_ports
 
         def _allocate_replacement_slot(completed: PlannerThreadResult) -> PlannerSlot:
+            if not args.start_carla:
+                return PlannerSlot(
+                    slot_index=completed.slot_index,
+                    gpu=None,
+                    ports=completed.ports,
+                )
             reserved_ports = _collect_reserved_planner_ports(
                 exclude_slot_index=completed.slot_index,
             )
@@ -8140,31 +9688,89 @@ def main() -> None:
             completed: PlannerThreadResult,
             *,
             reason: str,
+            failure_kind: str,
         ) -> None:
             nonlocal scheduler_gpu_ids
+            run_id = completed.planner_request.run_id
+            current_attempt = int(planner_relaunch_counts.get(run_id, 0))
             dashboard_state = planner_dashboard_states[completed.planner_request.run_id]
-            delete_result_roots([dashboard_state.results_dir])
-            try:
-                dashboard_state.status_path.unlink()
-            except FileNotFoundError:
-                pass
+            can_retry = should_continue_retrying(current_attempt, planner_retry_limit)
+            gpu_state = gpu_states.get(completed.gpu)
+            if gpu_state is not None:
+                apply_gpu_failure_backoff(
+                    gpu_state,
+                    failure_kind=failure_kind,
+                    args=args,
+                )
             replacement_slot = _allocate_replacement_slot(completed)
             slot_pool.append(replacement_slot)
-            planner_pending.append(completed.planner_request)
-            scheduler_gpu_ids = rotate_scheduler_gpu_order_after_failure(
-                scheduler_gpu_ids,
-                completed.gpu,
-            )
+
+            if can_retry:
+                # NOTE: We intentionally do NOT rename/delete the results
+                # directory here.  The child's skip-completed-scenario logic
+                # will detect scenarios that already have terminal outcomes
+                # and only re-run the incomplete ones.  Previously this call
+                # wiped completed scenario results on every parent retry.
+                try:
+                    dashboard_state.status_path.unlink()
+                except FileNotFoundError:
+                    pass
+                requeue_pending_planner(completed.planner_request)
+                scheduler_gpu_ids = rotate_scheduler_gpu_order_after_failure(
+                    scheduler_gpu_ids,
+                    completed.gpu,
+                )
+                append_retry_event(
+                    planner_retry_log_path,
+                    scope="multi_planner_parent",
+                    attempt=current_attempt,
+                    retry_limit=planner_retry_limit,
+                    failure_kind=failure_kind,
+                    outcome="retry_queued",
+                    details=reason,
+                    planner_run_id=run_id,
+                    gpu=completed.gpu,
+                    ports=completed.ports,
+                )
+            else:
+                append_retry_event(
+                    planner_retry_log_path,
+                    scope="multi_planner_parent",
+                    attempt=current_attempt,
+                    retry_limit=planner_retry_limit,
+                    failure_kind=failure_kind,
+                    outcome="retry_exhausted",
+                    details=reason,
+                    planner_run_id=run_id,
+                    gpu=completed.gpu,
+                    ports=completed.ports,
+                )
             with planner_state_lock:
-                dashboard_state.phase = "queued"
+                dashboard_state.phase = (
+                    "queued"
+                    if can_retry
+                    else "failed"
+                )
                 dashboard_state.slot_index = None
                 dashboard_state.gpu = None
                 dashboard_state.ports = None
                 dashboard_state.runner = None
                 dashboard_state.start_time = None
                 dashboard_state.end_time = None
-                dashboard_state.returncode = None
-                dashboard_state.error = None
+                dashboard_state.returncode = (
+                    None
+                    if can_retry
+                    else 1
+                )
+                dashboard_state.error = (
+                    None
+                    if can_retry
+                    else (
+                        "Planner retry budget exhausted "
+                        f"(attempt={format_attempt_counter(current_attempt, planner_retry_limit)}, "
+                        f"failure_kind={failure_kind}, reason={reason})."
+                    )
+                )
                 dashboard_state.route_progress = (0, 1)
                 dashboard_state.entry_status = ""
                 dashboard_state.last_output_age_s = None
@@ -8181,6 +9787,14 @@ def main() -> None:
             gpu_note = ""
             if completed.gpu is not None:
                 gpu_note = f" De-prioritizing GPU {completed.gpu} for the next launch."
+            if not can_retry:
+                if not dashboard_enabled:
+                    print(
+                        "[ERROR] Planner retry budget exhausted: "
+                        f"run_id={run_id} attempt={format_attempt_counter(current_attempt, planner_retry_limit)} "
+                        f"failure_kind={failure_kind} reason={reason}"
+                    )
+                return
             if not dashboard_enabled:
                 print(
                     "[WARN] Requeueing planner "
@@ -8218,12 +9832,17 @@ def main() -> None:
                     "--traffic-manager-port",
                     "--results-tag",
                     "--scenario-retry-limit",
+                    "--scenario-shard",
                     "--colmdriver-vllm-env",
                     "--colmdriver-vllm-startup-timeout",
                     "--carla-forensics-log-file",
                     "--carla-forensics-server-log-file",
                 ]
-                flag_options_to_remove: List[str] = ["--start-colmdriver-vllm"]
+                flag_options_to_remove: List[str] = ["--start-colmdriver-vllm", "--max-multiprocess"]
+                # Defensive guard: child planners should only inherit dry-run
+                # when the parent invocation explicitly requested it.
+                if not args.dry_run:
+                    flag_options_to_remove.append("--dry-run")
                 if planner_routes_dir is not None:
                     replacements.extend(
                         [
@@ -8243,6 +9862,12 @@ def main() -> None:
                     )
                 if args.overwrite:
                     flag_options_to_remove.append("--overwrite")
+                # Pass scenario shard filter to the child if set.
+                if planner_request.scenario_shard is not None:
+                    replacements.extend([
+                        "--scenario-shard",
+                        str(planner_request.scenario_shard),
+                    ])
 
                 planner_forensics_log = (
                     add_suffix_to_path(forensics_log_path, planner_request.run_id or planner_request.name)
@@ -8271,6 +9896,18 @@ def main() -> None:
                             str(planner_server_log),
                         ]
                     )
+                if args.carla_rootcause:
+                    _planner_rc_root = str(
+                        planner_results_root / planner_request.run_id
+                    )
+                    replacements.extend(
+                        [
+                            "--carla-rootcause-log-root",
+                            _planner_rc_root,
+                        ]
+                    )
+                    if "--carla-rootcause-log-root" not in value_options_to_remove:
+                        value_options_to_remove.append("--carla-rootcause-log-root")
 
                 child_argv = build_child_argv(
                     base_argv,
@@ -8310,6 +9947,21 @@ def main() -> None:
                         planner_name=planner_request.name,
                         retry_limit=planner_child_retry_budget,
                     )
+                    # Scale timeout for sharded planners: they run fewer scenarios.
+                    if (
+                        planner_child_timeout_s is not None
+                        and planner_request.scenario_shard is not None
+                        and dashboard_scenario_entries
+                    ):
+                        _shard_entries = _per_planner_scenario_entries.get(
+                            planner_request.run_id, dashboard_scenario_entries
+                        )
+                        _shard_ratio = len(_shard_entries) / max(1, len(dashboard_scenario_entries))
+                        if _shard_ratio < 1.0:
+                            planner_child_timeout_s = max(
+                                120.0,
+                                planner_child_timeout_s * _shard_ratio,
+                            )
 
                 launch_message = (
                     "[INFO] Launching planner "
@@ -8340,15 +9992,18 @@ def main() -> None:
                     dashboard_state.error = None
                     dashboard_state.returncode = None
                     dashboard_state.current_attempt = launch_attempt
-                    dashboard_state.attempt_limit = None
+                    dashboard_state.attempt_limit = planner_retry_limit
                 _eval_env_python = child_env.get("CONDA_PYTHON_EXE") or cmd[0]
                 _eval_env_path_head = os.pathsep.join(
                     child_env.get("PATH", "").split(os.pathsep)[:5]
                 )
-                print(
+                _eval_env_msg = (
                     f"[EVAL ENV] python={_eval_env_python!r} "
                     f"PATH(first5)={_eval_env_path_head!r}"
                 )
+                if not dashboard_enabled:
+                    print(_eval_env_msg)
+                _append_text_log_line(dashboard_state.log_path, _eval_env_msg)
                 gate_ready = wait_for_carla_teardown_gate(
                     host=str(args.host),
                     world_port=int(slot.ports.port),
@@ -8357,6 +10012,7 @@ def main() -> None:
                         f"planner_launch:{planner_request.run_id}:"
                         f"slot={slot.slot_index}:attempt={launch_attempt}"
                     ),
+                    quiet=dashboard_enabled,
                 )
                 if not gate_ready:
                     raise RuntimeError(
@@ -8379,10 +10035,13 @@ def main() -> None:
                 with active_runners_lock:
                     active_runners.append(runner)
                 result = runner.run()
+                _planner_entries = _per_planner_scenario_entries.get(
+                    planner_request.run_id, dashboard_scenario_entries
+                )
                 validation_error = validate_planner_child_results(
                     results_dir=dashboard_state.results_dir,
                     ego_count=planner_validation_ego_count,
-                    scenario_entries=dashboard_scenario_entries,
+                    scenario_entries=_planner_entries,
                     default_results_subdir=dashboard_state.default_results_subdir,
                 )
                 if result.returncode != 0 and validation_error is None:
@@ -8404,6 +10063,7 @@ def main() -> None:
                         gpu=slot.gpu,
                         ports=slot.ports,
                         error=validation_error,
+                        failure_kind=classify_failure_text_kind(validation_error),
                     )
                 else:
                     outcome = PlannerThreadResult(
@@ -8424,6 +10084,7 @@ def main() -> None:
                     gpu=slot.gpu,
                     ports=slot.ports,
                     error=f"{type(exc).__name__}: {exc}",
+                    failure_kind=classify_failure_text_kind(f"{type(exc).__name__}: {exc}"),
                 )
             finally:
                 if runner is not None:
@@ -8439,6 +10100,7 @@ def main() -> None:
                         gpu=slot.gpu,
                         ports=slot.ports,
                         error="Planner thread exited without a result.",
+                        failure_kind="generic",
                     )
                 completion_queue.put(outcome)
 
@@ -8447,6 +10109,7 @@ def main() -> None:
             slot_template: PlannerSlot,
             gpu_state: GPUPlannerState,
         ) -> None:
+            nonlocal active_non_colmdriver_threads
             planner_relaunch_counts[planner_request.run_id] += 1
             launch_attempt = planner_relaunch_counts[planner_request.run_id]
             slot = PlannerSlot(
@@ -8461,6 +10124,8 @@ def main() -> None:
             )
             active_threads[slot.slot_index] = thread
             gpu_state.active_count += 1
+            if planner_request.run_id not in deferred_colmdriver_run_ids:
+                active_non_colmdriver_threads += 1
             with planner_state_lock:
                 state = planner_dashboard_states[planner_request.run_id]
                 state.phase = "launching"
@@ -8468,91 +10133,271 @@ def main() -> None:
                 state.gpu = gpu_state.gpu
                 state.ports = slot_template.ports
                 state.current_attempt = launch_attempt
-                state.attempt_limit = None
+                state.attempt_limit = planner_retry_limit
             thread.start()
+
+        # Track active reservations and assigned GPUs per run_id so that the
+        # bin-packer can release them on completion.
+        launch_reservations: Dict[str, Tuple[str | None, int]] = {}
+
+        def _release_reservation(run_id: str) -> None:
+            assignment = launch_reservations.pop(run_id, None)
+            if assignment is None:
+                return
+            gpu_id, reserved_mib = assignment
+            state = gpu_states.get(gpu_id)
+            if state is None:
+                return
+            state.reserved_mib = max(0, int(state.reserved_mib) - int(reserved_mib))
+            state.active_run_ids.discard(run_id)
+
+        def _commit_reservation(run_id: str, gpu_id: str | None, reserved_mib: int) -> None:
+            launch_reservations[run_id] = (gpu_id, int(reserved_mib))
+            state = gpu_states.get(gpu_id)
+            if state is not None:
+                state.reserved_mib += int(reserved_mib)
+                state.active_run_ids.add(run_id)
+
+        def _launch_decisions_vram_aware() -> bool:
+            """Run one tick of the VRAM-aware bin-packer. Returns True on launch."""
+            nonlocal active_non_colmdriver_threads
+            if not slot_pool:
+                return False
+            pending = list(planner_pending) + list(planner_pending_deferred)
+            if not pending:
+                return False
+            decay_stale_oom_penalties(
+                gpu_states,
+                decay_seconds=float(args.oom_backoff_decay_seconds),
+                cap_limit=max(1, int(args.auto_workers_max_per_gpu)),
+                tick_logger=scheduler_tick_logger,
+            )
+            decisions, rejections = bin_pack_launch_plan(
+                pending_requests=pending,
+                gpu_states=gpu_states,
+                gpu_monitor=gpu_monitor,
+                vram_estimator=vram_estimator,
+                carla_fixed_mib=int(args.carla_vram_estimate_mib),
+                safety_buffer_mib=int(args.vram_safety_buffer_mib),
+                min_free_mib=int(args.auto_workers_min_free_mib),
+                active_non_colmdriver_threads=active_non_colmdriver_threads,
+                deferred_run_ids=deferred_colmdriver_run_ids,
+                managed_carla_single_worker_mode=managed_carla_single_worker_mode,
+                allow_multi_carla=bool(args.allow_multiple_carlas_per_gpu),
+                start_carla=bool(args.start_carla),
+                tick_logger=scheduler_tick_logger,
+            )
+            launched_any = False
+            for planner_request, gpu_id, reserved_mib in decisions:
+                if not slot_pool:
+                    break
+                # Remove from whichever queue it lives in.
+                if planner_request in planner_pending:
+                    planner_pending.remove(planner_request)
+                elif planner_request in planner_pending_deferred:
+                    if active_non_colmdriver_threads > 0:
+                        # Still gated; skip.
+                        continue
+                    planner_pending_deferred.remove(planner_request)
+                else:
+                    continue
+                if (
+                    defer_colmdriver_vllm_phase
+                    and planner_request.run_id in deferred_colmdriver_run_ids
+                ):
+                    _ensure_colmdriver_vllm_started(
+                        trigger=f"planner:{planner_request.run_id}"
+                    )
+                slot_template = slot_pool.popleft()
+                gpu_state = gpu_states[gpu_id]
+                _commit_reservation(planner_request.run_id, gpu_id, reserved_mib)
+                if gpu_monitor is not None and gpu_id is not None:
+                    gpu_monitor.reset_baseline(str(gpu_id))
+                if not dashboard_enabled:
+                    _gpu_stats = gpu_monitor.stats_for(gpu_id) if gpu_monitor and gpu_id else None
+                    print(
+                        f"[SCHED] Launching {planner_request.name} "
+                        f"(run_id={planner_request.run_id}) on GPU {gpu_id} "
+                        f"reserved={reserved_mib}MiB "
+                        f"gpu_free={_gpu_stats.free_mib if _gpu_stats else '?'}MiB "
+                        f"active_on_gpu={gpu_state.active_count + 1}"
+                    )
+                _sched_log(
+                    f"LAUNCH {planner_request.name} run_id={planner_request.run_id} "
+                    f"gpu={gpu_id} reserved={reserved_mib}MiB "
+                    f"active_on_gpu={gpu_state.active_count + 1} "
+                    f"slots_free={len(slot_pool)}"
+                )
+                _maybe_launch_planner(planner_request, slot_template, gpu_state)
+                launched_any = True
+            if not launched_any and rejections and has_launchable_planner_requests():
+                # Log rejection batch so operators can diagnose stalls.
+                if scheduler_tick_logger.enabled:
+                    scheduler_tick_logger.log(
+                        "launch_rejected_batch",
+                        reject_count=len(rejections),
+                        first_rejection=rejections[0],
+                    )
+                # Also print a console summary periodically so stalls are visible
+                # even without the tick log file.
+                for rej in rejections[:3]:
+                    gpu_reasons = rej.get("gpu_rejections", [])
+                    summary_parts = [f"run_id={rej.get('run_id')} planner={rej.get('planner')}"]
+                    for gr in gpu_reasons[:2]:
+                        summary_parts.append(
+                            f"gpu={gr.get('gpu')} reason={gr.get('reason')} "
+                            f"free={gr.get('effective_free_mib', gr.get('free_mib', '?'))}MiB "
+                            f"cost={gr.get('planner_cost_mib', '?')}MiB "
+                            f"floor={gr.get('required_floor_mib', '?')}MiB"
+                        )
+                    if not dashboard_enabled:
+                        print(f"[SCHED] Launch blocked: {'; '.join(summary_parts)}")
+                    _sched_log(f"BLOCKED {'; '.join(summary_parts)}")
+            return launched_any
+
+        def _log_scheduler_snapshot(reason: str) -> None:
+            if not scheduler_tick_logger.enabled:
+                return
+            per_gpu: Dict[str, Any] = {}
+            for gpu_id, state in gpu_states.items():
+                stats = None
+                if gpu_monitor is not None and gpu_id is not None:
+                    stats = gpu_monitor.stats_for(str(gpu_id))
+                elif state.last_stats is not None:
+                    stats = state.last_stats
+                per_gpu[str(gpu_id)] = {
+                    "active": int(state.active_count),
+                    "reserved_mib": int(state.reserved_mib),
+                    "max_concurrency": int(state.max_concurrency),
+                    "oom_penalty_mib": int(state.oom_penalty_mib),
+                    "free_mib": int(stats.free_mib) if stats is not None else None,
+                    "used_mib": int(stats.used_mib) if stats is not None else None,
+                    "total_mib": int(stats.total_mib) if stats is not None else None,
+                    "run_ids": sorted(state.active_run_ids),
+                }
+            scheduler_tick_logger.log(
+                "scheduler_tick",
+                reason=reason,
+                pending=len(planner_pending),
+                pending_deferred=len(planner_pending_deferred),
+                active_threads=len(active_threads),
+                slot_pool=len(slot_pool),
+                active_non_colmdriver_threads=int(active_non_colmdriver_threads),
+                per_gpu=per_gpu,
+            )
 
         try:
             try:
                 planner_dashboard.start()
-                while planner_pending or active_threads:
-                    launch_made = False
-                    for gpu_key in scheduler_gpu_ids:
-                        gpu_state = gpu_states[gpu_key]
-                        if (
-                            not planner_pending
-                            or not slot_pool
-                            or gpu_state.active_count >= gpu_state.launch_capacity
-                        ):
-                            continue
-                        planner_request = planner_pending.popleft()
-                        slot_template = slot_pool.popleft()
-                        _maybe_launch_planner(planner_request, slot_template, gpu_state)
-                        launch_made = True
-
-                        if (
-                            gpu_state.gpu is not None
-                            and not args.dry_run
-                            and (
-                                args.auto_workers_per_gpu
-                                or managed_carla_single_worker_mode
-                            )
-                        ):
-                            state = refresh_gpu_launch_capacity(
-                                gpu_state,
-                                min_free_mib=int(args.auto_workers_min_free_mib),
-                                settle_timeout_s=float(args.auto_workers_settle_timeout),
-                                poll_seconds=float(args.auto_workers_poll_seconds),
-                                stable_samples=int(args.auto_workers_stable_samples),
-                                stable_tolerance_mib=int(args.auto_workers_stable_tolerance_mib),
-                            )
-                            if managed_carla_single_worker_mode:
-                                state.launch_capacity = min(state.launch_capacity, 1)
-                            if state.last_stats is not None and not dashboard_enabled:
-                                print(
-                                    "[INFO] GPU "
-                                    f"{state.gpu}: settled free VRAM={state.last_stats.free_mib} MiB; "
-                                    f"active={state.active_count}, launch_capacity={state.launch_capacity}"
+                last_snapshot_log = 0.0
+                while has_pending_planner_requests() or active_threads:
+                    # -------------------- DISPATCH PHASE --------------------
+                    if vram_aware_scheduler:
+                        launch_made = _launch_decisions_vram_aware()
+                    else:
+                        # Legacy path retained for fallback / debugging.
+                        launch_made = False
+                        for gpu_key in scheduler_gpu_ids:
+                            gpu_state = gpu_states[gpu_key]
+                            if (
+                                not has_launchable_planner_requests()
+                                or not slot_pool
+                                or gpu_state.active_count >= gpu_state.launch_capacity
+                            ):
+                                continue
+                            planner_request = pop_next_pending_planner()
+                            if planner_request is None:
+                                continue
+                            if (
+                                defer_colmdriver_vllm_phase
+                                and planner_request.run_id in deferred_colmdriver_run_ids
+                            ):
+                                _ensure_colmdriver_vllm_started(
+                                    trigger=f"planner:{planner_request.run_id}"
                                 )
-                            elif not dashboard_enabled:
-                                print(
-                                    "[WARN] GPU "
-                                    f"{state.gpu}: post-launch memory probe unavailable; "
-                                    f"holding at {state.active_count} active planner(s)."
-                                )
-                        else:
-                            # Without live VRAM probes, keep capacity one
-                            # ahead of the current active count so that
-                            # the scheduler can continue filling slots on
-                            # this GPU in the next pass.
+                            slot_template = slot_pool.popleft()
+                            _maybe_launch_planner(planner_request, slot_template, gpu_state)
+                            launch_made = True
+                            # No inline refresh: we rely on the background
+                            # monitor + max_concurrency cap.
                             gpu_state.launch_capacity = max(
                                 gpu_state.launch_capacity,
                                 gpu_state.active_count + 1,
                             )
+                            gpu_state.launch_capacity = min(
+                                gpu_state.launch_capacity,
+                                max(1, int(gpu_state.max_concurrency)),
+                            )
 
-                    if launch_made and planner_pending and slot_pool:
+                    if launch_made and has_launchable_planner_requests() and slot_pool:
+                        # Try to pack more on the same tick if anything is left.
                         continue
 
-                    if not launch_made and planner_pending and not active_threads:
+                    # ----- FORCED-LAUNCH FALLBACK (queue stalled, no active) ----
+                    if (
+                        not launch_made
+                        and has_launchable_planner_requests()
+                        and not active_threads
+                    ):
                         forced_state = choose_force_launch_gpu(gpu_states)
                         forced_state.launch_capacity = max(
                             forced_state.launch_capacity,
                             forced_state.active_count + 1,
                         )
-                        if managed_carla_single_worker_mode:
-                            forced_state.launch_capacity = min(forced_state.launch_capacity, 1)
-                        if not dashboard_enabled:
-                            print(
-                                "[WARN] Planner queue is stalled by the current GPU threshold. "
-                                f"Forcing one launch on GPU {forced_state.gpu}."
-                            )
+                        forced_state.launch_capacity = min(
+                            forced_state.launch_capacity,
+                            max(1, int(forced_state.max_concurrency)),
+                        )
+                        # Forced launches bypass the VRAM floor, but still
+                        # reserve what the estimator believes they'll use.
+                        if has_launchable_planner_requests() and slot_pool:
+                            planner_request = pop_next_pending_planner()
+                            if planner_request is not None:
+                                if (
+                                    defer_colmdriver_vllm_phase
+                                    and planner_request.run_id in deferred_colmdriver_run_ids
+                                ):
+                                    _ensure_colmdriver_vllm_started(
+                                        trigger=f"planner:{planner_request.run_id}"
+                                    )
+                                slot_template = slot_pool.popleft()
+                                est = vram_estimator.estimate(planner_request.name)
+                                if args.start_carla:
+                                    est += int(args.carla_vram_estimate_mib)
+                                _commit_reservation(
+                                    planner_request.run_id, forced_state.gpu, est,
+                                )
+                                if gpu_monitor is not None and forced_state.gpu is not None:
+                                    gpu_monitor.reset_baseline(str(forced_state.gpu))
+                                _maybe_launch_planner(planner_request, slot_template, forced_state)
+                                if scheduler_tick_logger.enabled:
+                                    scheduler_tick_logger.log(
+                                        "forced_launch",
+                                        run_id=planner_request.run_id,
+                                        gpu=str(forced_state.gpu) if forced_state.gpu is not None else None,
+                                        reserved_mib=est,
+                                    )
+                                if not dashboard_enabled:
+                                    print(
+                                        "[WARN] Planner queue was stalled by the current GPU threshold. "
+                                        f"Forced launch on GPU {forced_state.gpu}."
+                                    )
                         continue
 
                     if not active_threads:
                         continue
 
+                    # -------------------- COMPLETION PHASE ------------------
                     try:
-                        completed = completion_queue.get(timeout=1.0)
+                        completed = completion_queue.get(
+                            timeout=float(args.scheduler_tick_interval),
+                        )
                     except queue.Empty:
+                        # Periodically log a snapshot so stalls are visible.
+                        now_mono = time.monotonic()
+                        if now_mono - last_snapshot_log > 10.0:
+                            _log_scheduler_snapshot("idle_tick")
+                            last_snapshot_log = now_mono
                         continue
 
                     completed_thread = active_threads.pop(completed.slot_index, None)
@@ -8561,83 +10406,110 @@ def main() -> None:
 
                     state = gpu_states[completed.gpu]
                     state.active_count = max(0, state.active_count - 1)
-                    if (
-                        state.gpu is not None
-                        and not args.dry_run
-                        and (
-                            args.auto_workers_per_gpu
-                            or managed_carla_single_worker_mode
+                    if completed.planner_request.run_id not in deferred_colmdriver_run_ids:
+                        active_non_colmdriver_threads = max(
+                            0,
+                            int(active_non_colmdriver_threads) - 1,
                         )
-                    ):
-                        state = refresh_gpu_launch_capacity(
-                            state,
-                            min_free_mib=int(args.auto_workers_min_free_mib),
-                            settle_timeout_s=float(args.auto_workers_settle_timeout),
-                            poll_seconds=float(args.auto_workers_poll_seconds),
-                            stable_samples=int(args.auto_workers_stable_samples),
-                            stable_tolerance_mib=int(args.auto_workers_stable_tolerance_mib),
-                        )
-                        if managed_carla_single_worker_mode:
-                            state.launch_capacity = min(state.launch_capacity, 1)
-                    elif state.gpu is None:
-                        state.launch_capacity = max(1, state.active_count + 1)
-                    else:
-                        # A planner just finished on this GPU — there is
-                        # now at least one slot worth of free VRAM if the
-                        # previous launch succeeded, so allow refilling.
-                        state.launch_capacity = max(1, state.active_count + 1)
 
-                    # --- Opportunistic capacity refresh on *other* GPUs -------
-                    # While we were waiting for a completion, external
-                    # processes may have freed GPU memory elsewhere.  Do a
-                    # quick re-probe of GPUs that currently block the
-                    # scheduler so we can pack more work in this cycle.
+                    # Merge a peak-VRAM observation back into the estimator
+                    # cache for next time.
                     if (
-                        planner_pending
-                        and planner_gpu_requests
-                        and len(scheduler_gpu_ids) > 1
-                        and not args.dry_run
-                        and (
-                            args.auto_workers_per_gpu
-                            or managed_carla_single_worker_mode
-                        )
+                        gpu_monitor is not None
+                        and completed.gpu is not None
                     ):
-                        for _other_gpu in scheduler_gpu_ids:
-                            _other_state = gpu_states[_other_gpu]
-                            if (
-                                _other_gpu == completed.gpu  # already refreshed above
-                                or _other_state.gpu is None
-                                or _other_state.active_count < _other_state.launch_capacity
-                            ):
-                                continue
-                            _other_state = refresh_gpu_launch_capacity(
-                                _other_state,
-                                min_free_mib=int(args.auto_workers_min_free_mib),
-                                settle_timeout_s=min(
-                                    float(args.auto_workers_settle_timeout),
-                                    5.0,
-                                ),
-                                poll_seconds=float(args.auto_workers_poll_seconds),
-                                stable_samples=max(
-                                    1,
-                                    int(args.auto_workers_stable_samples),
-                                ),
-                                stable_tolerance_mib=int(args.auto_workers_stable_tolerance_mib),
+                        observed_peak = gpu_monitor.consume_peak_delta(str(completed.gpu))
+                        if observed_peak > 0:
+                            vram_estimator.observe_peak(
+                                completed.planner_request.name,
+                                observed_peak,
                             )
-                            if managed_carla_single_worker_mode:
-                                _other_state.launch_capacity = min(_other_state.launch_capacity, 1)
+                            if scheduler_tick_logger.enabled:
+                                scheduler_tick_logger.log(
+                                    "vram_peak_observed",
+                                    run_id=completed.planner_request.run_id,
+                                    planner=completed.planner_request.name,
+                                    peak_mib=int(observed_peak),
+                                    new_estimate_mib=int(
+                                        vram_estimator.estimate(
+                                            completed.planner_request.name
+                                        )
+                                    ),
+                                )
 
-                    if completed.error is not None:
-                        _queue_planner_retry(
-                            completed,
-                            reason=completed.error,
+                    _release_reservation(completed.planner_request.run_id)
+                    state.launch_capacity = max(1, state.active_count + 1)
+                    state.launch_capacity = min(
+                        state.launch_capacity,
+                        max(1, int(state.max_concurrency)),
+                    )
+                    if not dashboard_enabled:
+                        _gpu_stats = gpu_monitor.stats_for(completed.gpu) if gpu_monitor and completed.gpu else None
+                        _status = "OK" if (completed.error is None and completed.returncode == 0) else "FAIL"
+                        print(
+                            f"[SCHED] Completed {completed.planner_request.name} "
+                            f"(run_id={completed.planner_request.run_id}) [{_status}] "
+                            f"gpu={completed.gpu} "
+                            f"gpu_free={_gpu_stats.free_mib if _gpu_stats else '?'}MiB "
+                            f"active_on_gpu={state.active_count} "
+                            f"pending={len(planner_pending)+len(planner_pending_deferred)} "
+                            f"slots={len(slot_pool)}"
                         )
-                    elif completed.returncode != 0:
+                    _sched_log(
+                        f"DONE {completed.planner_request.name} "
+                        f"run_id={completed.planner_request.run_id} "
+                        f"{'OK' if (completed.error is None and completed.returncode == 0) else 'FAIL'} "
+                        f"gpu={completed.gpu} active_on_gpu={state.active_count} "
+                        f"pending={len(planner_pending)+len(planner_pending_deferred)} "
+                        f"slots={len(slot_pool)}"
+                    )
+                    _log_scheduler_snapshot("completion")
+
+                    if completed.error is not None or completed.returncode != 0:
+                        dashboard_state = planner_dashboard_states[completed.planner_request.run_id]
+                        reason = (
+                            str(completed.error)
+                            if completed.error is not None
+                            else f"exit_code={completed.returncode}"
+                        )
+                        failure_kind = infer_planner_thread_failure_kind(
+                            completed,
+                            dashboard_state=dashboard_state,
+                        )
+                        # Raise the planner's VRAM floor so the bin-packer
+                        # will steer it onto a bigger GPU next time rather
+                        # than repeating the OOM.
+                        if failure_kind in {"cuda_oom", "cuda_unavailable"}:
+                            bump_mib = max(
+                                1024,
+                                int(args.oom_free_mib_penalty_step),
+                            )
+                            vram_estimator.bump_after_oom(
+                                completed.planner_request.name,
+                                bump_mib=bump_mib,
+                            )
+                            if scheduler_tick_logger.enabled:
+                                scheduler_tick_logger.log(
+                                    "oom_bump_estimate",
+                                    run_id=completed.planner_request.run_id,
+                                    planner=completed.planner_request.name,
+                                    bump_mib=int(bump_mib),
+                                    new_estimate_mib=int(
+                                        vram_estimator.estimate(
+                                            completed.planner_request.name
+                                        )
+                                    ),
+                                )
                         _queue_planner_retry(
                             completed,
-                            reason=f"exit_code={completed.returncode}",
+                            reason=reason,
+                            failure_kind=failure_kind,
                         )
                     else:
+                        apply_gpu_success_recovery(
+                            state,
+                            args=args,
+                        )
                         slot_pool.append(
                             PlannerSlot(
                                 slot_index=completed.slot_index,
@@ -8650,6 +10522,18 @@ def main() -> None:
                                 "[INFO] Planner "
                                 f"{completed.planner_request.run_id} finished successfully."
                             )
+                        append_retry_event(
+                            planner_retry_log_path,
+                            scope="multi_planner_parent",
+                            attempt=int(planner_relaunch_counts.get(completed.planner_request.run_id, 0)),
+                            retry_limit=planner_retry_limit,
+                            failure_kind="none",
+                            outcome="success",
+                            details="planner_completed",
+                            planner_run_id=completed.planner_request.run_id,
+                            gpu=completed.gpu,
+                            ports=completed.ports,
+                        )
             except KeyboardInterrupt:
                 print("[INFO] Interrupt received. Terminating active planner runs...")
                 with active_runners_lock:
@@ -8658,12 +10542,119 @@ def main() -> None:
                     runner.terminate("[INFO] Stopping planner child process.")
                 for thread in active_threads.values():
                     thread.join(timeout=5.0)
+
+                # Mark in-flight routes as interrupted so they are clearly
+                # identifiable as partial results rather than silent failures.
+                interrupted_run_ids: List[str] = []
+                with planner_state_lock:
+                    for run_id, state in planner_dashboard_states.items():
+                        if state.phase in ("launching", "running"):
+                            state.phase = "interrupted"
+                            state.end_time = time.monotonic()
+                            state.error = "Evaluator interrupted by user (SIGINT/Ctrl+C)."
+                            interrupted_run_ids.append(run_id)
+                for run_id in interrupted_run_ids:
+                    state = planner_dashboard_states[run_id]
+                    progress = state.route_progress
+                    try:
+                        update_dashboard_status(
+                            state.status_path,
+                            phase="interrupted",
+                            error=state.error,
+                            route_progress_current=progress[0],
+                            route_progress_total=progress[1],
+                            interrupted_at=dt.datetime.now().isoformat(timespec="seconds"),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    print(
+                        f"[INFO] Marked {run_id} as interrupted "
+                        f"(progress: {progress[0]}/{progress[1]} routes)."
+                    )
+                if interrupted_run_ids:
+                    print(
+                        f"[INFO] {len(interrupted_run_ids)} route(s) marked as interrupted (partial)."
+                    )
                 raise
         finally:
+            # Safety-net: mark any routes still in-flight (covers SIGTERM /
+            # SystemExit / unexpected exceptions not caught above).
+            with planner_state_lock:
+                _still_inflight = [
+                    (rid, st) for rid, st in planner_dashboard_states.items()
+                    if st.phase in ("launching", "running")
+                ]
+            for rid, st in _still_inflight:
+                with planner_state_lock:
+                    st.phase = "interrupted"
+                    st.end_time = time.monotonic()
+                    if not st.error:
+                        st.error = "Evaluator terminated unexpectedly."
+                progress = st.route_progress
+                try:
+                    update_dashboard_status(
+                        st.status_path,
+                        phase="interrupted",
+                        error=st.error,
+                        route_progress_current=progress[0],
+                        route_progress_total=progress[1],
+                        interrupted_at=dt.datetime.now().isoformat(timespec="seconds"),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                print(
+                    f"[INFO] Marked {rid} as interrupted "
+                    f"(progress: {progress[0]}/{progress[1]} routes)."
+                )
+
             planner_dashboard.stop()
+            if gpu_monitor is not None:
+                try:
+                    gpu_monitor.stop()
+                    gpu_monitor.join(timeout=2.0)
+                except Exception:  # pylint: disable=broad-except
+                    pass
+            if scheduler_tick_logger.enabled:
+                scheduler_tick_logger.log(
+                    "scheduler_finished",
+                    vram_estimates=vram_estimator.snapshot(),
+                )
             if colmdriver_vllm_manager is not None:
                 colmdriver_vllm_manager.stop()
             _active_colmdriver_vllm_manager = None
+            wall_s = time.monotonic() - run_start_monotonic
+            for line in format_performance_summary_lines(wall_clock_s=wall_s):
+                print(line)
+            write_performance_report(
+                planner_perf_report_path,
+                wall_clock_s=wall_s,
+                context={
+                    "mode": "multi_planner",
+                    "planner_count": len(planner_requests),
+                    "results_root": str(planner_results_root),
+                    "vram_estimates_final": vram_estimator.snapshot(),
+                },
+            )
+        interrupted_planners = [
+            run_id
+            for run_id, state in planner_dashboard_states.items()
+            if state.phase == "interrupted"
+        ]
+        failed_planners = [
+            run_id
+            for run_id, state in planner_dashboard_states.items()
+            if state.phase == "failed" or (state.returncode is not None and int(state.returncode) != 0)
+        ]
+        if interrupted_planners:
+            print(
+                f"[WARN] {len(interrupted_planners)} planner(s) interrupted (partial results): "
+                + ", ".join(sorted(interrupted_planners))
+            )
+        if failed_planners:
+            raise RuntimeError(
+                "One or more planner workers failed after retry exhaustion: "
+                + ", ".join(sorted(failed_planners))
+            )
         return
 
     scenario_summary = None
@@ -8693,8 +10684,33 @@ def main() -> None:
 
         # Check if routes_dir contains multiple scenario subfolders
         scenario_subfolders = detect_scenario_subfolders(routes_dir, args.routes_leaf)
+        # Apply scenario shard filter if specified.
+        if scenario_subfolders and getattr(args, "_scenario_shard_parsed", None) is not None:
+            _shard_idx, _shard_cnt = args._scenario_shard_parsed
+            _all_count = len(scenario_subfolders)
+            scenario_subfolders = [
+                (sf_path, sf_name)
+                for i, (sf_path, sf_name) in enumerate(scenario_subfolders)
+                if i % _shard_cnt == _shard_idx
+            ]
+            print(
+                f"[INFO] Scenario shard {_shard_idx}/{_shard_cnt}: "
+                f"running {len(scenario_subfolders)} of {_all_count} scenarios."
+            )
         if scenario_subfolders:
             base_results_tag = infer_base_results_tag(args)
+            multi_scenario_results_root = (
+                repo_root / "results" / "results_driving_custom" / base_results_tag
+            )
+            multi_scenario_retry_log_path = multi_scenario_results_root / "_retry_events.jsonl"
+            multi_scenario_perf_report_path: Path | None = None
+            if args.perf_report_file:
+                perf_candidate = Path(str(args.perf_report_file))
+                multi_scenario_perf_report_path = (
+                    perf_candidate
+                    if perf_candidate.is_absolute()
+                    else multi_scenario_results_root / perf_candidate
+                )
             print(f"Detected {len(scenario_subfolders)} scenario subfolders in {routes_dir}:")
             for sf_path, sf_name in scenario_subfolders:
                 print(f"  - {sf_name} ({sf_path})")
@@ -8715,6 +10731,15 @@ def main() -> None:
 
             carla_manager = None
             if args.start_carla and not args.dry_run:
+                _scenario_rootcause_config = carla_rootcause_config
+                if _scenario_rootcause_config is not None:
+                    _rc_results_base = (
+                        repo_root / "results" / "results_driving_custom" / base_results_tag
+                    )
+                    _rc_results_base.mkdir(parents=True, exist_ok=True)
+                    _scenario_rootcause_config = _dc_replace(
+                        _scenario_rootcause_config, log_root=_rc_results_base,
+                    )
                 carla_manager = CarlaProcessManager(
                     carla_root=carla_root,
                     host=str(args.host),
@@ -8729,11 +10754,38 @@ def main() -> None:
                         if args.carla_forensics and not args.carla_rootcause
                         else None
                     ),
-                    rootcause_config=carla_rootcause_config,
+                    rootcause_config=_scenario_rootcause_config,
                 )
                 _active_carla_manager = carla_manager
                 _install_signal_handlers()
-                selected_bundle = carla_manager.start()
+                try:
+                    selected_bundle = carla_manager.start()
+                except Exception as exc:
+                    append_retry_event(
+                        multi_scenario_retry_log_path,
+                        scope="multi_scenario_launcher",
+                        attempt=1,
+                        retry_limit=normalize_retry_limit(args.scenario_retry_limit),
+                        failure_kind="carla_startup_failure",
+                        outcome="retry_exhausted",
+                        details=f"{type(exc).__name__}: {exc}",
+                        scenario_name="",
+                        gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
+                        ports=PortBundle(port=int(args.port), tm_port=int(args.tm_port)),
+                    )
+                    wall_s = time.monotonic() - run_start_monotonic
+                    for line in format_performance_summary_lines(wall_clock_s=wall_s):
+                        print(line)
+                    write_performance_report(
+                        multi_scenario_perf_report_path,
+                        wall_clock_s=wall_s,
+                        context={
+                            "mode": "multi_scenario",
+                            "results_root": str(multi_scenario_results_root),
+                            "finalized_in": "carla_start_failure",
+                        },
+                    )
+                    raise
                 set_effective_ports(
                     args,
                     world_port=selected_bundle.port,
@@ -8764,6 +10816,32 @@ def main() -> None:
                             replay_mode=(args.planner == "log-replay"),
                         ),
                     )
+                    # Skip scenarios that already have terminal outcomes from a
+                    # previous (possibly crashed) run.  This avoids re-running
+                    # scenarios that completed successfully before the parent
+                    # child was retried.
+                    if result_roots_have_terminal_outcomes(
+                        scenario_result_roots,
+                        ego_count=subfolder_ego_count,
+                    ):
+                        print(
+                            f"[INFO] Scenario {sub_name} already completed "
+                            f"(terminal outcomes exist) — skipping."
+                        )
+                        completed_scenario_count += 1
+                        update_dashboard_status(
+                            dashboard_status_path,
+                            phase="running",
+                            scenario_mode="multi",
+                            scenario_total=len(scenario_subfolders),
+                            scenario_index=i,
+                            completed_scenarios=completed_scenario_count,
+                            scenario_name=sub_name,
+                            scenario_results_subdir=scenario_results_subdir,
+                            current_attempt=0,
+                            attempt_limit=normalize_retry_limit(args.scenario_retry_limit),
+                        )
+                        continue
                     if not args.dry_run and args.carla_crash_multiplier > 0:
                         timeout_seconds = estimate_scenario_timeout(
                             args,
@@ -8818,6 +10896,16 @@ def main() -> None:
                             sync_connection_event_env(runtime_env, carla_manager=carla_manager)
                             wait_for_carla_post_start_buffer(args.carla_post_start_buffer)
 
+                        scenario_flag_options_to_remove = [
+                            "--start-carla",
+                            "--start-colmdriver-vllm",
+                            "--carla-rootcause",
+                        ]
+                        # Defensive guard: scenario children should only inherit
+                        # dry-run when the parent invocation requested it.
+                        if not args.dry_run:
+                            scenario_flag_options_to_remove.append("--dry-run")
+
                         child_argv = build_child_argv(
                             base_argv,
                             replacements=[
@@ -8855,11 +10943,7 @@ def main() -> None:
                                 "--carla-rootcause-core-wait-seconds",
                                 "--carla-rootcause-log-root",
                             ],
-                            flag_options_to_remove=[
-                                "--start-carla",
-                                "--start-colmdriver-vllm",
-                                "--carla-rootcause",
-                            ],
+                            flag_options_to_remove=scenario_flag_options_to_remove,
                         )
                         new_cmd = [sys.executable, str(Path(__file__).resolve()), *child_argv]
                         gate_ready = wait_for_carla_teardown_gate(
@@ -8884,6 +10968,18 @@ def main() -> None:
                             )
                             failure_kind = "teardown_gate_timeout"
                             if should_retry_failure(attempt, max_retries, failure_kind):
+                                append_retry_event(
+                                    multi_scenario_retry_log_path,
+                                    scope="multi_scenario_child",
+                                    attempt=attempt,
+                                    retry_limit=max_retries,
+                                    failure_kind=failure_kind,
+                                    outcome="retry_queued",
+                                    details="teardown_gate_timeout_before_child_launch",
+                                    scenario_name=sub_name,
+                                    gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
+                                    ports=PortBundle(port=int(args.port), tm_port=int(args.tm_port)),
+                                )
                                 _print_failure_banner(
                                     f"Scenario {sub_name!r} launch blocked by teardown gate on attempt "
                                     f"{format_attempt_counter(attempt, max_retries)} -- will retry.",
@@ -8923,19 +11019,61 @@ def main() -> None:
                                     progress_summary=None,
                                 ),
                             )
+                            append_retry_event(
+                                multi_scenario_retry_log_path,
+                                scope="multi_scenario_child",
+                                attempt=attempt,
+                                retry_limit=max_retries,
+                                failure_kind=failure_kind,
+                                outcome="retry_exhausted",
+                                details="teardown_gate_timeout_before_child_launch",
+                                scenario_name=sub_name,
+                                gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
+                                ports=PortBundle(port=int(args.port), tm_port=int(args.tm_port)),
+                            )
                             raise RuntimeError(
                                 "Evaluator teardown gate timed out before scenario child launch "
                                 f"(scenario={sub_name}, attempt={attempt})."
                             )
+                        _grandchild_env = runtime_env.copy()
+                        _grandchild_env.pop(DASHBOARD_STATUS_ENV, None)
                         result = MonitoredSubprocessRunner(
                             new_cmd,
-                            env=runtime_env.copy(),
+                            env=_grandchild_env,
                             cwd=repo_root,
                             timeout_s=timeout_seconds,
                             stall_output_timeout_s=float(args.scenario_stall_output_timeout),
                             output_prefix=f"[scenario:{sub_name}] ",
                             show_carla_diag=bool(args.show_carla_diag),
                         ).run()
+                        if args.dry_run and result.returncode == 0:
+                            scenario_completed = True
+                            completed_scenario_count += 1
+                            append_retry_event(
+                                multi_scenario_retry_log_path,
+                                scope="multi_scenario_child",
+                                attempt=attempt,
+                                retry_limit=max_retries,
+                                failure_kind="none",
+                                outcome="success",
+                                details="dry_run_child_success",
+                                scenario_name=sub_name,
+                                gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
+                                ports=PortBundle(port=int(args.port), tm_port=int(args.tm_port)),
+                            )
+                            update_dashboard_status(
+                                dashboard_status_path,
+                                phase="running",
+                                scenario_mode="multi",
+                                scenario_total=len(scenario_subfolders),
+                                scenario_index=i,
+                                completed_scenarios=completed_scenario_count,
+                                scenario_name=sub_name,
+                                scenario_results_subdir=scenario_results_subdir,
+                                current_attempt=attempt,
+                                attempt_limit=max_retries,
+                            )
+                            break
                         if result_roots_have_terminal_outcomes(
                             scenario_result_roots,
                             ego_count=subfolder_ego_count,
@@ -8948,6 +11086,18 @@ def main() -> None:
                                 )
                             scenario_completed = True
                             completed_scenario_count += 1
+                            append_retry_event(
+                                multi_scenario_retry_log_path,
+                                scope="multi_scenario_child",
+                                attempt=attempt,
+                                retry_limit=max_retries,
+                                failure_kind="none",
+                                outcome="success",
+                                details="terminal_outcomes_written",
+                                scenario_name=sub_name,
+                                gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
+                                ports=PortBundle(port=int(args.port), tm_port=int(args.tm_port)),
+                            )
                             update_dashboard_status(
                                 dashboard_status_path,
                                 phase="running",
@@ -8992,6 +11142,18 @@ def main() -> None:
                                 )
                                 scenario_completed = True
                                 completed_scenario_count += 1
+                                append_retry_event(
+                                    multi_scenario_retry_log_path,
+                                    scope="multi_scenario_child",
+                                    attempt=attempt,
+                                    retry_limit=max_retries,
+                                    failure_kind="accepted_stalled_near_end",
+                                    outcome="success",
+                                    details=accepted_msg,
+                                    scenario_name=sub_name,
+                                    gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
+                                    ports=PortBundle(port=int(args.port), tm_port=int(args.tm_port)),
+                                )
                                 if carla_manager and args.carla_rootcause:
                                     carla_manager.plan_logdir_outcome("ACCEPTED_stalled_near_end")
                                 update_dashboard_status(
@@ -9047,6 +11209,18 @@ def main() -> None:
                                 progress_summary=progress_summary,
                             )
                         if should_retry_failure(attempt, max_retries, failure_kind):
+                            append_retry_event(
+                                multi_scenario_retry_log_path,
+                                scope="multi_scenario_child",
+                                attempt=attempt,
+                                retry_limit=max_retries,
+                                failure_kind=failure_kind,
+                                outcome="retry_queued",
+                                details="child_failed_retrying",
+                                scenario_name=sub_name,
+                                gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
+                                ports=PortBundle(port=int(args.port), tm_port=int(args.tm_port)),
+                            )
                             detail = _describe_failure_detail(
                                 failure_kind,
                                 result,
@@ -9117,6 +11291,18 @@ def main() -> None:
                             f"Scenario {sub_name!r} failed with exit code {result.returncode} (no more retries).",
                             _detail,
                         )
+                        append_retry_event(
+                            multi_scenario_retry_log_path,
+                            scope="multi_scenario_child",
+                            attempt=attempt,
+                            retry_limit=max_retries,
+                            failure_kind=failure_kind,
+                            outcome="retry_exhausted",
+                            details="child_failed_no_more_retries",
+                            scenario_name=sub_name,
+                            gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
+                            ports=PortBundle(port=int(args.port), tm_port=int(args.tm_port)),
+                        )
                         break
 
                     # FD tracker checkpoint: after scenario execution
@@ -9125,6 +11311,18 @@ def main() -> None:
                     except Exception:
                         pass
                     if not scenario_completed:
+                        append_retry_event(
+                            multi_scenario_retry_log_path,
+                            scope="multi_scenario_child",
+                            attempt=attempt,
+                            retry_limit=max_retries,
+                            failure_kind="retry_limit_exceeded",
+                            outcome="retry_exhausted",
+                            details="scenario_not_completed_after_attempts",
+                            scenario_name=sub_name,
+                            gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
+                            ports=PortBundle(port=int(args.port), tm_port=int(args.tm_port)),
+                        )
                         print(
                             f"[WARNING] Scenario {sub_name} did not complete after "
                             f"{attempt} attempt(s). Continuing to the next scenario."
@@ -9165,6 +11363,19 @@ def main() -> None:
                 ),
                 current_attempt=0,
                 attempt_limit=retry_limit_for_status(args.scenario_retry_limit),
+            )
+            wall_s = time.monotonic() - run_start_monotonic
+            for line in format_performance_summary_lines(wall_clock_s=wall_s):
+                print(line)
+            write_performance_report(
+                multi_scenario_perf_report_path,
+                wall_clock_s=wall_s,
+                context={
+                    "mode": "multi_scenario",
+                    "scenario_total": len(scenario_subfolders),
+                    "completed_scenarios": completed_scenario_count,
+                    "results_root": str(multi_scenario_results_root),
+                },
             )
             return
 
@@ -9224,6 +11435,16 @@ def main() -> None:
     results_tag = args.results_tag or scenario_name
     if args.results_subdir:
         results_tag = f"{results_tag}/{args.results_subdir}"
+    single_results_root = repo_root / "results" / "results_driving_custom" / results_tag
+    single_retry_log_path = single_results_root / "_retry_events.jsonl"
+    single_perf_report_path: Path | None = None
+    if args.perf_report_file:
+        perf_candidate = Path(str(args.perf_report_file))
+        single_perf_report_path = (
+            perf_candidate
+            if perf_candidate.is_absolute()
+            else single_results_root / perf_candidate
+        )
     update_dashboard_status(
         dashboard_status_path,
         phase="running",
@@ -9406,6 +11627,15 @@ def main() -> None:
     carla_manager = None
     crosswalk_worker: UCLAV2CrosswalkWorker | None = None
     if args.start_carla and not args.dry_run:
+        _single_rootcause_config = carla_rootcause_config
+        if _single_rootcause_config is not None:
+            _rc_results_base = (
+                repo_root / "results" / "results_driving_custom" / results_tag
+            )
+            _rc_results_base.mkdir(parents=True, exist_ok=True)
+            _single_rootcause_config = _dc_replace(
+                _single_rootcause_config, log_root=_rc_results_base,
+            )
         carla_manager = CarlaProcessManager(
             carla_root=carla_root,
             host=str(args.host),
@@ -9420,11 +11650,39 @@ def main() -> None:
                 if args.carla_forensics and not args.carla_rootcause
                 else None
             ),
-            rootcause_config=carla_rootcause_config,
+            rootcause_config=_single_rootcause_config,
         )
         _active_carla_manager = carla_manager
         _install_signal_handlers()
-        selected_bundle = carla_manager.start()
+        try:
+            selected_bundle = carla_manager.start()
+        except Exception as exc:
+            append_retry_event(
+                single_retry_log_path,
+                scope="single_scenario_launcher",
+                attempt=1,
+                retry_limit=normalize_retry_limit(args.scenario_retry_limit),
+                failure_kind="carla_startup_failure",
+                outcome="retry_exhausted",
+                details=f"{type(exc).__name__}: {exc}",
+                scenario_name=scenario_name,
+                gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
+                ports=PortBundle(port=int(args.port), tm_port=int(args.tm_port)),
+            )
+            wall_s = time.monotonic() - run_start_monotonic
+            for line in format_performance_summary_lines(wall_clock_s=wall_s):
+                print(line)
+            write_performance_report(
+                single_perf_report_path,
+                wall_clock_s=wall_s,
+                context={
+                    "mode": "single_scenario",
+                    "scenario_name": str(scenario_name),
+                    "results_root": str(single_results_root),
+                    "finalized_in": "carla_start_failure",
+                },
+            )
+            raise
         tm_port = set_effective_ports(
             args,
             world_port=selected_bundle.port,
@@ -9432,6 +11690,13 @@ def main() -> None:
         ).tm_port
         sync_connection_event_env(runtime_env, carla_manager=carla_manager)
         wait_for_carla_post_start_buffer(args.carla_post_start_buffer)
+    elif not args.dry_run:
+        if not is_port_open(str(args.host), int(args.port), timeout=1.0):
+            raise RuntimeError(
+                "External CARLA world port is unreachable while --start-carla is disabled: "
+                f"host={args.host} port={int(args.port)}. "
+                "Start CARLA on this port or rerun with --start-carla."
+            )
 
     if args.inject_ucla_v2_crosswalk and not args.dry_run:
         crosswalk_worker = UCLAV2CrosswalkWorker(
@@ -9491,6 +11756,7 @@ def main() -> None:
             f"(stall quiet window {float(args.scenario_stall_output_timeout):.1f}s)"
         )
     scenario_retry_limit = normalize_retry_limit(args.scenario_retry_limit)
+    single_perf_report_written = False
 
     try:
         scenario_attempt = 0
@@ -10083,6 +12349,18 @@ def main() -> None:
                                 current_attempt=scenario_attempt,
                                 attempt_limit=scenario_retry_limit,
                             )
+                            append_retry_event(
+                                single_retry_log_path,
+                                scope="single_scenario",
+                                attempt=scenario_attempt,
+                                retry_limit=scenario_retry_limit,
+                                failure_kind=soft_failure_kind,
+                                outcome="retry_exhausted",
+                                details="soft_failure_non_retryable",
+                                scenario_name=scenario_name,
+                                gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
+                                ports=PortBundle(port=int(args.port), tm_port=int(tm_port)),
+                            )
                             raise RuntimeError(
                                 "Scenario failed after evaluator exit "
                                 f"(reason={soft_failure_kind})."
@@ -10133,6 +12411,18 @@ def main() -> None:
                                 attempt_limit=scenario_retry_limit,
                             )
                             detail_reason = missing_results_kind
+                            append_retry_event(
+                                single_retry_log_path,
+                                scope="single_scenario",
+                                attempt=scenario_attempt,
+                                retry_limit=scenario_retry_limit,
+                                failure_kind=detail_reason,
+                                outcome="retry_exhausted",
+                                details="missing_terminal_outcomes_non_retryable",
+                                scenario_name=scenario_name,
+                                gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
+                                ports=PortBundle(port=int(args.port), tm_port=int(tm_port)),
+                            )
                             raise RuntimeError(
                                 "Scenario exited without terminal route outcomes "
                                 f"(reason={detail_reason})."
@@ -10206,6 +12496,18 @@ def main() -> None:
                             current_attempt=scenario_attempt,
                             attempt_limit=scenario_retry_limit,
                         )
+                        append_retry_event(
+                            single_retry_log_path,
+                            scope="single_scenario",
+                            attempt=scenario_attempt,
+                            retry_limit=scenario_retry_limit,
+                            failure_kind=failure_kind,
+                            outcome="retry_exhausted",
+                            details=f"evaluator_exit_non_retryable_rc={result.returncode}",
+                            scenario_name=scenario_name,
+                            gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
+                            ports=PortBundle(port=int(args.port), tm_port=int(tm_port)),
+                        )
                         raise RuntimeError(
                             "Scenario evaluator exited nonzero "
                             f"(reason={failure_kind}, returncode={result.returncode})."
@@ -10218,6 +12520,18 @@ def main() -> None:
                         temp_dir.cleanup()
 
             if retry_scenario:
+                append_retry_event(
+                    single_retry_log_path,
+                    scope="single_scenario",
+                    attempt=scenario_attempt,
+                    retry_limit=scenario_retry_limit,
+                    failure_kind=retry_reason or "generic",
+                    outcome="retry_queued",
+                    details="scenario_retry_requested",
+                    scenario_name=scenario_name,
+                    gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
+                    ports=PortBundle(port=int(args.port), tm_port=int(tm_port)),
+                )
                 _print_failure_banner(
                     f"Scenario {scenario_name!r} failed -- "
                     f"attempt {format_attempt_counter(scenario_attempt, scenario_retry_limit)}, "
@@ -10287,6 +12601,18 @@ def main() -> None:
                 current_attempt=scenario_attempt,
                 attempt_limit=scenario_retry_limit,
             )
+            append_retry_event(
+                single_retry_log_path,
+                scope="single_scenario",
+                attempt=scenario_attempt,
+                retry_limit=scenario_retry_limit,
+                failure_kind="retry_limit_exceeded",
+                outcome="retry_exhausted",
+                details="scenario_retry_limit_exceeded",
+                scenario_name=scenario_name,
+                gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
+                ports=PortBundle(port=int(args.port), tm_port=int(tm_port)),
+            )
             retry_limit_label = (
                 str(scenario_retry_limit)
                 if scenario_retry_limit is not None
@@ -10295,6 +12621,18 @@ def main() -> None:
             raise RuntimeError(
                 f"Scenario '{results_tag}' exceeded the retry limit ({retry_limit_label})."
             )
+        append_retry_event(
+            single_retry_log_path,
+            scope="single_scenario",
+            attempt=scenario_attempt,
+            retry_limit=scenario_retry_limit,
+            failure_kind="none",
+            outcome="success",
+            details="scenario_completed",
+            scenario_name=scenario_name,
+            gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
+            ports=PortBundle(port=int(args.port), tm_port=int(tm_port)),
+        )
         update_dashboard_status(
             dashboard_status_path,
             phase="finished",
@@ -10307,6 +12645,19 @@ def main() -> None:
             current_attempt=scenario_attempt,
             attempt_limit=scenario_retry_limit,
         )
+        wall_s = time.monotonic() - run_start_monotonic
+        for line in format_performance_summary_lines(wall_clock_s=wall_s):
+            print(line)
+        write_performance_report(
+            single_perf_report_path,
+            wall_clock_s=wall_s,
+            context={
+                "mode": "single_scenario",
+                "scenario_name": str(scenario_name),
+                "results_root": str(single_results_root),
+            },
+        )
+        single_perf_report_written = True
     finally:
         if crosswalk_worker:
             crosswalk_worker.stop()
@@ -10322,6 +12673,20 @@ def main() -> None:
         _active_colmdriver_vllm_manager = None
         if fake_ego_temp_dir is not None:
             fake_ego_temp_dir.cleanup()
+        if not single_perf_report_written:
+            wall_s = time.monotonic() - run_start_monotonic
+            for line in format_performance_summary_lines(wall_clock_s=wall_s):
+                print(line)
+            write_performance_report(
+                single_perf_report_path,
+                wall_clock_s=wall_s,
+                context={
+                    "mode": "single_scenario",
+                    "scenario_name": str(scenario_name),
+                    "results_root": str(single_results_root),
+                    "finalized_in": "finally",
+                },
+            )
 
 
 if __name__ == "__main__":

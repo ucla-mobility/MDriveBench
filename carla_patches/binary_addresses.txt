@@ -1,0 +1,156 @@
+=== Patch Site Disassembly for CarlaUE4-Linux-Shipping ===
+=== Generated 2026-04-13T17:56:32-07:00 ===
+
+--- Fix 2: deregister_descriptor (0x5ba0ca3) ---
+
+carla912/CarlaUE4/Binaries/Linux/CarlaUE4-Linux-Shipping:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000005ba0c40 <_ZN11clmdep_asio6detail28reactive_socket_service_base7destroyERNS1_24base_implementation_typeE+0x90>:
+ 5ba0c40:	30 5d c3             	xor    %bl,-0x3d(%rbp)
+ 5ba0c43:	cc                   	int3   
+ 5ba0c44:	cc                   	int3   
+ 5ba0c45:	cc                   	int3   
+ 5ba0c46:	cc                   	int3   
+ 5ba0c47:	cc                   	int3   
+ 5ba0c48:	cc                   	int3   
+ 5ba0c49:	cc                   	int3   
+ 5ba0c4a:	cc                   	int3   
+ 5ba0c4b:	cc                   	int3   
+ 5ba0c4c:	cc                   	int3   
+ 5ba0c4d:	cc                   	int3   
+ 5ba0c4e:	cc                   	int3   
+ 5ba0c4f:	cc                   	int3   
+
+0000000005ba0c50 <_ZN11clmdep_asio6detail13epoll_reactor21deregister_descriptorEiRPNS1_16descriptor_stateEb>:
+ 5ba0c50:	55                   	push   %rbp
+ 5ba0c51:	48 89 e5             	mov    %rsp,%rbp
+ 5ba0c54:	48 81 ec 90 00 00 00 	sub    $0x90,%rsp
+ 5ba0c5b:	88 c8                	mov    %cl,%al
+ 5ba0c5d:	48 89 7d f8          	mov    %rdi,-0x8(%rbp)
+ 5ba0c61:	89 75 f4             	mov    %esi,-0xc(%rbp)
+ 5ba0c64:	48 89 55 e8          	mov    %rdx,-0x18(%rbp)
+ 5ba0c68:	24 01                	and    $0x1,%al
+ 5ba0c6a:	88 45 e7             	mov    %al,-0x19(%rbp)
+ 5ba0c6d:	48 8b 55 f8          	mov    -0x8(%rbp),%rdx
+ 5ba0c71:	48 8b 7d e8          	mov    -0x18(%rbp),%rdi
+ 5ba0c75:	48 83 3f 00          	cmpq   $0x0,(%rdi)
+ 5ba0c79:	48 89 55 90          	mov    %rdx,-0x70(%rbp)
+ 5ba0c7d:	0f 85 05 00 00 00    	jne    5ba0c88 <_ZN11clmdep_asio6detail13epoll_reactor21deregister_descriptorEiRPNS1_16descriptor_stateEb+0x38>
+ 5ba0c83:	e9 c9 01 00 00       	jmp    5ba0e51 <_ZN11clmdep_asio6detail13epoll_reactor21deregister_descriptorEiRPNS1_16descriptor_stateEb+0x201>
+ 5ba0c88:	48 8b 45 e8          	mov    -0x18(%rbp),%rax
+ 5ba0c8c:	48 8b 00             	mov    (%rax),%rax
+ 5ba0c8f:	48 83 c0 28          	add    $0x28,%rax
+ 5ba0c93:	48 8d 7d d0          	lea    -0x30(%rbp),%rdi
+ 5ba0c97:	48 89 c6             	mov    %rax,%rsi
+ 5ba0c9a:	e8 71 c2 ff ff       	call   5b9cf10 <_ZN11clmdep_asio6detail11scoped_lockINS0_11posix_mutexEEC2ERS2_>
+ 5ba0c9f:	48 8b 45 e8          	mov    -0x18(%rbp),%rax
+ 5ba0ca3:	48 8b 00             	mov    (%rax),%rax
+ 5ba0ca6:	f6 80 90 00 00 00 01 	testb  $0x1,0x90(%rax)
+ 5ba0cad:	0f                   	.byte 0xf
+ 5ba0cae:	85                   	.byte 0x85
+ 5ba0caf:	95                   	xchg   %eax,%ebp
+
+--- Fix 3: do_read trailing close (0x5baa440-0x5baa475) ---
+
+carla912/CarlaUE4/Binaries/Linux/CarlaUE4-Linux-Shipping:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000005baa440 <_ZN3rpc6detail14server_session7do_readEv+0x130>:
+ 5baa440:	8b bd 68 ff ff ff    	mov    -0x98(%rbp),%edi
+ 5baa446:	48 83 c7 40          	add    $0x40,%rdi
+ 5baa44a:	e8 41 88 ff ff       	call   5ba2c90 <_ZNKSt3__113__atomic_baseIbLb0EEcvbEv>
+ 5baa44f:	a8 01                	test   $0x1,%al
+ 5baa451:	0f 85 05 00 00 00    	jne    5baa45c <_ZN3rpc6detail14server_session7do_readEv+0x14c>
+ 5baa457:	e9 68 00 00 00       	jmp    5baa4c4 <_ZN3rpc6detail14server_session7do_readEv+0x1b4>
+ 5baa45c:	48 8b 85 68 ff ff ff 	mov    -0x98(%rbp),%rax
+ 5baa463:	48 83 c0 10          	add    $0x10,%rax
+ 5baa467:	48 89 c7             	mov    %rax,%rdi
+ 5baa46a:	e8 b1 4a 00 00       	call   5baef20 <_ZN11clmdep_asio12basic_socketINS_2ip3tcpENS_21stream_socket_serviceIS2_EEE5closeEv>
+ 5baa46f:	e9 00 00 00 00       	jmp    5baa474 <_ZN3rpc6detail14server_session7do_readEv+0x164>
+ 5baa474:	e9                   	.byte 0xe9
+
+--- Fix 4: close lambda (0x5baacb0-0x5baad10) ---
+
+carla912/CarlaUE4/Binaries/Linux/CarlaUE4-Linux-Shipping:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000005baacb0 <_ZZN3rpc6detail14server_session5closeEvENK3$_0clEv>:
+ 5baacb0:	55                   	push   %rbp
+ 5baacb1:	48 89 e5             	mov    %rsp,%rbp
+ 5baacb4:	48 83 ec 20          	sub    $0x20,%rsp
+ 5baacb8:	48 89 7d f8          	mov    %rdi,-0x8(%rbp)
+ 5baacbc:	48 8b 7d f8          	mov    -0x8(%rbp),%rdi
+ 5baacc0:	48 8b 07             	mov    (%rdi),%rax
+ 5baacc3:	48 89 c1             	mov    %rax,%rcx
+ 5baacc6:	48 83 c1 10          	add    $0x10,%rcx
+ 5baacca:	48 89 7d f0          	mov    %rdi,-0x10(%rbp)
+ 5baacce:	48 89 cf             	mov    %rcx,%rdi
+ 5baacd1:	48 89 45 e8          	mov    %rax,-0x18(%rbp)
+ 5baacd5:	e8 46 42 00 00       	call   5baef20 <_ZN11clmdep_asio12basic_socketINS_2ip3tcpENS_21stream_socket_serviceIS2_EEE5closeEv>
+ 5baacda:	48 8b 45 e8          	mov    -0x18(%rbp),%rax
+ 5baacde:	48 83 b8 d0 00 00 00 	cmpq   $0x0,0xd0(%rax)
+ 5baace5:	00 
+ 5baace6:	0f 84 1b 00 00 00    	je     5baad07 <_ZZN3rpc6detail14server_session5closeEvENK3$_0clEv+0x57>
+ 5baacec:	48 8b 45 e8          	mov    -0x18(%rbp),%rax
+ 5baacf0:	48 8b b8 d0 00 00 00 	mov    0xd0(%rax),%rdi
+ 5baacf7:	48 8b 4d f0          	mov    -0x10(%rbp),%rcx
+ 5baacfb:	48 83 c1 08          	add    $0x8,%rcx
+ 5baacff:	48 89 ce             	mov    %rcx,%rsi
+ 5baad02:	e8 79 ea fe ff       	call   5b99780 <_ZN3rpc6server13close_sessionERKNSt3__110shared_ptrINS_6detail14server_sessionEEE>
+ 5baad07:	48 83 c4 20          	add    $0x20,%rsp
+ 5baad0b:	5d                   	pop    %rbp
+ 5baad0c:	c3                   	ret    
+ 5baad0d:	0f 1f 00             	nopl   (%rax)
+
+--- basic_socket::close (0x5baef20) ---
+
+carla912/CarlaUE4/Binaries/Linux/CarlaUE4-Linux-Shipping:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000005baef20 <_ZN11clmdep_asio12basic_socketINS_2ip3tcpENS_21stream_socket_serviceIS2_EEE5closeEv>:
+ 5baef20:	55                   	push   %rbp
+ 5baef21:	48 89 e5             	mov    %rsp,%rbp
+ 5baef24:	48 83 ec 40          	sub    $0x40,%rsp
+ 5baef28:	48 89 7d f8          	mov    %rdi,-0x8(%rbp)
+ 5baef2c:	48 8b 7d f8          	mov    -0x8(%rbp),%rdi
+ 5baef30:	48 8d 45 e8          	lea    -0x18(%rbp),%rax
+ 5baef34:	48 89 7d d0          	mov    %rdi,-0x30(%rbp)
+ 5baef38:	48 89 c7             	mov    %rax,%rdi
+ 5baef3b:	e8 a0 df fe ff       	call   5b9cee0 <_ZNSt3__110error_codeC2Ev>
+ 5baef40:	48 8b 45 d0          	mov    -0x30(%rbp),%rax
+ 5baef44:	48 89 c7             	mov    %rax,%rdi
+ 5baef47:	e8 e4 57 fe ff       	call   5b94730 <_ZN10clmdep_fmt14BasicFormatterIcE6writerEv>
+ 5baef4c:	48 8b 7d d0          	mov    -0x30(%rbp),%rdi
+ 5baef50:	48 89 45 c8          	mov    %rax,-0x38(%rbp)
+ 5baef54:	e8 47 ed fd ff       	call   5b8dca0 <_ZN10clmdep_fmt11BasicWriterIcE3getEPc>
+ 5baef59:	48 8b 7d c8          	mov    -0x38(%rbp),%rdi
+ 5baef5d:	48 89 c6             	mov    %rax,%rsi
+ 5baef60:	48 8d 55 e8          	lea    -0x18(%rbp),%rdx
+ 5baef64:	e8 97 0e 00 00       	call   5bafe00 <_ZN11clmdep_asio21stream_socket_serviceINS_2ip3tcpEE5closeERNS_6detail23reactive_socket_serviceIS2_E19implementation_typeERNSt3__110error_codeE>
+ 5baef69:	89 45 d8             	mov    %eax,-0x28(%rbp)
+ 5baef6c:	48 89 55 e0          	mov    %rdx,-0x20(%rbp)
+ 5baef70:	48 8d 7d e8          	lea    -0x18(%rbp),%rdi
+ 5baef74:	48 8d 35 64 c0 0c fb 	lea    -0x4f33f9c(%rip),%rsi        # c7afdf <_ZN23TextStringificationUtilL10TextMarkerE+0x1f4a65>
+ 5baef7b:	e8 a0 d8 fe ff       	call   5b9c820 <_ZN11clmdep_asio6detail11throw_errorERKNSt3__110error_codeEPKc>
+ 5baef80:	48 83 c4 40          	add    $0x40,%rsp
+ 5baef84:	5d                   	pop    %rbp
+ 5baef85:	c3                   	ret    
+ 5baef86:	cc                   	int3   
+ 5baef87:	cc                   	int3   
+ 5baef88:	cc                   	int3   
+ 5baef89:	cc                   	int3   
+ 5baef8a:	cc                   	int3   
+ 5baef8b:	cc                   	int3   
+ 5baef8c:	cc                   	int3   
+ 5baef8d:	cc                   	int3   
+ 5baef8e:	cc                   	int3   
+ 5baef8f:	cc                   	int3   
