@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='utf-8'?>
+<routes>
+  <route id="07_placement" town="Town05" role="ego" speed="7.0">
+    <waypoint x="-127.912" y="34.925" z="0.000" yaw="89.488618" />
+    <waypoint x="-127.573" y="72.924" z="0.000" yaw="144.714747" />
+    <waypoint x="-143.794" y="84.402" z="0.000" yaw="-179.934445" />
+    <waypoint x="-172.794" y="84.369" z="0.000" yaw="-179.934445" />
+  <weather id="rain" cloudiness="100.0" precipitation="70.0" precipitation_deposits="85.0" wind_intensity="70.0" sun_azimuth_angle="210.0" sun_altitude_angle="15.0" wetness="90.0" fog_distance="45.0" fog_density="35.0" fog_falloff="1.5" /></route>
+</routes>

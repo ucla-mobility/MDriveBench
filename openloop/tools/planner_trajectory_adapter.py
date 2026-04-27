@@ -31,9 +31,11 @@ Bench2Drive agents:  x = forward, y = left.  World conversion uses::
 
 Time alignment
 --------------
-The evaluator compares at 2 Hz (0.5 s steps) for 3 s → 6 future
-steps.  Adapters resample the planner's native resolution to exactly
-6 world-frame waypoints at t+0.5, t+1.0, … t+3.0 s.
+The evaluator compares on a shared 2 Hz (0.5 s) grid. By default the
+grid spans 3.0 s → 6 future steps, but the horizon can be extended via
+the ``OPENLOOP_CANONICAL_HORIZON_S`` environment variable. Adapters
+resample the planner's native resolution to that shared world-frame
+grid.
 """
 from __future__ import annotations
 
@@ -69,7 +71,7 @@ class PlannerOutput:
         cannot produce a trajectory.
     native_dt : float
         Seconds between consecutive ``raw_world_wps`` waypoints (planner's
-        own time step, e.g. 0.1 s for ColMDriver, 0.05 s for CoDriving,
+        own time step, e.g. 0.1 s for ColMDriver, 0.2 s for CoDriving,
         0.5 s for VAD/UniAD/TCP/LMDrive).  Defaults to EVAL_DT (0.5 s).
     raw_export : optional RawTrajectoryExport
         Native-space pre-resampling trajectory payload for Stage 1 debugging.
@@ -157,8 +159,28 @@ def _build_raw_export(
 
 # ── Constants ────────────────────────────────────────────────
 
-EVAL_HORIZON_STEPS = 6       # 3 s at 2 Hz
-EVAL_DT = 0.5                # seconds between evaluation waypoints
+def _env_positive_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return float(default)
+    try:
+        value = float(raw)
+    except Exception as exc:
+        raise ValueError(f"{name} must be a positive float, got {raw!r}") from exc
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError(f"{name} must be a positive finite float, got {raw!r}")
+    return float(value)
+
+
+EVAL_DT = 0.5  # seconds between evaluation waypoints
+EVAL_HORIZON_S = _env_positive_float("OPENLOOP_CANONICAL_HORIZON_S", 3.0)
+EVAL_HORIZON_STEPS = int(round(EVAL_HORIZON_S / EVAL_DT))
+if EVAL_HORIZON_STEPS <= 0 or abs(EVAL_HORIZON_STEPS * EVAL_DT - EVAL_HORIZON_S) > 1e-9:
+    raise ValueError(
+        "OPENLOOP_CANONICAL_HORIZON_S must be a positive multiple of 0.5 s; "
+        f"got {EVAL_HORIZON_S!r}"
+    )
+
 MAX_REASONABLE_FIRST_WP_OFFSET_M = 50.0
 DEGENERATE_TRAJ_EPS_M = 1e-4
 TRAJECTORY_EXTRAPOLATION_ENABLED = True
@@ -803,7 +825,7 @@ def _adapt_tcp(
       forward = +x, left = +y.
 
     TCP waypoints span ~2.0 s (4 points at ~0.5 s each).  We
-    extrapolate to fill the 3.0 s evaluation horizon.
+    extrapolate to fill the configured evaluation horizon.
     """
     md = getattr(agent, "pid_metadata", None)
     if not isinstance(md, dict):
@@ -970,9 +992,10 @@ def _adapt_codriving(
             },
         )
 
-    # CoDriving trains on consecutive simulation frames at 20 Hz (skip_frames=1,
-    # output_points=10), giving native dt = 0.05 s per waypoint.
-    src_dt = 0.05
+    # CoDriving planning loss and training utilities use interval = 0.2 s for
+    # future_waypoints (see codriving/tools/train_end2end.py). The planner emits
+    # 10 future points, so native horizon is ~2.0 s rather than 0.5 s.
+    src_dt = 0.20
     resampled = _resample_trajectory(world_wps, src_dt=src_dt)
     return PlannerOutput(
         future_trajectory_world=resampled,
@@ -1007,9 +1030,9 @@ def _adapt_codriving(
                     "anchor is not included in the 10 predicted points"
                 ),
                 (
-                    "per-point timestamps are not emitted by CoDriving; native_dt=0.05 s is "
-                    "the training-data sampling rate (20 Hz, skip_frames=1, output_points=10), "
-                    "so native_timestamps is intentionally left null"
+                    "per-point timestamps are not emitted by CoDriving; native_dt=0.20 s is "
+                    "the waypoint interval used by CoDriving planning training/consistency "
+                    "code for future_waypoints, so native_timestamps is intentionally left null"
                 ),
                 (
                     "observed freshness/reuse: CoDriving commonly reuses the previous control "

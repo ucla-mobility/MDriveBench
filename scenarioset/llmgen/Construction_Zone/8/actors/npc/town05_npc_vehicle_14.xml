@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="utf-8"?>
+<routes><route id="town05_npc_npc_vehicle_14" model="vehicle.audi.a2" role="npc" town="Town05"><weather id="rain" cloudiness="100.0" precipitation="70.0" precipitation_deposits="85.0" wind_intensity="70.0" sun_azimuth_angle="210.0" sun_altitude_angle="15.0" wetness="90.0" fog_distance="45.0" fog_density="35.0" fog_falloff="1.5" /><waypoint x="-120.410000" y="91.169000" yaw="179.492536" z="0.000000" /></route></routes>

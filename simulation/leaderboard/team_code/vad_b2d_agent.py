@@ -11,6 +11,7 @@ import math
 from collections import OrderedDict
 from scipy.optimize import fsolve
 import torch
+torch.backends.cudnn.benchmark = True
 import carla
 import yaml
 import numpy as np
@@ -291,7 +292,10 @@ class VadAgent(autonomous_agent.AutonomousAgent):
         refined_worlds = list(self._global_plan_world_coord)
 
         self._route_planners = []
-        for ego_id in range(self.ego_vehicles_num):
+        actual_plans = len(refined_plans)
+        if actual_plans < self.ego_vehicles_num:
+            self._log(f"[WARN] ego_vehicles_num={self.ego_vehicles_num} but only {actual_plans} routes in global_plan; capping loop")
+        for ego_id in range(min(self.ego_vehicles_num, actual_plans)):
             route_planner = RoutePlanner(4.0, 50.0, lat_ref=self.lat_ref, lon_ref=self.lon_ref)
             route_planner.set_route(refined_plans[ego_id], True, refined_worlds[ego_id])
             self._route_planners.append(route_planner)
@@ -475,11 +479,15 @@ class VadAgent(autonomous_agent.AutonomousAgent):
         control_all = []
         self.step += 1
         for ego_id in range(self.ego_vehicles_num):
-            if CarlaDataProvider.get_hero_actor(hero_id=ego_id) is not None:
-                control = self.run_step_single_vehicle(ego_id, input_data, timestamp)
-                control_all.append(control)
-            else:
+            hero = CarlaDataProvider.get_hero_actor(hero_id=ego_id)
+            if hero is None or not getattr(hero, "is_alive", True):
                 control_all.append(None)
+                continue
+            if f'CAM_FRONT_{ego_id}' not in input_data:
+                control_all.append(None)
+                continue
+            control = self.run_step_single_vehicle(ego_id, input_data, timestamp)
+            control_all.append(control)
         return control_all
 
     def _restore_model_temporal_state(self, ego_id):

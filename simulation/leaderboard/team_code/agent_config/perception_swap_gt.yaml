@@ -1,0 +1,25 @@
+# PerceptionSwapAgent — ground-truth perception oracle (control row of the
+# perception-vs-planning matrix). Detection forward pass is bypassed; the
+# planner sees Detections derived directly from world.get_actors(), range-
+# gated to the LiDAR sensor box.
+#
+# Why detector=fcooper despite use_gt_perception=true:
+#   The agent unconditionally instantiates a PerceptionRunner at setup time.
+#   Picking fcooper here is the cheapest detector to load (smallest weights
+#   among the four ported HEAL checkpoints). Its forward pass never runs in
+#   GT mode — see PerceptionSwapAgent.run_step().
+#
+# log_tag="gt" gives this run a unique prefix for /tmp/perception_swap_*
+# files, so it can run in parallel with the perception_swap_fcooper cell
+# without clobbering its diag.jsonl / ap_summary outputs.
+detector: fcooper
+cooperative: true
+comm_range_m: 70
+max_cooperators: 4
+cruise_speed: 6.0
+score_threshold: 0.20
+detection_radius: 1.5
+collect_ap_metrics: true
+disable_brake: false
+use_gt_perception: true
+log_tag: gt

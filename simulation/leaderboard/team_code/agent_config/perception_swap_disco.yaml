@@ -1,0 +1,9 @@
+# PerceptionSwapAgent — DiscoNet detector + rule-based planner.
+detector: disco
+cooperative: true
+comm_range_m: 70
+max_cooperators: 4
+cruise_speed: 6.0
+score_threshold: 0.20
+detection_radius: 1.5
+collect_ap_metrics: true

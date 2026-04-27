@@ -176,6 +176,68 @@ class LeaderboardEvaluator(object):
         signal.signal(signal.SIGINT, self._signal_handler)
 
         self.ego_vehicles_num = args.ego_num
+        self._reset_route_runtime_ego_mapping()
+
+    def _reset_route_runtime_ego_mapping(self):
+        self._current_route_runtime_ego_count = int(self.ego_vehicles_num)
+        self._current_route_active_to_original_ego_index = list(
+            range(int(self.ego_vehicles_num))
+        )
+        self._current_route_original_to_active_ego_index = {
+            int(idx): int(idx) for idx in range(int(self.ego_vehicles_num))
+        }
+        self._current_route_spawn_metadata = {}
+
+    def _capture_route_runtime_ego_mapping(self, scenario):
+        runtime_ego_count = int(
+            getattr(
+                scenario,
+                "runtime_ego_vehicle_count",
+                getattr(scenario, "ego_vehicles_num", self.ego_vehicles_num),
+            )
+            or 0
+        )
+        active_to_original = list(
+            getattr(
+                scenario,
+                "active_to_original_ego_index",
+                list(range(runtime_ego_count)),
+            )
+            or []
+        )
+        if len(active_to_original) != runtime_ego_count:
+            active_to_original = list(range(runtime_ego_count))
+        original_to_active = {
+            int(original_idx): int(active_idx)
+            for active_idx, original_idx in enumerate(active_to_original)
+        }
+        requested_ego_count = int(
+            getattr(scenario, "requested_ego_vehicle_count", self.ego_vehicles_num)
+            or self.ego_vehicles_num
+        )
+        skipped_ego_indices = [
+            idx
+            for idx in range(requested_ego_count)
+            if idx not in original_to_active
+        ]
+        spawn_failures = list(getattr(scenario, "ego_spawn_failures", []) or [])
+        self._current_route_runtime_ego_count = runtime_ego_count
+        self._current_route_active_to_original_ego_index = active_to_original
+        self._current_route_original_to_active_ego_index = original_to_active
+        self._current_route_spawn_metadata = {
+            "partial_spawn_accepted": bool(
+                getattr(scenario, "partial_ego_spawn_accepted", False)
+            ),
+            "requested_ego_count": requested_ego_count,
+            "runtime_ego_count": runtime_ego_count,
+            "active_to_original_ego_index": active_to_original,
+            "original_to_active_ego_index": {
+                str(key): value for key, value in original_to_active.items()
+            },
+            "skipped_ego_indices": skipped_ego_indices,
+            "ego_spawn_failures": spawn_failures,
+        }
+        return runtime_ego_count
 
     def _signal_handler(self, signum, frame):
         """
@@ -379,20 +441,71 @@ class LeaderboardEvaluator(object):
         Computes and saved the simulation statistics
         """
         # register statistics
-        
+
         current_stats_record = []
         current_stats_record.extend([[] for _ in range(0,ego_car_num)])
+        spawn_meta = dict(self._current_route_spawn_metadata or {})
+        original_to_active = dict(self._current_route_original_to_active_ego_index or {})
+        runtime_ego_count = int(
+            spawn_meta.get("runtime_ego_count", self._current_route_runtime_ego_count)
+            or self._current_route_runtime_ego_count
+            or ego_car_num
+        )
+        spawn_failures_by_original = {}
+        for failure in spawn_meta.get("ego_spawn_failures", []) or []:
+            try:
+                original_idx = int(failure.get("original_ego_index"))
+            except Exception:
+                continue
+            spawn_failures_by_original[original_idx] = dict(failure)
         for i in range(ego_car_num):
-            
+            active_idx = original_to_active.get(i)
+            route_failure = crash_message
+            if active_idx is None and bool(spawn_meta.get("partial_spawn_accepted", False)):
+                route_failure = "Ego spawn skipped"
             current_stats_record[i] = self.statistics_manager[i].compute_route_statistics(
                 config,
                 self.manager.scenario_duration_system,
                 self.manager.scenario_duration_game,
-                crash_message,
-                pdm_trace=self.manager.pdm_traces[i] if hasattr(self.manager, "pdm_traces") else None,
+                route_failure,
+                pdm_trace=(
+                    self.manager.pdm_traces[active_idx]
+                    if hasattr(self.manager, "pdm_traces")
+                    and active_idx is not None
+                    and active_idx < len(self.manager.pdm_traces)
+                    else None
+                ),
                 pdm_world_trace=getattr(self.manager, "pdm_world_trace", None),
                 pdm_tl_polygons=getattr(self.manager, "pdm_tl_polygons", None),
             )
+            if not isinstance(current_stats_record[i].meta, dict):
+                current_stats_record[i].meta = {}
+            if spawn_meta:
+                current_stats_record[i].meta["requested_ego_count"] = int(
+                    spawn_meta.get("requested_ego_count", ego_car_num) or ego_car_num
+                )
+                current_stats_record[i].meta["runtime_ego_count"] = runtime_ego_count
+                current_stats_record[i].meta["skipped_ego_indices"] = list(
+                    spawn_meta.get("skipped_ego_indices", []) or []
+                )
+                current_stats_record[i].meta["active_to_original_ego_index"] = list(
+                    spawn_meta.get("active_to_original_ego_index", []) or []
+                )
+                current_stats_record[i].meta["original_to_active_ego_index"] = dict(
+                    spawn_meta.get("original_to_active_ego_index", {}) or {}
+                )
+                current_stats_record[i].meta["partial_spawn_accepted"] = bool(
+                    spawn_meta.get("partial_spawn_accepted", False)
+                )
+                if active_idx is None:
+                    current_stats_record[i].meta["ego_spawn_status"] = "skipped"
+                    failure_detail = spawn_failures_by_original.get(i)
+                    if failure_detail is not None:
+                        current_stats_record[i].meta["ego_spawn_failure"] = failure_detail
+                else:
+                    current_stats_record[i].meta["ego_spawn_status"] = "spawned"
+                    current_stats_record[i].meta["runtime_ego_index"] = int(active_idx)
+                    current_stats_record[i].meta["original_ego_index"] = int(i)
 
             print("\033[1m> Registering the route statistics\033[0m")
             path_tmp = os.path.join(os.path.dirname(checkpoint), "ego_vehicle_{}".format(i), os.path.basename(checkpoint))
@@ -416,6 +529,7 @@ class LeaderboardEvaluator(object):
         """
         crash_message = ""
         entry_status = "Started"
+        self._reset_route_runtime_ego_mapping()
 
         log_carla_event(
             "ROUTE_PREPARE_BEGIN",
@@ -532,11 +646,33 @@ class LeaderboardEvaluator(object):
                 ego_vehicles_num=self.ego_vehicles_num, crazy_level=args.crazy_level,\
                       crazy_proportion=args.crazy_proportion, log_dir=log_dir, trigger_distance = args.trigger_distance)
             config.trajectory=scenario.get_new_config_trajectory()
-            if self.ego_vehicles_num != 1 :
-                for j in range(self.ego_vehicles_num):
-                    self.statistics_manager[j].set_scenario(scenario.scenario[j])
+            runtime_ego_count = self._capture_route_runtime_ego_mapping(scenario)
+            if runtime_ego_count < int(self.ego_vehicles_num):
+                skipped = self._current_route_spawn_metadata.get("skipped_ego_indices", [])
+                print(
+                    "[WARN] Proceeding with partial ego spawn during evaluation: "
+                    f"runtime_egos={runtime_ego_count}/{int(self.ego_vehicles_num)} "
+                    f"skipped_original_egos={skipped}"
+                )
+            if runtime_ego_count != 1 :
+                for active_idx, original_idx in enumerate(
+                    self._current_route_active_to_original_ego_index
+                ):
+                    self.statistics_manager[int(original_idx)].set_scenario(
+                        scenario.scenario[active_idx]
+                    )
             else:
-                self.statistics_manager[0].set_scenario(scenario.scenario)
+                original_idx = (
+                    self._current_route_active_to_original_ego_index[0]
+                    if self._current_route_active_to_original_ego_index
+                    else 0
+                )
+                scenario_obj = (
+                    scenario.scenario[0]
+                    if isinstance(scenario.scenario, list)
+                    else scenario.scenario
+                )
+                self.statistics_manager[int(original_idx)].set_scenario(scenario_obj)
 
 
             # self.agent_instance._init()
@@ -550,7 +686,7 @@ class LeaderboardEvaluator(object):
             # Load scenario and agent into manager then prepare to run it
             if args.record:
                 self.client.start_recorder("{}/{}_rep{}.log".format(args.record, config.name, config.repetition_index))
-            self.manager.load_scenario(scenario, self.agent_instance, config.repetition_index, self.ego_vehicles_num, save_root=config.save_path_root, sensor_tf_list=scenario.get_sensor_tf(), is_crazy=(args.crazy_level != 0))
+            self.manager.load_scenario(scenario, self.agent_instance, config.repetition_index, runtime_ego_count, save_root=config.save_path_root, sensor_tf_list=scenario.get_sensor_tf(), is_crazy=(args.crazy_level != 0))
             log_carla_event(
                 "ROUTE_SCENARIO_LOADED",
                 process_name=EVALUATOR_PROCESS_NAME,

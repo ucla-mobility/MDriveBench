@@ -120,6 +120,21 @@ class RoutePlanner(object):
         self.debug.dot(gps, gps, (0, 0, 255))
         self.debug.show()
 
+        # Guard: whenever route[1] is within safe_ahead of ego (including past
+        # it), return a projected forward point.  Fires in tail mode AND
+        # mid-route on tight geometry (roundabout curves, dense on-ramp
+        # waypoints at high speed).
+        route = self.route[vehicle_num]
+        seg_vec = route[1][0] - route[0][0]
+        seg_norm = np.linalg.norm(seg_vec)
+        if seg_norm > 1e-6:
+            seg_dir = seg_vec / seg_norm
+            safe_ahead = max(1.0, 0.5 * self.min_distance)
+            remaining = float(np.dot(route[1][0] - gps, seg_dir))
+            if remaining <= safe_ahead:
+                safe_pos = gps + seg_dir * safe_ahead
+                return (safe_pos, route[1][1])
+
         return self.route[vehicle_num][1]
     
     def gps_to_location(self, gps):

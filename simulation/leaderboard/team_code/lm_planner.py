@@ -129,6 +129,24 @@ class RoutePlanner(object):
         self.debug.dot(gps, gps, (0, 0, 255))
         self.debug.show()
 
+        # Guard: whenever route[1] is within safe_ahead of ego (including past
+        # it), return a projected forward point.  Fires in tail mode AND
+        # mid-route on tight geometry (roundabout curves, dense on-ramp
+        # waypoints at high speed).
+        route = self.route[vehicle_num]
+        seg_vec = route[1][0] - route[0][0]
+        seg_norm = np.linalg.norm(seg_vec)
+        if seg_norm > 1e-6:
+            seg_dir = seg_vec / seg_norm
+            safe_ahead = max(1.0, 0.5 * self.min_distance)
+            remaining = float(np.dot(route[1][0] - gps, seg_dir))
+            if remaining <= safe_ahead:
+                safe_pos = gps + seg_dir * safe_ahead
+                entry = route[1]
+                if len(entry) >= 3:
+                    return (safe_pos, entry[1], entry[2])
+                return (safe_pos, entry[1])
+
         return self.route[vehicle_num][1]
 
     def get_route_tracking_state(self, gps, vehicle_num=0):
@@ -548,13 +566,14 @@ class InstructionPlanner(object):
         if self.destination_distance[ego_id] != 0:
             self.curr_instruction[ego_id] = self.curr_instruction[ego_id].replace("[x]", str(int(self.destination_distance[ego_id])))
         self.last_target_point[ego_id] = tick_data['target_point']
-        if self.town_id == "Town03" and self.routes != None:
+        if self.town_id == "Town03" and self.routes is not None:
             curr_point = np.array([tick_data["gps"][0],tick_data["gps"][1]])
             origin_point = np.array([0,0])
             if np.linalg.norm(curr_point-origin_point) <= 30: # Roundabout range
                 print("[DEBUG LMDRIVE] [ROUNDABOUT] town_id=Town03 active_roundabout_instruction=1", flush=True)
                 if self.roundabout_instruction == '':
-                    self.roundabout_instruction = self._generate_roundabout_instruction(curr_point, self.routes)
+                    ego_route = self.routes[ego_id] if ego_id < len(self.routes) else self.routes[0]
+                    self.roundabout_instruction = self._generate_roundabout_instruction(curr_point, ego_route)
                 self.prev_instruction[ego_id] = self.roundabout_instruction
 
     def _update_mislead(self, mislead_id, tick_data, ego_id):

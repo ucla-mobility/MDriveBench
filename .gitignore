@@ -8,7 +8,15 @@ v2xpnp/Sample_Dataset
 v2xpnp/oldroutes
 v2xpnp/out_trajectory_database.bak_owned_by_guest_zhihao
 v2xpnp/short
+v2xpnp/no_twin
+v2xpnp/v2xscenariosrecovereable/
 
+# scratch clones of third-party annotation/dataset tools
+3d-bat/
+tum-traffic-dataset-dev-kit/
+
+scenarioset/llmgen_deselected/
+stats/
 benchmark_runs
 scenario_generator/log
 scenario_generator/routes

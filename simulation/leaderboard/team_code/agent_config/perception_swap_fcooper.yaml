@@ -1,0 +1,10 @@
+# PerceptionSwapAgent — F-Cooper detector + rule-based planner.
+detector: fcooper
+cooperative: true             # multi-ego cross-agent feature fusion (the model's design)
+comm_range_m: 70              # HEAL config default
+max_cooperators: 4
+cruise_speed: 6.0
+score_threshold: 0.20
+detection_radius: 1.5
+collect_ap_metrics: true      # query CARLA actors each tick, accumulate TP/FP, dump JSON in destroy()
+disable_brake: false          # set to true ONLY for AP-only probe runs (it hides ALL detections from the planner, defeating closed-loop perception ablation)

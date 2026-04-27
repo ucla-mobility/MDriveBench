@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<routes>
+  <route id="07_placement" town="Town02" role="ego" speed="8.0">
+    <waypoint x="132.149" y="200.178" z="0.000" yaw="90.057296"/>
+    <waypoint x="132.147" y="202.178" z="0.000" yaw="90.057296"/>
+    <waypoint x="132.143" y="206.178" z="0.000" yaw="90.057296"/>
+    <waypoint x="132.139" y="210.178" z="0.000" yaw="90.057296"/>
+    <waypoint x="132.137" y="212.178" z="0.000" yaw="90.057296"/>
+    <waypoint x="132.133" y="216.178" z="0.000" yaw="90.057296"/>
+    <waypoint x="132.129" y="220.178" z="0.000" yaw="90.057296"/>
+    <waypoint x="132.127" y="222.178" z="0.000" yaw="90.057296"/>
+    <waypoint x="132.123" y="226.178" z="0.000" yaw="90.057296"/>
+    <waypoint x="132.119" y="230.178" z="0.000" yaw="90.057296"/>
+    <waypoint x="132.118" y="231.270" z="0.000" yaw="91.179163"/>
+    <waypoint x="132.082" y="233.019" z="0.000" yaw="91.179163"/>
+    <waypoint x="131.701" y="234.335" z="0.000" yaw="91.179163"/>
+    <waypoint x="130.934" y="235.471" z="0.000" yaw="91.179163"/>
+    <waypoint x="129.847" y="236.327" z="0.000" yaw="91.179163"/>
+    <waypoint x="128.551" y="236.820" z="0.000" yaw="91.179163"/>
+    <waypoint x="126.981" y="236.921" z="0.000" yaw="91.179163"/>
+    <waypoint x="124.981" y="236.919" z="0.000" yaw="91.179163"/>
+    <waypoint x="122.981" y="236.918" z="0.000" yaw="-179.971352"/>
+    <waypoint x="118.981" y="236.916" z="0.000" yaw="-179.971352"/>
+    <waypoint x="116.981" y="236.915" z="0.000" yaw="-179.971352"/>
+    <waypoint x="112.981" y="236.912" z="0.000" yaw="-179.971352"/>
+    <waypoint x="110.981" y="236.911" z="0.000" yaw="-179.971352"/>
+    <waypoint x="106.981" y="236.909" z="0.000" yaw="-179.971352"/>
+    <waypoint x="104.981" y="236.907" z="0.000" yaw="-179.971352"/>
+    <waypoint x="100.981" y="236.905" z="0.000" yaw="-179.971352"/>
+    <waypoint x="96.981" y="236.902" z="0.000" yaw="-179.971352"/>
+  <weather id="rain" cloudiness="90.0" precipitation="60.0" precipitation_deposits="100.0" wind_intensity="1.0" sun_azimuth_angle="90.0" sun_altitude_angle="75.0" wetness="0.0" fog_distance="0.0" fog_density="0.0" fog_falloff="0.0" /></route>
+</routes>

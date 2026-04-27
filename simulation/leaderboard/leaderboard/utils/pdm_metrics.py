@@ -482,7 +482,33 @@ def _build_route_line_and_lane_ids(config, ego_id: int, carla_map):
             trajectory = config.multi_traj[0]
     if trajectory is None:
         trajectory = config.trajectory
-    coords = [(loc.x, loc.y) for loc in trajectory if loc is not None]
+    coords = []
+    for loc in trajectory:
+        if loc is None:
+            continue
+        # Some scenarios store ``config.trajectory`` as a per-step list of
+        # per-ego carla.Location objects (multi-ego parallel-driving format,
+        # written by RouteScenario._cal_multi_routes_for_parallel_driving).
+        # In that case ``loc`` is itself a list/tuple of Locations -- pick
+        # the entry for this ego before falling through to the leaf branches.
+        if (
+            isinstance(loc, (list, tuple))
+            and len(loc) > 0
+            and hasattr(loc[0], "x")
+        ):
+            try:
+                loc = loc[ego_id] if ego_id < len(loc) else loc[0]
+            except Exception:
+                loc = loc[0]
+        if hasattr(loc, "x") and hasattr(loc, "y"):
+            coords.append((loc.x, loc.y))
+        elif isinstance(loc, (list, tuple)) and len(loc) >= 2:
+            try:
+                coords.append((float(loc[0]), float(loc[1])))
+            except (TypeError, ValueError):
+                # Last-ditch: skip an entry whose components aren't numbers
+                # rather than aborting the whole route-metric computation.
+                continue
     if len(coords) < 2:
         return None, set()
     route_line = LineString(coords)

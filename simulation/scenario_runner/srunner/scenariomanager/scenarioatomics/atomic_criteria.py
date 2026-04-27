@@ -1666,9 +1666,33 @@ class RouteCompletionTest(Criterion):
                         "Agent has completed > {:.2f}% of the route".format(
                             self._percentage_route_completed))
 
-            if self._percentage_route_completed > 99.0 and location.distance(self.target) < self.DISTANCE_THRESHOLD:
+            # Default success path: agent is close to the final target.
+            near_target = (
+                self._percentage_route_completed > 99.0
+                and location.distance(self.target) < self.DISTANCE_THRESHOLD
+            )
+            # Fallback success path: the forward-pass loop above has advanced
+            # _current_index to the final waypoint (i.e. the ego has crossed
+            # past it in the waypoint's forward direction and is moving away
+            # from it). We accept this as a completion even if the agent
+            # finished in an adjacent lane and so sat outside the 10 m
+            # DISTANCE_THRESHOLD. This prevents clearly-completed routes from
+            # being scored < 100 % RC. Set LB_ROUTE_COMPLETION_REQUIRE_DIST=1
+            # in the environment to restore the pre-fallback behaviour.
+            import os as _os_completion
+            forward_passed_last = (
+                self._current_index >= self._route_length - 1
+                and _os_completion.environ.get("LB_ROUTE_COMPLETION_REQUIRE_DIST", "0") != "1"
+            )
+            if near_target or forward_passed_last:
                 route_completion_event = TrafficEvent(event_type=TrafficEventType.ROUTE_COMPLETED)
-                route_completion_event.set_message("Destination was successfully reached")
+                if forward_passed_last and not near_target:
+                    route_completion_event.set_message(
+                        "Destination passed (forward-pass fallback; "
+                        f"dist_to_target={location.distance(self.target):.2f}m)"
+                    )
+                else:
+                    route_completion_event.set_message("Destination was successfully reached")
                 self.list_traffic_events.append(route_completion_event)
                 self.test_status = "SUCCESS"
                 self._percentage_route_completed = 100

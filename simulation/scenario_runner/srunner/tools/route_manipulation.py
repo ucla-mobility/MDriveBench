@@ -130,12 +130,13 @@ def downsample_route(route, sample_factor):
     return ids_to_sample
 
 
-def interpolate_trajectory(world, waypoints_trajectory, hop_resolution=1.0):
+def interpolate_trajectory(world, waypoints_trajectory, hop_resolution=2.0):
     """
         Given some raw keypoints interpolate a full dense trajectory to be used by the user.
     :param world: an reference to the CARLA world so we can use the planner
     :param waypoints_trajectory: the current coarse trajectory
-    :param hop_resolution: is the resolution, how dense is the provided trajectory going to be made
+    :param hop_resolution: is the resolution, how dense is the provided trajectory going to be made.
+        Default 2.0 to match the alignment module's sampling_resolution.
     :return: the full interpolated route both in GPS coordinates and also in its original form.
     """
 

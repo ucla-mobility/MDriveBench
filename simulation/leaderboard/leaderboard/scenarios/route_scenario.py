@@ -50,6 +50,43 @@ def _heading_from_points(points: List[carla.Location], min_dist: float = 2.0) ->
     return None
 
 
+def _build_passthrough_route(world, locations, yaws):
+    """Build (gps, route) directly from already-aligned dense XML waypoints.
+
+    Avoids re-running interpolate_trajectory's GRP A*, which re-snaps the route
+    and inserts spurious lane-change/back-jump artefacts on top of the smooth
+    trace produced by tools/route_alignment.align_route.
+
+    locations: list[carla.Location]   from config.trajectory (per-ego)
+    yaws:      list[float|None]|None  from config.multi_traj_yaws[i] / .trajectory_yaws
+    """
+    from leaderboard.utils.route_manipulation import _get_latlon_ref, location_route_to_gps
+
+    n = len(locations)
+    route = []
+    for idx, loc in enumerate(locations):
+        yaw = None
+        if yaws is not None and idx < len(yaws):
+            yaw = yaws[idx]
+        if yaw is None:
+            # Derive from heading to next point (or from previous for the last).
+            if idx + 1 < n:
+                dx = float(locations[idx + 1].x) - float(loc.x)
+                dy = float(locations[idx + 1].y) - float(loc.y)
+            else:
+                dx = float(loc.x) - float(locations[idx - 1].x)
+                dy = float(loc.y) - float(locations[idx - 1].y)
+            yaw = math.degrees(math.atan2(dy, dx)) if (dx or dy) else 0.0
+        transform = carla.Transform(
+            carla.Location(x=float(loc.x), y=float(loc.y), z=float(loc.z)),
+            carla.Rotation(yaw=float(yaw)),
+        )
+        route.append((transform, RoadOption.LANEFOLLOW))
+    lat_ref, lon_ref = _get_latlon_ref(world)
+    gps = location_route_to_gps(route, lat_ref, lon_ref)
+    return gps, route
+
+
 def _resolve_ground_z(world: Optional[carla.World], location: carla.Location) -> Optional[float]:
     if world is None:
         return None
@@ -3646,7 +3683,7 @@ from srunner.scenariomanager.scenarioatomics.atomic_behaviors import (
     TerminateWaypointFollower,
 )
 from srunner.scenariomanager.timer import GameTime
-from srunner.scenariomanager.scenarioatomics.atomic_trigger_conditions import InTriggerDistanceToVehicle
+from srunner.scenariomanager.scenarioatomics.atomic_trigger_conditions import AtomicCondition, InTriggerDistanceToVehicle
 from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 from srunner.scenarios.basic_scenario import BasicScenario
 from srunner.scenarios.control_loss import ControlLoss
@@ -3667,7 +3704,11 @@ from srunner.scenariomanager.scenarioatomics.atomic_criteria import (CollisionTe
 from srunner.tools.scenario_helper import get_location_in_distance_from_wp
 
 from leaderboard.utils.route_parser import RouteParser, TRIGGER_THRESHOLD, TRIGGER_ANGLE_THRESHOLD, get_ego_vehicle_model
-from leaderboard.utils.route_manipulation import interpolate_trajectory
+from leaderboard.utils.route_manipulation import (
+    _get_latlon_ref,
+    interpolate_trajectory,
+    location_route_to_gps,
+)
 from leaderboard.sensors.fixed_sensors import TrafficLightSensor
 from simulation.scenario_runner.srunner.scenarios import ScenarioClassRegistry
 
@@ -3820,6 +3861,441 @@ def compare_scenarios(scenario_choice, existent_scenario):
     return False
 
 
+def _distance2d(a: carla.Location, b: carla.Location) -> float:
+    dx = float(a.x) - float(b.x)
+    dy = float(a.y) - float(b.y)
+    return math.hypot(dx, dy)
+
+
+def _normalize_xy(dx: float, dy: float) -> Tuple[float, float]:
+    norm = math.hypot(float(dx), float(dy))
+    if norm <= 1e-6:
+        return (0.0, 0.0)
+    return (float(dx) / norm, float(dy) / norm)
+
+
+def _route_points_from_entries(route_entries) -> List[carla.Location]:
+    points: List[carla.Location] = []
+    for entry in list(route_entries or []):
+        loc = None
+        try:
+            first = entry[0] if isinstance(entry, tuple) else entry
+            if hasattr(first, "location"):
+                loc = first.location
+            elif isinstance(first, carla.Location):
+                loc = first
+        except Exception:  # pylint: disable=broad-except
+            loc = None
+        if loc is None:
+            continue
+        points.append(carla.Location(x=float(loc.x), y=float(loc.y), z=float(loc.z)))
+
+    deduped: List[carla.Location] = []
+    for loc in points:
+        if deduped and _distance2d(deduped[-1], loc) < 0.05:
+            continue
+        deduped.append(loc)
+    return deduped
+
+
+def _polyline_cumulative(points: List[carla.Location]) -> List[float]:
+    if not points:
+        return []
+    cumulative = [0.0]
+    for idx in range(1, len(points)):
+        cumulative.append(cumulative[-1] + _distance2d(points[idx - 1], points[idx]))
+    return cumulative
+
+
+def _sample_polyline(points: List[carla.Location], cumulative: List[float], distance_s: float) -> Tuple[carla.Location, Tuple[float, float]]:
+    if not points:
+        return carla.Location(), (1.0, 0.0)
+    if len(points) == 1 or len(cumulative) < 2:
+        return points[0], (1.0, 0.0)
+
+    total = float(cumulative[-1])
+    s = max(0.0, min(float(distance_s), total))
+    idx = max(0, min(len(cumulative) - 2, bisect.bisect_right(cumulative, s) - 1))
+
+    while idx < len(points) - 1:
+        seg_start = points[idx]
+        seg_end = points[idx + 1]
+        seg_len = _distance2d(seg_start, seg_end)
+        if seg_len > 1e-6:
+            ratio = 0.0 if seg_len <= 1e-6 else (s - float(cumulative[idx])) / seg_len
+            ratio = max(0.0, min(1.0, float(ratio)))
+            x = float(seg_start.x) + (float(seg_end.x) - float(seg_start.x)) * ratio
+            y = float(seg_start.y) + (float(seg_end.y) - float(seg_start.y)) * ratio
+            z = float(seg_start.z) + (float(seg_end.z) - float(seg_start.z)) * ratio
+            tangent = _normalize_xy(float(seg_end.x) - float(seg_start.x), float(seg_end.y) - float(seg_start.y))
+            return carla.Location(x=x, y=y, z=z), tangent
+        idx += 1
+
+    last = points[-1]
+    prev = points[-2]
+    tangent = _normalize_xy(float(last.x) - float(prev.x), float(last.y) - float(prev.y))
+    if tangent == (0.0, 0.0):
+        tangent = (1.0, 0.0)
+    return last, tangent
+
+
+def _project_location_to_polyline(
+    location: carla.Location,
+    points: List[carla.Location],
+    cumulative: List[float],
+) -> Tuple[float, float, carla.Location, Tuple[float, float]]:
+    if not points:
+        return 0.0, float("inf"), carla.Location(), (1.0, 0.0)
+    if len(points) == 1 or len(cumulative) < 2:
+        only = points[0]
+        tangent = (1.0, 0.0)
+        return 0.0, _distance2d(location, only), only, tangent
+
+    px = float(location.x)
+    py = float(location.y)
+    best_s = 0.0
+    best_dist_sq = float("inf")
+    best_point = points[0]
+    best_tangent = (1.0, 0.0)
+    for idx in range(len(points) - 1):
+        a = points[idx]
+        b = points[idx + 1]
+        vx = float(b.x) - float(a.x)
+        vy = float(b.y) - float(a.y)
+        seg_len_sq = vx * vx + vy * vy
+        if seg_len_sq <= 1e-8:
+            continue
+        t = ((px - float(a.x)) * vx + (py - float(a.y)) * vy) / seg_len_sq
+        t = max(0.0, min(1.0, float(t)))
+        proj_x = float(a.x) + vx * t
+        proj_y = float(a.y) + vy * t
+        dx = px - proj_x
+        dy = py - proj_y
+        dist_sq = dx * dx + dy * dy
+        if dist_sq < best_dist_sq:
+            seg_len = math.sqrt(seg_len_sq)
+            best_dist_sq = dist_sq
+            best_s = float(cumulative[idx]) + float(t) * seg_len
+            best_point = carla.Location(x=proj_x, y=proj_y, z=float(a.z) + (float(b.z) - float(a.z)) * t)
+            best_tangent = _normalize_xy(vx, vy)
+
+    return best_s, math.sqrt(best_dist_sq), best_point, best_tangent
+
+
+class DynamicForwardConflictTrigger(AtomicCondition):
+
+    """
+    Trigger a pedestrian when, if it starts moving now, its authored path is predicted to
+    occupy space immediately ahead of any relevant ego route with a near-collision margin.
+    """
+
+    def __init__(
+        self,
+        actor,
+        actor_name: str,
+        actor_plan,
+        target_speed: float,
+        ego_actors,
+        ego_routes,
+        preferred_vehicle: Optional[str] = None,
+        trigger_spec: Optional[dict] = None,
+        debug_state: Optional[Dict[str, object]] = None,
+        name: str = "DynamicForwardConflictTrigger",
+    ):
+        super(DynamicForwardConflictTrigger, self).__init__(name)
+        self._actor = actor
+        self._actor_name = str(actor_name or "pedestrian")
+        self._actor_plan = list(actor_plan or [])
+        self._target_speed = max(0.1, float(target_speed or 1.5))
+        self._ego_actors = [ego for ego in list(ego_actors or []) if ego is not None]
+        self._ego_routes = list(ego_routes or [])
+        self._trigger_spec = dict(trigger_spec or {})
+        self._debug_state = debug_state if isinstance(debug_state, dict) else {}
+        self._last_selected_vehicle = None
+        self._stable_selected_ticks = 0
+        self._triggered = False
+
+        preferred_name = preferred_vehicle or self._trigger_spec.get("preferred_vehicle") or self._trigger_spec.get("vehicle")
+        self._preferred_vehicle_idx = None
+        if preferred_name:
+            match = re.search(r"(\d+)", str(preferred_name))
+            if match:
+                self._preferred_vehicle_idx = max(0, int(match.group(1)) - 1)
+
+        try:
+            self._sample_dt = float(self._trigger_spec.get("sample_dt_s", os.environ.get("CUSTOM_DYNAMIC_PED_SAMPLE_DT_S", "0.1")))
+        except Exception:  # pylint: disable=broad-except
+            self._sample_dt = 0.1
+        try:
+            self._base_horizon_s = float(self._trigger_spec.get("horizon_s", os.environ.get("CUSTOM_DYNAMIC_PED_HORIZON_S", "5.0")))
+        except Exception:  # pylint: disable=broad-except
+            self._base_horizon_s = 5.0
+        try:
+            self._max_horizon_s = float(self._trigger_spec.get("max_horizon_s", os.environ.get("CUSTOM_DYNAMIC_PED_MAX_HORIZON_S", "8.0")))
+        except Exception:  # pylint: disable=broad-except
+            self._max_horizon_s = 8.0
+        try:
+            self._min_ego_speed_mps = float(self._trigger_spec.get("min_ego_speed_mps", os.environ.get("CUSTOM_DYNAMIC_PED_MIN_EGO_SPEED_MPS", "1.0")))
+        except Exception:  # pylint: disable=broad-except
+            self._min_ego_speed_mps = 1.0
+        try:
+            self._corridor_half_width_m = float(self._trigger_spec.get("corridor_half_width_m", os.environ.get("CUSTOM_DYNAMIC_PED_CORRIDOR_HALF_WIDTH_M", "2.25")))
+        except Exception:  # pylint: disable=broad-except
+            self._corridor_half_width_m = 2.25
+        try:
+            self._rear_tolerance_m = float(self._trigger_spec.get("rear_tolerance_m", os.environ.get("CUSTOM_DYNAMIC_PED_REAR_TOLERANCE_M", "0.75")))
+        except Exception:  # pylint: disable=broad-except
+            self._rear_tolerance_m = 0.75
+        try:
+            self._front_window_m = float(self._trigger_spec.get("front_window_m", os.environ.get("CUSTOM_DYNAMIC_PED_FRONT_WINDOW_M", "4.0")))
+        except Exception:  # pylint: disable=broad-except
+            self._front_window_m = 4.0
+        try:
+            self._trigger_clearance_m = float(self._trigger_spec.get("trigger_clearance_m", os.environ.get("CUSTOM_DYNAMIC_PED_TRIGGER_CLEARANCE_M", "0.5")))
+        except Exception:  # pylint: disable=broad-except
+            self._trigger_clearance_m = 0.5
+        try:
+            self._min_conflict_time_s = float(self._trigger_spec.get("min_conflict_time_s", os.environ.get("CUSTOM_DYNAMIC_PED_MIN_CONFLICT_TIME_S", "0.25")))
+        except Exception:  # pylint: disable=broad-except
+            self._min_conflict_time_s = 0.25
+        try:
+            self._stable_ticks_required = int(self._trigger_spec.get("stable_ticks", os.environ.get("CUSTOM_DYNAMIC_PED_STABLE_TICKS", "2")))
+        except Exception:  # pylint: disable=broad-except
+            self._stable_ticks_required = 2
+        self._sample_dt = max(0.05, min(0.5, float(self._sample_dt)))
+        self._base_horizon_s = max(1.0, float(self._base_horizon_s))
+        self._max_horizon_s = max(float(self._base_horizon_s), float(self._max_horizon_s))
+        self._min_ego_speed_mps = max(0.1, float(self._min_ego_speed_mps))
+        self._corridor_half_width_m = max(0.5, float(self._corridor_half_width_m))
+        self._rear_tolerance_m = max(0.0, float(self._rear_tolerance_m))
+        self._front_window_m = max(0.5, float(self._front_window_m))
+        self._stable_ticks_required = max(1, int(self._stable_ticks_required))
+
+        self._actor_radius = self._infer_actor_radius(actor)
+        self._ego_route_cache: Dict[int, Tuple[List[carla.Location], List[float]]] = {}
+
+    @staticmethod
+    def _infer_actor_radius(actor) -> float:
+        try:
+            bbox = actor.bounding_box
+            return max(0.20, math.hypot(float(bbox.extent.x), float(bbox.extent.y)))
+        except Exception:  # pylint: disable=broad-except
+            return 0.45
+
+    @staticmethod
+    def _ego_speed(actor) -> float:
+        try:
+            velocity = actor.get_velocity()
+            return math.hypot(float(velocity.x), float(velocity.y))
+        except Exception:  # pylint: disable=broad-except
+            return 0.0
+
+    def _ped_points_from_current_state(self) -> Tuple[List[carla.Location], List[float]]:
+        actor_loc = CarlaDataProvider.get_location(self._actor)
+        if actor_loc is None:
+            try:
+                actor_loc = self._actor.get_location()
+            except Exception:  # pylint: disable=broad-except
+                actor_loc = None
+        points: List[carla.Location] = []
+        if actor_loc is not None:
+            points.append(carla.Location(x=float(actor_loc.x), y=float(actor_loc.y), z=float(actor_loc.z)))
+
+        for item in list(self._actor_plan or []):
+            loc = item[0].location if isinstance(item, tuple) and hasattr(item[0], "location") else item
+            if not isinstance(loc, carla.Location):
+                continue
+            current = carla.Location(x=float(loc.x), y=float(loc.y), z=float(loc.z))
+            if points and _distance2d(points[-1], current) < 0.05:
+                continue
+            points.append(current)
+
+        if not points and self._actor_plan:
+            first = self._actor_plan[0]
+            if isinstance(first, carla.Location):
+                points = [first]
+        return points, _polyline_cumulative(points)
+
+    def _ego_route_data(self, ego_idx: int, ego_actor) -> Tuple[List[carla.Location], List[float]]:
+        cached = self._ego_route_cache.get(int(ego_idx))
+        if cached is not None:
+            return cached
+
+        route_entries = self._ego_routes[ego_idx] if 0 <= ego_idx < len(self._ego_routes) else []
+        points = _route_points_from_entries(route_entries)
+        if len(points) < 2:
+            try:
+                tf = ego_actor.get_transform()
+                velocity = ego_actor.get_velocity()
+                speed = math.hypot(float(velocity.x), float(velocity.y))
+                yaw_rad = math.radians(float(tf.rotation.yaw))
+                ahead = carla.Location(
+                    x=float(tf.location.x) + math.cos(yaw_rad) * max(5.0, speed * 2.0),
+                    y=float(tf.location.y) + math.sin(yaw_rad) * max(5.0, speed * 2.0),
+                    z=float(tf.location.z),
+                )
+                points = [
+                    carla.Location(x=float(tf.location.x), y=float(tf.location.y), z=float(tf.location.z)),
+                    ahead,
+                ]
+            except Exception:  # pylint: disable=broad-except
+                points = []
+        cumulative = _polyline_cumulative(points)
+        self._ego_route_cache[int(ego_idx)] = (points, cumulative)
+        return points, cumulative
+
+    def _evaluate_candidate(self, ego_idx: int, ego_actor, ped_points: List[carla.Location], ped_cumulative: List[float]) -> Optional[Dict[str, float]]:
+        if ego_actor is None or len(ped_points) < 2 or len(ped_cumulative) < 2:
+            return None
+
+        ego_speed = self._ego_speed(ego_actor)
+        if ego_speed < float(self._min_ego_speed_mps):
+            return None
+
+        route_points, route_cumulative = self._ego_route_data(int(ego_idx), ego_actor)
+        if len(route_points) < 2 or len(route_cumulative) < 2:
+            return None
+
+        ego_loc = CarlaDataProvider.get_location(ego_actor)
+        if ego_loc is None:
+            try:
+                ego_loc = ego_actor.get_location()
+            except Exception:  # pylint: disable=broad-except
+                return None
+
+        ego_s, _, _, _ = _project_location_to_polyline(ego_loc, route_points, route_cumulative)
+        ped_total = float(ped_cumulative[-1])
+        horizon_s = min(float(self._max_horizon_s), max(float(self._base_horizon_s), ped_total / max(0.1, float(self._target_speed))))
+        if horizon_s <= 0.0:
+            return None
+
+        try:
+            ego_radius = max(0.20, math.hypot(float(ego_actor.bounding_box.extent.x), float(ego_actor.bounding_box.extent.y)))
+        except Exception:  # pylint: disable=broad-except
+            ego_radius = 1.45
+
+        best = None
+        step_count = max(1, int(math.ceil(horizon_s / float(self._sample_dt))))
+        for step in range(1, step_count + 1):
+            t = float(step) * float(self._sample_dt)
+            ped_s = min(ped_total, float(self._target_speed) * t)
+            ped_loc, _ = _sample_polyline(ped_points, ped_cumulative, ped_s)
+            ego_future_s = ego_s + ego_speed * t
+            ego_loc_t, ego_forward = _sample_polyline(route_points, route_cumulative, ego_future_s)
+            if ego_forward == (0.0, 0.0):
+                continue
+            rel_x = float(ped_loc.x) - float(ego_loc_t.x)
+            rel_y = float(ped_loc.y) - float(ego_loc_t.y)
+            longitudinal = rel_x * float(ego_forward[0]) + rel_y * float(ego_forward[1])
+            lateral = rel_x * (-float(ego_forward[1])) + rel_y * float(ego_forward[0])
+            center_dist = math.hypot(rel_x, rel_y)
+            clearance = center_dist - (float(ego_radius) + float(self._actor_radius))
+            front_limit = float(self._front_window_m) + float(ego_radius) + float(self._actor_radius)
+            corridor_limit = max(float(self._corridor_half_width_m), float(ego_radius) + float(self._actor_radius) + 0.35)
+
+            if longitudinal < -float(self._rear_tolerance_m):
+                continue
+            if longitudinal > front_limit:
+                continue
+            if abs(lateral) > corridor_limit:
+                continue
+
+            candidate = {
+                "ego_idx": int(ego_idx),
+                "time_to_conflict_s": float(t),
+                "clearance_m": float(clearance),
+                "longitudinal_m": float(longitudinal),
+                "lateral_m": float(lateral),
+                "ego_speed_mps": float(ego_speed),
+            }
+            if best is None or (
+                float(candidate["clearance_m"]),
+                float(candidate["time_to_conflict_s"]),
+                abs(float(candidate["lateral_m"])),
+            ) < (
+                float(best["clearance_m"]),
+                float(best["time_to_conflict_s"]),
+                abs(float(best["lateral_m"])),
+            ):
+                best = candidate
+
+        return best
+
+    def update(self):
+        if self._triggered:
+            return py_trees.common.Status.SUCCESS
+
+        ped_points, ped_cumulative = self._ped_points_from_current_state()
+        if len(ped_points) < 2 or len(ped_cumulative) < 2:
+            return py_trees.common.Status.RUNNING
+
+        candidates: List[Dict[str, float]] = []
+        for ego_idx, ego_actor in enumerate(self._ego_actors):
+            if ego_actor is None:
+                continue
+            try:
+                if hasattr(ego_actor, "is_alive") and not bool(ego_actor.is_alive):
+                    continue
+            except Exception:  # pylint: disable=broad-except
+                pass
+            candidate = self._evaluate_candidate(int(ego_idx), ego_actor, ped_points, ped_cumulative)
+            if candidate is not None:
+                candidates.append(candidate)
+
+        if not candidates:
+            self._last_selected_vehicle = None
+            self._stable_selected_ticks = 0
+            return py_trees.common.Status.RUNNING
+
+        candidates.sort(
+            key=lambda c: (
+                float(c["clearance_m"]),
+                float(c["time_to_conflict_s"]),
+                0 if self._preferred_vehicle_idx is not None and int(c["ego_idx"]) == int(self._preferred_vehicle_idx) else 1,
+            )
+        )
+        best = candidates[0]
+        selected_name = f"Vehicle {int(best['ego_idx']) + 1}"
+
+        if selected_name == self._last_selected_vehicle:
+            self._stable_selected_ticks += 1
+        else:
+            self._last_selected_vehicle = selected_name
+            self._stable_selected_ticks = 1
+
+        should_trigger = (
+            float(best["time_to_conflict_s"]) >= float(self._min_conflict_time_s)
+            and float(best["clearance_m"]) <= float(self._trigger_clearance_m)
+            and int(self._stable_selected_ticks) >= int(self._stable_ticks_required)
+        )
+
+        self._debug_state["selected_vehicle"] = selected_name
+        self._debug_state["selected_ego_idx"] = int(best["ego_idx"])
+        self._debug_state["time_to_conflict_s"] = round(float(best["time_to_conflict_s"]), 3)
+        self._debug_state["clearance_m"] = round(float(best["clearance_m"]), 3)
+        self._debug_state["longitudinal_m"] = round(float(best["longitudinal_m"]), 3)
+        self._debug_state["lateral_m"] = round(float(best["lateral_m"]), 3)
+        self._debug_state["stable_ticks"] = int(self._stable_selected_ticks)
+        self._debug_state["trigger_type"] = "dynamic_forward_conflict"
+
+        if should_trigger:
+            self._triggered = True
+            print(
+                "[TRIGGER] Dynamic forward conflict FIRED for {}: ego={} "
+                "ttc={:.2f}s clearance={:.2f}m long={:.2f}m lat={:.2f}m".format(
+                    self._actor_name,
+                    selected_name,
+                    float(best["time_to_conflict_s"]),
+                    float(best["clearance_m"]),
+                    float(best["longitudinal_m"]),
+                    float(best["lateral_m"]),
+                )
+            )
+            return py_trees.common.Status.SUCCESS
+
+        return py_trees.common.Status.RUNNING
+
+
 class RouteScenario(BasicScenario):
 
     """
@@ -3864,6 +4340,16 @@ class RouteScenario(BasicScenario):
         self.route_debug = None
         self.sampled_scenarios_definitions = None
         self.ego_vehicles_num=ego_vehicles_num
+        self.requested_ego_vehicle_count = int(ego_vehicles_num)
+        self.runtime_ego_vehicle_count = int(ego_vehicles_num)
+        self.active_to_original_ego_index = list(range(int(ego_vehicles_num)))
+        self.original_to_active_ego_index = {
+            int(idx): int(idx) for idx in range(int(ego_vehicles_num))
+        }
+        self.skipped_ego_indices: List[int] = []
+        self.ego_spawn_failures: List[dict] = []
+        self.partial_ego_spawn_accepted = False
+        self._gps_route: List[list] = []
         self.new_config_trajectory=None
         self.crazy_level = 0
         self.crazy_proportion = 0
@@ -4508,6 +4994,7 @@ class RouteScenario(BasicScenario):
         if self.ego_vehicles_num == 0:
             self.route = []
             self.route_debug = []
+            self._gps_route = []
             CarlaDataProvider.set_ego_vehicle_route([])
             config.agent.set_global_plan([], [])
             self.sampled_scenarios_definitions = []
@@ -4526,12 +5013,29 @@ class RouteScenario(BasicScenario):
         potential_scenarios_definitions=[]
 
         # prepare route's trajectory (interpolate and add the GPS route)
+        # When CUSTOM_USE_PRECOMPUTED_DENSE_ROUTE=1, the XML waypoints have already
+        # been replaced with the dense smooth lane-following trace produced by
+        # tools/route_alignment.align_route (via run_custom_eval --align-ego-routes).
+        # Re-running interpolate_trajectory on top of that re-snaps endpoints to
+        # other lanes and inserts spurious lane-changes / back-jumps; passthrough
+        # preserves the inspector's "grp_vis_dp_bypass_all" output verbatim.
+        use_precomputed = os.environ.get("CUSTOM_USE_PRECOMPUTED_DENSE_ROUTE") == "1"
         for i, tr in enumerate(trajectory):
             # tr is a list of waypoint, each a carla.Location object
-            gps, r = interpolate_trajectory(world, tr)
+            if use_precomputed and len(tr) >= 2:
+                yaws = None
+                if hasattr(config, "multi_traj_yaws") and config.multi_traj_yaws \
+                        and i < len(config.multi_traj_yaws):
+                    yaws = config.multi_traj_yaws[i]
+                if yaws is None:
+                    yaws = getattr(config, "trajectory_yaws", None)
+                gps, r = _build_passthrough_route(world, tr, yaws)
+                route_debug.append({"trace_source": "precomputed_dense"})
+            else:
+                gps, r = interpolate_trajectory(world, tr)
+                route_debug.append(dict(getattr(interpolate_trajectory, 'last_debug', {}) or {}))
             gps_route.append(gps)
             route.append(r)
-            route_debug.append(dict(getattr(interpolate_trajectory, 'last_debug', {}) or {}))
             print('load scenarios for ego{}'.format(i))
             potential_scenarios_definition, _ = RouteParser.scan_route_for_scenarios(
                 config.town, r, world_annotations)
@@ -4540,6 +5044,7 @@ class RouteScenario(BasicScenario):
         # self.route is a list of ego_vehicles' routes
         self.route = route
         self.route_debug = route_debug
+        self._gps_route = gps_route
         if self.log_dir is not None:
             # plot waypoints coordinates
             self.draw_route()
@@ -4616,6 +5121,122 @@ class RouteScenario(BasicScenario):
             if best.transform.location.distance(tr[0]) <= max_snap_dist:
                 tr[0] = best.transform.location
 
+    def _should_accept_partial_ego_spawn(self, failure_count: int) -> bool:
+        requested = max(0, int(self.requested_ego_vehicle_count))
+        failures = max(0, int(failure_count))
+        if requested <= 0 or failures <= 0:
+            return False
+        allow_partial = os.environ.get("CUSTOM_ALLOW_PARTIAL_EGO_SPAWN", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if not allow_partial:
+            return False
+        spawned = requested - failures
+        if spawned <= 0:
+            # Nothing spawned — the scenario has no ego to evaluate at all.
+            return False
+        # Policy: accept the scenario if at least *2/3 of the requested egos*
+        # actually spawned (equivalently: failures <= floor(requested/3)).
+        # For 2-ego scenarios, where strict 2/3 would require both to spawn,
+        # fall back to "at least one ego is alive" — a single-ego run is
+        # still useful signal, and a CARLA spawn-point race is the single
+        # most common cause of transient spawn failure in multi-ego layouts.
+        if requested <= 2:
+            return spawned >= 1
+        # ceil(2/3 * requested) ≡ (2*requested + 2) // 3
+        required_spawns = (2 * requested + 2) // 3
+        return spawned >= required_spawns
+
+    def _cleanup_partially_spawned_ego_vehicles(self, ego_vehicles: List) -> None:
+        for ego_vehicle in ego_vehicles:
+            if ego_vehicle is None:
+                continue
+            try:
+                ego_id = getattr(ego_vehicle, "id", None)
+                if ego_id is not None:
+                    CarlaDataProvider.remove_actor_by_id(
+                        int(ego_id),
+                        max_retries=0,
+                        timeout_s=0.5,
+                        poll_s=0.02,
+                        direct_fallback=True,
+                        reason="route_scenario_partial_spawn_cleanup",
+                        phase="route_scenario_partial_spawn_cleanup",
+                    )
+                    continue
+            except Exception:  # pylint: disable=broad-except
+                pass
+            try:
+                ego_vehicle.destroy()
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+    def _apply_active_ego_filter(self, world, active_original_indices: List[int]) -> None:
+        active_original_indices = [int(idx) for idx in active_original_indices]
+        self.active_to_original_ego_index = list(active_original_indices)
+        self.original_to_active_ego_index = {
+            int(original_idx): int(active_idx)
+            for active_idx, original_idx in enumerate(active_original_indices)
+        }
+        self.skipped_ego_indices = [
+            idx
+            for idx in range(int(self.requested_ego_vehicle_count))
+            if idx not in self.original_to_active_ego_index
+        ]
+        self.runtime_ego_vehicle_count = len(active_original_indices)
+        self.ego_vehicles_num = len(active_original_indices)
+
+        if self.route is None:
+            return
+
+        if active_original_indices != list(range(len(self.route))):
+            self.route = [self.route[idx] for idx in active_original_indices if idx < len(self.route)]
+            if self.route_debug is not None:
+                self.route_debug = [
+                    self.route_debug[idx]
+                    for idx in active_original_indices
+                    if idx < len(self.route_debug)
+                ]
+            if self.sampled_scenarios_definitions is not None:
+                self.sampled_scenarios_definitions = [
+                    self.sampled_scenarios_definitions[idx]
+                    for idx in active_original_indices
+                    if idx < len(self.sampled_scenarios_definitions)
+                ]
+            if self._gps_route:
+                self._gps_route = [
+                    self._gps_route[idx]
+                    for idx in active_original_indices
+                    if idx < len(self._gps_route)
+                ]
+            self._ego_replay_transforms = [
+                self._ego_replay_transforms[idx]
+                for idx in active_original_indices
+                if idx < len(self._ego_replay_transforms)
+            ]
+            self._ego_replay_times = [
+                self._ego_replay_times[idx]
+                for idx in active_original_indices
+                if idx < len(self._ego_replay_times)
+            ]
+
+        if not self._gps_route and self.route:
+            lat_ref, lon_ref = _get_latlon_ref(world)
+            self._gps_route = [
+                location_route_to_gps(route, lat_ref, lon_ref)
+                for route in self.route
+            ]
+
+        CarlaDataProvider.set_ego_vehicle_route(
+            [convert_transform_to_location(route) for route in (self.route or [])]
+        )
+        if getattr(self.config, "agent", None) is not None:
+            self.config.agent.set_global_plan(self._gps_route, self.route or [])
+        self.timeout = self._estimate_route_timeout()
+
     def _update_ego_vehicle(self, world) -> List:
         """
         Set/Update the start position of the ego_vehicles
@@ -4623,7 +5244,9 @@ class RouteScenario(BasicScenario):
             ego_vehicles (list): list of ego_vehicles.
         """
         # move ego vehicles to correct position
-        ego_vehicles=[]
+        ego_vehicles = []
+        active_original_indices: List[int] = []
+        spawn_failures: List[dict] = []
         normalize_ego_z = os.environ.get("CUSTOM_EGO_NORMALIZE_Z", "").lower() in (
             "1",
             "true",
@@ -4645,7 +5268,6 @@ class RouteScenario(BasicScenario):
             vehicle_ground_lift = 0.04
         world = CarlaDataProvider.get_world()
         world_map = CarlaDataProvider.get_map()
-
 
         for j in range(self.ego_vehicles_num):
             if log_replay_ego and j < len(self._ego_replay_transforms) and self._ego_replay_transforms[j]:
@@ -4690,10 +5312,34 @@ class RouteScenario(BasicScenario):
             # Get vehicle model from manifest (for promoted NPCs) or use default
             vehicle_model = get_ego_vehicle_model(j, default='vehicle.lincoln.mkz2017')
             print("vehicle model:{}".format(vehicle_model))
-            ego_vehicle = CarlaDataProvider.request_new_actor(vehicle_model,
-                                                            spawn_tf,
-                                                            rolename='hero_{}'.format(j))
+            runtime_ego_idx = len(ego_vehicles)
+            runtime_role_name = 'hero_{}'.format(runtime_ego_idx)
+            try:
+                ego_vehicle = CarlaDataProvider.request_new_actor(
+                    vehicle_model,
+                    spawn_tf,
+                    rolename=runtime_role_name,
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                failure = {
+                    "original_ego_index": int(j),
+                    "runtime_ego_index": None,
+                    "role_name": runtime_role_name,
+                    "vehicle_model": str(vehicle_model),
+                    "transform": str(spawn_tf),
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+                spawn_failures.append(failure)
+                print(
+                    "[WARN] Ego spawn failed: "
+                    f"requested_ego={j} role={runtime_role_name} model={vehicle_model} "
+                    f"error={type(exc).__name__}: {exc}"
+                )
+                continue
+
             ego_vehicles.append(ego_vehicle)
+            active_original_indices.append(j)
 
             if log_replay_ego and ego_vehicle is not None:
                 try:
@@ -4716,11 +5362,49 @@ class RouteScenario(BasicScenario):
                         pass
 
             # set the spectator location above the first ego vehicle
-            if j==0:
+            if len(ego_vehicles) == 1:
                 spectator = CarlaDataProvider.get_world().get_spectator()
                 ego_trans = ego_vehicle.get_transform()
                 spectator.set_transform(carla.Transform(ego_trans.location + carla.Location(z=50),
                                                             carla.Rotation(pitch=-90)))
+
+        self.ego_spawn_failures = spawn_failures
+        self.partial_ego_spawn_accepted = False
+        if spawn_failures:
+            requested = int(self.requested_ego_vehicle_count)
+            failures = len(spawn_failures)
+            spawned = len(ego_vehicles)
+            failed_original_indices = [
+                int(entry.get("original_ego_index", -1))
+                for entry in spawn_failures
+            ]
+            if self._should_accept_partial_ego_spawn(failures) and spawned > 0:
+                self.partial_ego_spawn_accepted = True
+                print(
+                    "[WARN] Accepting partial ego spawn: "
+                    f"spawned={spawned}/{requested}, failed={failures}, "
+                    f"failed_original_egos={failed_original_indices}"
+                )
+                for failure in spawn_failures:
+                    print(
+                        "[WARN] Partial ego spawn detail: "
+                        f"requested_ego={failure['original_ego_index']} "
+                        f"role={failure['role_name']} model={failure['vehicle_model']} "
+                        f"transform={failure['transform']} "
+                        f"error={failure['error_type']}: {failure['error']}"
+                    )
+            else:
+                self._cleanup_partially_spawned_ego_vehicles(ego_vehicles)
+                failure_lines = "; ".join(
+                    f"ego{entry['original_ego_index']} {entry['error_type']}: {entry['error']}"
+                    for entry in spawn_failures
+                )
+                raise RuntimeError(
+                    "Error: Unable to spawn enough ego vehicles "
+                    f"(spawned={spawned}/{requested}, failed={failures}). {failure_lines}"
+                )
+
+        self._apply_active_ego_filter(world, active_original_indices)
         return ego_vehicles
 
     def _estimate_route_timeout(self):
@@ -4775,6 +5459,24 @@ class RouteScenario(BasicScenario):
                     max_route_length = float(route_length)
             if has_valid_route:
                 timeout = int(SECONDS_GIVEN_PER_METERS * max_route_length + INITIAL_SECONDS_DELAY)
+                # Hard ceiling: data shows 99.6% of completed scenarios finish
+                # under 300 sim sec (p99=189s, p95=82s).  For long-route v2xpnp
+                # scenarios the per-meter formula can give 800s+, which lets a
+                # single stuck ego with active-ticking-but-zero-progress burn
+                # the entire timeout.  Cap at 360s (1.9x p99 of completed) to
+                # catch these clear outliers.  Override via env var.
+                try:
+                    _max_timeout = int(os.environ.get("CARLA_SCENARIO_MAX_SIM_S", "360"))
+                except Exception:
+                    _max_timeout = 360
+                if _max_timeout > 0 and timeout > _max_timeout:
+                    print(
+                        "[RouteScenario] Capping route timeout: per-route={}s -> hard cap={}s "
+                        "(route_length={:.2f}m, override via CARLA_SCENARIO_MAX_SIM_S)".format(
+                            timeout, _max_timeout, float(max_route_length),
+                        )
+                    )
+                    timeout = _max_timeout
                 if self.ego_vehicles_num > 1:
                     print(
                         "[RouteScenario] Multi-ego timeout: {}s (max route length={:.2f}m across {} egos)".format(
@@ -5991,15 +6693,35 @@ class RouteScenario(BasicScenario):
         match = re.search(r"(\d+)", name)
         if not match:
             return None
-        idx = int(match.group(1)) - 1
-        if idx < 0 or idx >= len(self.ego_vehicles):
+        original_idx = int(match.group(1)) - 1
+        active_idx = self.original_to_active_ego_index.get(original_idx)
+        if active_idx is None or active_idx < 0 or active_idx >= len(self.ego_vehicles):
             return None
-        return self.ego_vehicles[idx]
+        return self.ego_vehicles[active_idx]
 
-    def _build_trigger_condition(self, trigger_spec: dict, actor):
+    def _build_trigger_condition(self, trigger_spec: dict, actor_plan: dict):
         if not isinstance(trigger_spec, dict):
             return None
+        actor = actor_plan.get("actor")
+        if actor is None:
+            return None
+
+        role = str(actor_plan.get("role", "")).strip().lower()
+        is_walker_like = role in ("pedestrian", "walker")
         ttype = str(trigger_spec.get("type", "")).strip()
+        if is_walker_like and ttype in ("distance_to_vehicle", "dynamic_forward_conflict"):
+            return DynamicForwardConflictTrigger(
+                actor=actor,
+                actor_name=str(actor_plan.get("name") or "pedestrian"),
+                actor_plan=actor_plan.get("plan"),
+                target_speed=float(actor_plan.get("target_speed") or 1.5),
+                ego_actors=self.ego_vehicles,
+                ego_routes=self.route,
+                preferred_vehicle=trigger_spec.get("preferred_vehicle") or trigger_spec.get("vehicle"),
+                trigger_spec=trigger_spec,
+                debug_state=actor_plan.setdefault("trigger_state", {}),
+            )
+
         if ttype != "distance_to_vehicle":
             return None
         ego_name = trigger_spec.get("vehicle")
@@ -6063,7 +6785,7 @@ class RouteScenario(BasicScenario):
         ego_actor = None
         trigger_distance = None
         if isinstance(trigger_spec, dict):
-            trigger_cond = self._build_trigger_condition(trigger_spec, actor)
+            trigger_cond = self._build_trigger_condition(trigger_spec, actor_plan)
             if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
                 print(f"[DEBUG FINISH] _build_custom_actor_behavior: trigger_cond={trigger_cond}")
             # Get ego actor and trigger distance for smart speed calculation
@@ -6650,9 +7372,24 @@ class RouteScenario(BasicScenario):
 
             stop_criterion = RunningStopTest(self.ego_vehicles[ego_vehicle_id])
 
+            # Default kept at 30.0s — lower values false-positive on yielding
+            # scenarios (Roundabout_Navigation, Unprotected_Left_Turn,
+            # Major_Minor_Unsignalized_Entry, Construction_Zone) where 75.7%
+            # of completed runs had >15s extra sim time and median ego speed
+            # was 3.0 m/s (well below the 8 m/s expected baseline).  These
+            # scenarios alternate stop-and-go near the 0.5 m/s blocked
+            # threshold; lowering the timer to 15s would block them before
+            # they recover.  Override via CARLA_AGENT_BLOCKED_TIMEOUT_S for
+            # A/B if you want to validate empirically.  Floor 5s.
+            try:
+                _blocked_timeout = float(os.environ.get("CARLA_AGENT_BLOCKED_TIMEOUT_S", "30.0"))
+                if _blocked_timeout < 5.0:
+                    _blocked_timeout = 30.0
+            except Exception:
+                _blocked_timeout = 30.0
             blocked_criterion = ActorSpeedAboveThresholdTest(self.ego_vehicles[ego_vehicle_id],
                                                             speed_threshold=0.5,
-                                                            below_threshold_max_time=30.0,
+                                                            below_threshold_max_time=_blocked_timeout,
                                                             terminate_on_failure=True,
                                                             name="AgentBlockedTest")
 

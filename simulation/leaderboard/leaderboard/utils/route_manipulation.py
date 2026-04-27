@@ -129,7 +129,7 @@ def downsample_route(route, sample_factor):
     return ids_to_sample
 
 
-def interpolate_trajectory(world, waypoints_trajectory, hop_resolution=1.0):
+def interpolate_trajectory(world, waypoints_trajectory, hop_resolution=2.0):
     """
     Given some raw keypoints interpolate a full dense trajectory to be used by the user.
     returns the full interpolated route both in GPS coordinates and also in its original form.
@@ -137,7 +137,9 @@ def interpolate_trajectory(world, waypoints_trajectory, hop_resolution=1.0):
     Args:
         - world: an reference to the CARLA world so we can use the planner
         - waypoints_trajectory: the current coarse trajectory
-        - hop_resolution: is the resolution, how dense is the provided trajectory going to be made
+        - hop_resolution: is the resolution, how dense is the provided trajectory going to be made.
+          Default 2.0 to match the alignment module's sampling_resolution and
+          ensure the same road-graph topology that was validated at generation time.
     """
 
     # Try CARLA 9.12+ API first, fall back to older DAO-based API
@@ -147,14 +149,94 @@ def interpolate_trajectory(world, waypoints_trajectory, hop_resolution=1.0):
         dao = GlobalRoutePlannerDAO(world.get_map(), hop_resolution)
         grp = GlobalRoutePlanner(dao)
         grp.setup()
-    # Obtain route plan
+
+    # ── Loop-guard constants ─────────────────────────────────────────────────
+    # If a GRP trace for a single waypoint-to-waypoint segment is longer than
+    # LOOP_RATIO * straight_line + LOOP_SLACK_M, the A* planner has routed a
+    # "loop-around-the-block" detour (wrong-lane selection on a bidirectional
+    # road, or off-ramp/merge divergence on Town05/06 highways).  Fall back to
+    # inserting densified intermediate points between the two endpoints and
+    # re-routing each short hop, which guarantees the GRP stays local.
+    # This mirrors the identical mechanism in run_custom_eval.py's
+    # _rewrite_ego_xml_with_dense_grp_trace and covers runtime-generated
+    # trajectories (e.g. ego_1+ computed by _cal_multi_routes) that never
+    # pass through the align_ego_routes XML-rewrite step.
+    _LOOP_RATIO   = 2.0   # GRP trace / straight-line threshold
+    _LOOP_SLACK_M = 5.0   # absolute slack (metres) on top of LOOP_RATIO
+    _DENSE_STEP_M = 3.0   # max segment length after densification fallback
+    _wmap = world.get_map()
+
+    def _seg_len(trace):
+        total = 0.0
+        prev = None
+        for wp, _ in trace:
+            loc = wp.transform.location if hasattr(wp, 'transform') else wp.location
+            if prev is not None:
+                total += math.hypot(loc.x - prev[0], loc.y - prev[1])
+            prev = (loc.x, loc.y)
+        return total
+
+    def _densified_trace(a, b):
+        """Re-route a→b via short hops of _DENSE_STEP_M to avoid detour loops."""
+        d = math.hypot(b.x - a.x, b.y - a.y)
+        n = max(2, int(math.ceil(d / _DENSE_STEP_M)) + 1)
+        out = []
+        for k in range(n - 1):
+            t0 = k       / (n - 1)
+            t1 = (k + 1) / (n - 1)
+            loc_a = type(a)(
+                x=a.x + (b.x - a.x) * t0,
+                y=a.y + (b.y - a.y) * t0,
+                z=a.z + (b.z - a.z) * t0,
+            )
+            loc_b = type(a)(
+                x=a.x + (b.x - a.x) * t1,
+                y=a.y + (b.y - a.y) * t1,
+                z=a.z + (b.z - a.z) * t1,
+            )
+            try:
+                seg = grp.trace_route(loc_a, loc_b)
+            except Exception:
+                seg = []
+            if not seg:
+                # absolute fallback: snap midpoint to nearest road lane
+                try:
+                    mid_loc = type(a)(
+                        x=(loc_a.x + loc_b.x) / 2,
+                        y=(loc_a.y + loc_b.y) / 2,
+                        z=(loc_a.z + loc_b.z) / 2,
+                    )
+                    wp = _wmap.get_waypoint(mid_loc, project_to_road=True)
+                    seg = [(wp, RoadOption.LANEFOLLOW)]
+                except Exception:
+                    pass
+            out.extend(seg)
+        return out
+
+    # ── Obtain route plan ────────────────────────────────────────────────────
     route_trace = []
+    loop_fallback_count = 0
     for i in range(len(waypoints_trajectory) - 1):   # Goes until the one before the last.
 
         waypoint = waypoints_trajectory[i]
         waypoint_next = waypoints_trajectory[i + 1]
+        straight = math.hypot(
+            waypoint_next.x - waypoint.x,
+            waypoint_next.y - waypoint.y,
+        )
         interpolated_trace = grp.trace_route(waypoint, waypoint_next)
+        seg_len = _seg_len(interpolated_trace)
+        if interpolated_trace and seg_len > (_LOOP_RATIO * straight) + _LOOP_SLACK_M:
+            # GRP produced a detour — re-route via dense intermediate hops.
+            loop_fallback_count += 1
+            interpolated_trace = _densified_trace(waypoint, waypoint_next)
         route_trace.extend(interpolated_trace)
+
+    if loop_fallback_count:
+        print(
+            f"[interpolate_trajectory] loop_fallbacks={loop_fallback_count}/{len(waypoints_trajectory)-1} "
+            f"segment(s) replaced with dense-hop re-routing"
+        )
 
     route_before = [(wp_tuple[0].transform, wp_tuple[1]) for wp_tuple in route_trace]
     postprocess_meta = {}
@@ -162,7 +244,12 @@ def interpolate_trajectory(world, waypoints_trajectory, hop_resolution=1.0):
         try:
             route = grp.postprocess_route_trace(
                 route_trace,
-                enable_ucla_v2_smoothing=True,
+                # UCLA v2 smoothing disabled: it was harmful when it fires
+                # (only on UCLA towns) and with --align-ego-routes default-on
+                # the input is already a clean lane-following dense route
+                # from `tools/route_alignment.align_route`, so postprocess
+                # smoothing has nothing useful to do.
+                enable_ucla_v2_smoothing=False,
                 return_transforms=True,
             )
             postprocess_meta = dict(getattr(grp, "_last_postprocess_meta", {}) or {})

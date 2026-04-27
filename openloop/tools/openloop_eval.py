@@ -190,6 +190,22 @@ PLANNER_SPECS: Dict[str, PlannerSpec] = {
         agent="simulation/leaderboard/team_code/lmdriver_agent.py",
         agent_config="simulation/leaderboard/team_code/agent_config/lmdriver_config_8_10.py",
     ),
+    "perception_swap_fcooper": PlannerSpec(
+        agent="simulation/leaderboard/team_code/perception_swap_agent.py",
+        agent_config="simulation/leaderboard/team_code/agent_config/perception_swap_fcooper.yaml",
+    ),
+    "perception_swap_attfuse": PlannerSpec(
+        agent="simulation/leaderboard/team_code/perception_swap_agent.py",
+        agent_config="simulation/leaderboard/team_code/agent_config/perception_swap_attfuse.yaml",
+    ),
+    "perception_swap_disco": PlannerSpec(
+        agent="simulation/leaderboard/team_code/perception_swap_agent.py",
+        agent_config="simulation/leaderboard/team_code/agent_config/perception_swap_disco.yaml",
+    ),
+    "perception_swap_cobevt": PlannerSpec(
+        agent="simulation/leaderboard/team_code/perception_swap_agent.py",
+        agent_config="simulation/leaderboard/team_code/agent_config/perception_swap_cobevt.yaml",
+    ),
 }
 
 COLMDRIVER_VLLM_ENV_DEFAULT = "vllm"
@@ -2205,9 +2221,12 @@ class CanonicalMetricAccumulator:
         self.skipped_missing_canonical = 0
         self.skipped_run_step_exception = 0
         self.skipped_other = 0
-        # Per-horizon (6 canonical timesteps) ADE tracking.
-        self._per_step_ade_sum = [0.0] * 6
-        self._per_step_count = [0] * 6
+        from canonical_trajectory import CANONICAL_TIMESTAMPS
+
+        n_steps = len(CANONICAL_TIMESTAMPS)
+        # Per-horizon ADE tracking on the configured canonical grid.
+        self._per_step_ade_sum = [0.0] * n_steps
+        self._per_step_count = [0] * n_steps
 
     def record_skip(self, reason: str) -> None:
         self.total_frames += 1
@@ -2238,8 +2257,8 @@ class CanonicalMetricAccumulator:
         self.n_frames += 1
         # Per-horizon ADE tracking.
         breakdown = debug_record.get("ade_breakdown_m")
-        if breakdown and isinstance(breakdown, (list, tuple)):
-            for idx in range(min(6, len(breakdown))):
+        if isinstance(breakdown, (list, tuple, np.ndarray)) and len(breakdown) > 0:
+            for idx in range(min(len(self._per_step_ade_sum), len(breakdown))):
                 val = breakdown[idx]
                 if val is not None and isinstance(val, (int, float)):
                     self._per_step_ade_sum[idx] += float(val)
@@ -2261,7 +2280,7 @@ class CanonicalMetricAccumulator:
         }
 
     def per_horizon_ade(self) -> Dict[str, Any]:
-        """Per-canonical-timestep mean ADE (keys: '0.5s', '1.0s', ..., '3.0s')."""
+        """Per-canonical-timestep mean ADE keyed by timestamp label (e.g. '0.5s')."""
         from canonical_trajectory import CANONICAL_TIMESTAMPS
         result: Dict[str, Any] = {}
         for idx, ts in enumerate(CANONICAL_TIMESTAMPS):
@@ -3483,7 +3502,15 @@ def _build_stage4_scoring_debug_record(
         inclusion_reason = "stale"
     elif str(record.get("timestamp_source", "unresolved")) not in {"explicit", "inferred"}:
         inclusion_reason = "unresolved_semantics"
-    elif pred.shape != (6, 2) or gt.shape != (6, 2) or len(valid_mask) != 6 or len(gt_valid_mask) != 6:
+    elif (
+        pred.ndim != 2
+        or gt.ndim != 2
+        or pred.shape[1] != 2
+        or gt.shape[1] != 2
+        or pred.shape[0] != gt.shape[0]
+        or len(valid_mask) != pred.shape[0]
+        or len(gt_valid_mask) != gt.shape[0]
+    ):
         inclusion_reason = "missing_canonical"
     else:
         score_mask = valid_mask & gt_valid_mask
@@ -3496,11 +3523,11 @@ def _build_stage4_scoring_debug_record(
                 gt_future_mask=score_mask,
                 surround_traj=(
                     np.asarray(surround_traj, dtype=np.float64)
-                    if surround_traj is not None else np.zeros((0, 6, 2), dtype=np.float64)
+                    if surround_traj is not None else np.zeros((0, len(gt), 2), dtype=np.float64)
                 ),
                 surround_mask=(
                     np.asarray(surround_mask)
-                    if surround_mask is not None else np.zeros((0, 6), dtype=np.float64)
+                    if surround_mask is not None else np.zeros((0, len(gt)), dtype=np.float64)
                 ),
                 surround_actor_ids=(
                     list(surround_actor_ids) if surround_actor_ids is not None else None
@@ -3513,14 +3540,17 @@ def _build_stage4_scoring_debug_record(
                 inclusion_reason = "scored"
                 scored = True
 
-    per_step_errors = [None] * 6
-    if pred.shape == (6, 2) and gt.shape == (6, 2):
-        mask = (
-            (valid_mask[:6] if len(valid_mask) >= 6 else np.zeros(6, dtype=bool))
-            & (gt_valid_mask[:6] if len(gt_valid_mask) >= 6 else np.zeros(6, dtype=bool))
-        )
-        dists = np.sqrt(np.sum((pred[:6] - gt[:6]) ** 2, axis=1))
-        for idx in range(6):
+    n_steps = min(
+        len(valid_mask),
+        len(gt_valid_mask),
+        pred.shape[0] if pred.ndim == 2 else 0,
+        gt.shape[0] if gt.ndim == 2 else 0,
+    )
+    per_step_errors = [None] * n_steps
+    if n_steps > 0 and pred.ndim == 2 and gt.ndim == 2:
+        mask = valid_mask[:n_steps] & gt_valid_mask[:n_steps]
+        dists = np.sqrt(np.sum((pred[:n_steps] - gt[:n_steps]) ** 2, axis=1))
+        for idx in range(n_steps):
             if bool(mask[idx]):
                 per_step_errors[idx] = float(dists[idx])
 
@@ -4409,6 +4439,17 @@ def evaluate_scenario(agent,
         f"  [openloop] native_horizon={'enabled' if native_horizon else 'disabled (0.5s grid)'}  "
         f"skip_stale_frames={'enabled' if skip_stale_frames else 'disabled'}"
     )
+    try:
+        from canonical_trajectory import CANONICAL_TIMESTAMPS
+
+        if len(CANONICAL_TIMESTAMPS) > 0:
+            print(
+                "  [openloop] canonical_horizon="
+                f"{float(CANONICAL_TIMESTAMPS[-1]):.1f}s "
+                f"({len(CANONICAL_TIMESTAMPS)} step(s) at 0.5 s)"
+            )
+    except Exception:
+        pass
     print(
         f"  [openloop] vad_oracle_branch_by_local_ade="
         f"{'enabled' if vad_oracle_branch_by_local_ade else 'disabled'}"
@@ -5254,14 +5295,20 @@ def evaluate_scenario(agent,
                     run_step_exception=run_exc,
                 )
             canonical_accum.update_from_debug_record(canonical_frame_metrics)
+            canonical_timestamps = canonical_frame_metrics.get("canonical_timestamps")
+            canonical_traj_len = (
+                int(len(canonical_timestamps))
+                if canonical_timestamps is not None
+                else 0
+            )
             frame_metrics = {
                 "frame_idx": int(frame_idx),
                 "latency_s": round(dt, 4),
                 "traj_source": pred_source or None,
                 "adapter_source": adapter_source,
                 "stale": bool(is_stale),
-                "traj_len_pred": 6,
-                "traj_len_gt": 6,
+                "traj_len_pred": canonical_traj_len,
+                "traj_len_gt": canonical_traj_len,
                 "traj_len_raw": int(
                     planner_out.raw_length
                     if run_exc is None and ctrl is not None and planner_out is not None
@@ -5671,6 +5718,7 @@ def evaluate_agent(
     vad_force_fresh_inference: bool = True,
     skip_stale_frames: bool = True,
     scoring_path: str = "canonical_fresh_only",
+    canonical_horizon_s: float = 3.0,
 ) -> Dict[str, Any]:
     """
     Evaluate a single leaderboard agent on the v2xpnp dataset.
@@ -5991,19 +6039,22 @@ def evaluate_agent(
         coverage_summary = global_coverage.coverage_summary()
 
         # Aggregate per-horizon ADE across all scenarios from per-frame data.
-        global_per_step_sum = [0.0] * 6
-        global_per_step_count = [0] * 6
+        from canonical_trajectory import CANONICAL_TIMESTAMPS
+
+        global_per_step_sum = [0.0] * len(CANONICAL_TIMESTAMPS)
+        global_per_step_count = [0] * len(CANONICAL_TIMESTAMPS)
         for sr in scenario_results:
             for fm in sr.get("per_frame", []):
                 breakdown = fm.get("ade_breakdown_m")
-                if not breakdown or not isinstance(breakdown, (list, tuple)):
+                if not isinstance(breakdown, (list, tuple, np.ndarray)):
                     continue
-                for idx in range(min(6, len(breakdown))):
+                if len(breakdown) == 0:
+                    continue
+                for idx in range(min(len(global_per_step_sum), len(breakdown))):
                     val = breakdown[idx]
                     if val is not None and isinstance(val, (int, float)):
                         global_per_step_sum[idx] += float(val)
                         global_per_step_count[idx] += 1
-        from canonical_trajectory import CANONICAL_TIMESTAMPS
         global_per_horizon_ade: Dict[str, Any] = {}
         for idx, ts in enumerate(CANONICAL_TIMESTAMPS):
             key = f"{float(ts):.1f}s"
@@ -6091,6 +6142,7 @@ def evaluate_agent(
             "adapter_source_counts": dict(global_adapter_source_counts),
             "scoring_path": scoring_path,
             "trajectory_extrapolation": bool(trajectory_extrapolation),
+            "canonical_horizon_s": float(canonical_horizon_s),
             "native_horizon": bool(native_horizon),
             "vad_oracle_branch_by_local_ade": bool(vad_oracle_branch_by_local_ade),
             "vad_force_fresh_inference": bool(vad_force_fresh_inference),
@@ -6654,6 +6706,8 @@ def _build_child_command(
         child_argv.append("--no-vad-oracle-branch-by-local-ade")
     if bool(getattr(args, "vad_force_fresh_inference", False)):
         child_argv.append("--vad-force-fresh-inference")
+    if getattr(args, "canonical_horizon_s", None) is not None:
+        child_argv.extend(["--canonical-horizon-s", str(float(args.canonical_horizon_s))])
     if not bool(getattr(args, "native_horizon", True)):
         child_argv.append("--no-native-horizon")
     if not bool(getattr(args, "skip_stale_frames", True)):
@@ -6788,6 +6842,9 @@ def _resolve_agent_requests_from_args(args: argparse.Namespace) -> List[PlannerR
 
 def _run_single_planner_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     # Set canonical extrapolation env var before canonical_trajectory is imported.
+    os.environ["OPENLOOP_CANONICAL_HORIZON_S"] = (
+        f"{float(getattr(args, 'canonical_horizon_s', 3.0)):.12g}"
+    )
     if not bool(getattr(args, "canonical_extrapolation", False)):
         os.environ["OPENLOOP_CANONICAL_EXTRAPOLATE"] = "0"
     planner_requests = _resolve_agent_requests_from_args(args)
@@ -6853,6 +6910,7 @@ def _run_single_planner_from_args(args: argparse.Namespace) -> Dict[str, Any]:
             vad_force_fresh_inference=args.vad_force_fresh_inference,
             skip_stale_frames=args.skip_stale_frames,
             scoring_path=args.scoring_path,
+            canonical_horizon_s=float(getattr(args, "canonical_horizon_s", 3.0)),
         )
     finally:
         if local_manager is not None:
@@ -7495,13 +7553,22 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--canonical-horizon-s",
+        type=float,
+        default=3.0,
+        help=(
+            "Canonical evaluation horizon in seconds on the shared 0.5 s grid "
+            "(default: 3.0). Use 5.0 for a uniform 5 s benchmark."
+        ),
+    )
+    p.add_argument(
         "--canonical-extrapolation",
         dest="canonical_extrapolation",
         action="store_true",
         default=False,
         help=(
             "Enable linear extrapolation in canonical trajectory construction. "
-            "Short-horizon planners are extrapolated to 3.0 s. "
+            "Short-horizon planners are extrapolated to the configured canonical horizon. "
             "(default: disabled — planners are scored only within their native horizon)."
         ),
     )
@@ -7532,7 +7599,8 @@ def parse_args():
         action="store_false",
         help=(
             "Revert to fixed 0.5 s evaluation grid (original behaviour). "
-            "All planners are resampled and compared at t+0.5, 1.0, …, 3.0 s."
+            "All planners are resampled and compared on the shared 0.5 s grid "
+            "up to --canonical-horizon-s."
         ),
     )
     p.add_argument(
@@ -7596,7 +7664,7 @@ def parse_args():
         default="canonical_fresh_only",
         help=(
             "Primary scoring path. canonical_fresh_only uses CanonicalTrajectory, "
-            "fresh-only filtering, and full 3.0 s canonical coverage. "
+            "fresh-only filtering, and full configured canonical-horizon coverage. "
             "legacy preserves the pre-Stage-4 evaluator as the active scorer."
         ),
     )
@@ -7676,8 +7744,22 @@ def parse_args():
     return p.parse_args()
 
 
+def _configure_canonical_horizon_from_args(args: argparse.Namespace) -> None:
+    horizon_s = float(getattr(args, "canonical_horizon_s", 3.0))
+    if not math.isfinite(horizon_s) or horizon_s <= 0.0:
+        raise ValueError(f"--canonical-horizon-s must be positive, got {horizon_s!r}")
+    n_steps = int(round(horizon_s / 0.5))
+    if n_steps <= 0 or abs(n_steps * 0.5 - horizon_s) > 1e-9:
+        raise ValueError(
+            "--canonical-horizon-s must be a positive multiple of 0.5 s; "
+            f"got {horizon_s!r}"
+        )
+    os.environ["OPENLOOP_CANONICAL_HORIZON_S"] = f"{horizon_s:.12g}"
+
+
 def main():
     args = parse_args()
+    _configure_canonical_horizon_from_args(args)
     # Set canonical extrapolation env var so child processes inherit it.
     if not bool(getattr(args, "canonical_extrapolation", False)):
         os.environ["OPENLOOP_CANONICAL_EXTRAPOLATE"] = "0"

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<routes>
+  <route id="07_placement" town="Town02" role="ego" speed="7.0">
+    <waypoint x="171.854" y="236.948" z="0.000" yaw="-179.960609"/>
+    <waypoint x="170.077" y="236.947" z="0.000" yaw="-179.960609"/>
+    <waypoint x="168.299" y="236.946" z="0.000" yaw="-179.960609"/>
+    <waypoint x="166.521" y="236.945" z="0.000" yaw="-179.960609"/>
+    <waypoint x="166.157" y="236.945" z="0.000" yaw="-179.957028"/>
+    <waypoint x="165.794" y="236.944" z="0.000" yaw="-179.957028"/>
+    <waypoint x="165.430" y="236.944" z="0.000" yaw="-179.957028"/>
+    <waypoint x="165.066" y="236.944" z="0.000" yaw="-179.957028"/>
+    <waypoint x="164.703" y="236.944" z="0.000" yaw="-179.957028"/>
+    <waypoint x="164.339" y="236.943" z="0.000" yaw="-179.957028"/>
+    <waypoint x="163.976" y="236.943" z="0.000" yaw="-179.957028"/>
+    <waypoint x="163.612" y="236.943" z="0.000" yaw="-179.957028"/>
+    <waypoint x="163.248" y="236.943" z="0.000" yaw="-179.957028"/>
+    <waypoint x="162.885" y="236.942" z="0.000" yaw="-179.957028"/>
+    <waypoint x="162.521" y="236.942" z="0.000" yaw="-179.957028"/>
+    <waypoint x="155.239" y="236.938" z="0.000" yaw="-179.966577"/>
+    <waypoint x="147.957" y="236.933" z="0.000" yaw="-179.966577"/>
+    <waypoint x="140.674" y="236.929" z="0.000" yaw="-179.966577"/>
+    <waypoint x="133.392" y="236.924" z="0.000" yaw="-179.966577"/>
+    <waypoint x="126.110" y="236.920" z="0.000" yaw="-179.966577"/>
+    <waypoint x="118.828" y="236.916" z="0.000" yaw="-179.966577"/>
+    <waypoint x="111.545" y="236.911" z="0.000" yaw="-179.966577"/>
+    <waypoint x="104.263" y="236.907" z="0.000" yaw="-179.966577"/>
+  <weather id="night" cloudiness="20.0" precipitation="0.0" precipitation_deposits="0.0" wind_intensity="5.0" sun_azimuth_angle="300.0" sun_altitude_angle="-15.0" wetness="10.0" fog_distance="80.0" fog_density="5.0" fog_falloff="2.0" /></route>
+</routes>

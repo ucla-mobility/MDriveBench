@@ -1,7 +1,7 @@
 {
   "ego_path_source": "auto",
-  "actor_control_mode": "replay",
-  "walker_control_mode": "replay",
+  "actor_control_mode": "policy",
+  "walker_control_mode": "policy",
   "encode_timing": true,
   "snap_to_road": false,
   "static_spawn_only": false,

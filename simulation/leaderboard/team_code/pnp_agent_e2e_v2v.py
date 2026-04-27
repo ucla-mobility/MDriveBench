@@ -1,5 +1,6 @@
 import time
 import torch
+torch.backends.cudnn.benchmark = True
 import math
 import cv2
 import carla
@@ -89,7 +90,13 @@ class PnP_Agent(autonomous_agent.AutonomousAgent):
         self.agent_name = "pnp"
         self.wall_start = time.time()
         self.initialized = False
-        self._rgb_sensor_data = {"width": 3000, "height": 1500, "fov": 100}
+        # These RGB cameras are used for logging/visualization only in the CoDriving stack.
+        # Keep them lighter by default to avoid render corruption in multi-ego runs.
+        self._rgb_sensor_data = {
+            "width": max(1, int(os.environ.get("CODRIVING_RGB_WIDTH", "1600"))),
+            "height": max(1, int(os.environ.get("CODRIVING_RGB_HEIGHT", "900"))),
+            "fov": 100,
+        }
         self._sensor_data = self._rgb_sensor_data.copy()
         self.ego_vehicles_num = ego_vehicles_num   
 
@@ -475,10 +482,25 @@ class PnP_Agent(autonomous_agent.AutonomousAgent):
                 else:
                     rsu_data.append(None)
 
-        # capture a list of sensor data from ego vehicles 
+        # capture a list of sensor data from ego vehicles
+        # Two guards required to avoid KeyError mid-scenario:
+        #   1. CarlaDataProvider.get_hero_actor()           — actor still in pool
+        #   2. "rgb_front_<N>" in input_data                — sensors still publishing
+        # When an ego completes its route (RC=100%) or hits collided_terminal,
+        # the scenario_manager despawns it: cleanup_single() then
+        # remove_actor_by_id() (which unregisters its sensors). There is a
+        # tick window where the actor reference may still be cached but the
+        # sensor stream has stopped — without guard #2 we hit
+        # `KeyError: 'rgb_front_<N>'` at line ~331 and the whole agent
+        # crashes via AgentError, killing the scenario for the surviving
+        # egos too. Treat "sensors gone" the same as "actor gone": yield
+        # None so the planner skips this ego.
         ego_data = [
             self.tick(input_data, vehicle_num)
-            if CarlaDataProvider.get_hero_actor(hero_id=vehicle_num) is not None
+            if (
+                CarlaDataProvider.get_hero_actor(hero_id=vehicle_num) is not None
+                and "rgb_front_{}".format(vehicle_num) in input_data
+            )
             else None
             for vehicle_num in range(self.ego_vehicles_num)
         ]

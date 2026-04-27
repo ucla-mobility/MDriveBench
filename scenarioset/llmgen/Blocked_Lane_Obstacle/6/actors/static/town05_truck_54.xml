@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="utf-8"?>
+<routes><route id="town05_static_4" model="vehicle.carlamotors.carlacola" role="static" town="Town05"><waypoint x="-137.684000" y="87.909000" yaw="0.000000" z="0.000000" /></route></routes>

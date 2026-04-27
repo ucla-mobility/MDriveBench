@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="utf-8"?>
+<routes><route id="07_placement" model="static.prop.trafficcone01" role="static" speed="0.00" town="Town05"><waypoint x="-108.639000" y="88.817000" yaw="-179.933155" z="0.000000" /></route></routes>

@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="utf-8"?>
+<routes><route id="07_placement" model="walker.pedestrian.0002" role="pedestrian" speed="1.02" town="Town05"><weather cloudiness="100.00" fog_density="35.00" fog_distance="45.00" precipitation="70.00" precipitation_deposits="85.00" sun_altitude_angle="15.00" sun_azimuth_angle="210.00" wetness="90.00" wind_intensity="70.00" /><waypoint x="-116.673000" y="79.486000" yaw="90.071620" z="0.000000" /><waypoint x="-116.698000" y="99.867000" yaw="90.071620" z="0.000000" /></route></routes>

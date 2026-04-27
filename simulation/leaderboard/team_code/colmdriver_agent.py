@@ -2,6 +2,7 @@ import imp
 import os
 import time
 import torch
+torch.backends.cudnn.benchmark = True
 import math
 import cv2
 import carla

@@ -16,6 +16,10 @@ from opencood.models.comm_modules.where2comm import Communication
 from opencood.models.fuse_modules.where2comm_attn import TransformerFusion
 import torch.nn.functional as F
 
+# CoBEVT (HEAL) uses these for its FAX/swap-fusion blocks.
+from opencood.models.fuse_modules.swap_fusion_modules import SwapFusionBlockMask
+from einops import repeat
+
 def regroup(x, record_len):
     cum_sum_len = torch.cumsum(record_len, dim=0)
     split_x = torch.tensor_split(x, cum_sum_len[:-1].cpu())
@@ -503,3 +507,116 @@ class Where2commFusion(nn.Module):
             x_fuse = torch.stack(x_fuse)
         
         return x_fuse, communication_rates, {}
+
+
+class CoBEVT(nn.Module):
+    def __init__(self, args):
+        super(CoBEVT, self).__init__()
+        from torch import nn
+        from einops.layers.torch import Rearrange, Reduce
+        from opencood.models.fuse_modules.swap_fusion_modules import SwapFusionBlockMask
+        from einops import repeat
+
+        self.layers = nn.ModuleList([])
+        self.depth = args['depth']
+        # block related
+        input_dim = args['input_dim']
+        mlp_dim = args['mlp_dim']
+        agent_size = args['agent_size']
+        window_size = args['window_size']
+        drop_out = args['drop_out']
+        dim_head = args['dim_head']
+
+        for i in range(self.depth):
+            block = SwapFusionBlockMask(input_dim,
+                                        mlp_dim,
+                                        dim_head,
+                                        window_size,
+                                        agent_size,
+                                        drop_out)
+            self.layers.append(block)
+        # mlp head
+        self.mlp_head = nn.Sequential(
+            Reduce('b m d h w -> b d h w', 'mean'),
+            Rearrange('b d h w -> b h w d'),
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, input_dim),
+            Rearrange('b h w d -> b d h w')
+        )
+
+    def forward(self, x, record_len, affine_matrix):
+        _, C, H, W = x.shape
+        B, L = affine_matrix.shape[:2]
+
+        regroup_feature, mask = Regroup(x, record_len, L)
+        com_mask = mask.unsqueeze(1).unsqueeze(2).unsqueeze(3)
+        com_mask = repeat(com_mask,
+                          'b h w c l -> b (h new_h) (w new_w) c l',
+                          new_h=regroup_feature.shape[3],
+                          new_w=regroup_feature.shape[4])
+
+        regroup_feature_new = []
+        for b in range(B):
+            ego = 0
+            regroup_feature_new.append(warp_affine_simple(regroup_feature[b], affine_matrix[b, ego], (H, W)))
+        regroup_feature = torch.stack(regroup_feature_new)
+
+        x = regroup_feature
+        for stage in self.layers:
+            x = stage(x, mask=com_mask)
+        return self.mlp_head(x)
+    
+class Who2comFusion(nn.Module):
+    def __init__(self, feature_dims):
+        super().__init__()
+        # use the non-learning attention for simplicity
+        self.att = ScaledDotProductAttention(feature_dims)
+        self.decode_layer = nn.Conv2d(feature_dims * 2, feature_dims, kernel_size=3, stride=1, padding=1)
+
+    def forward(self, x, record_len, affine_matrix):
+        """
+        Fusion forwarding.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            input data, (sum(n_cav), C, H, W)
+            
+        record_len : list
+            shape: (B)
+            
+        affine_matrix : torch.Tensor
+            normalized affine matrix from 'normalize_pairwise_tfm'
+            shape: (B, L, L, 2, 3) 
+        """
+        _, C, H, W = x.shape
+        B, L = affine_matrix.shape[:2]
+        split_x = regroup(x, record_len)
+        batch_node_features = split_x
+        out = []
+        # iterate each batch
+        for b in range(B):
+            N = record_len[b]
+            t_matrix = affine_matrix[b][:N, :N, :, :]
+            # update each node i
+            i = 0 # ego
+            # [N, C, H, W]
+            neighbor_feature = warp_affine_simple(batch_node_features[b],
+                                            t_matrix[i, :, :, :],
+                                            (H, W))
+            cav_num = neighbor_feature.shape[0]
+            # (N, C, H, W)
+            ego_feature = batch_node_features[b][0] # [C, H, W]
+
+            neighbor_feature = neighbor_feature.view(cav_num, C, -1).permute(2, 0, 1)
+            neighbor_feature = self.att(neighbor_feature, neighbor_feature, neighbor_feature)
+            neighbor_feature = neighbor_feature.permute(1, 2, 0).view(cav_num, C, H, W)[0, ...] # [C, H, W]
+
+            concat_feature = torch.cat((ego_feature, neighbor_feature), dim=0).unsqueeze(0) # [1, 2C, H, W]
+            decode_feature = self.decode_layer(concat_feature)
+
+            out.append(decode_feature)
+            
+        out = torch.concat(out, dim=0)
+        
+        return out

@@ -1,0 +1,67 @@
+{
+  "bicycle": [],
+  "ego": [
+    {
+      "file": "town02_vehicle_1_0.xml",
+      "kind": "ego",
+      "name": "Vehicle 1",
+      "route_id": "07_placement",
+      "speed": 8.0,
+      "town": "Town02",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 8.0
+    },
+    {
+      "file": "town02_vehicle_2_1.xml",
+      "kind": "ego",
+      "name": "Vehicle 2",
+      "route_id": "07_placement",
+      "speed": 8.0,
+      "town": "Town02",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 8.0
+    },
+    {
+      "file": "town02_vehicle_3_2.xml",
+      "kind": "ego",
+      "name": "Vehicle 3",
+      "route_id": "07_placement",
+      "speed": 8.0,
+      "town": "Town02",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 8.0
+    },
+    {
+      "file": "town02_vehicle_5_3.xml",
+      "kind": "ego",
+      "name": "Vehicle 5",
+      "route_id": "07_placement",
+      "speed": 7.0,
+      "town": "Town02",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 7.0
+    },
+    {
+      "file": "town02_ego_vehicle_4.xml",
+      "kind": "ego",
+      "name": "ego_vehicle_4",
+      "route_id": "town02_ego_ego_vehicle_4",
+      "town": "Town02",
+      "model": "vehicle.lincoln.mkz2017"
+    }
+  ],
+  "npc": [],
+  "pedestrian": [
+    {
+      "file": "actors/pedestrians/town02_entity_1_walker_crossing.xml",
+      "kind": "pedestrian",
+      "model": "walker.pedestrian.0001",
+      "name": "entity_1",
+      "route_id": "07_placement",
+      "speed": 1.02,
+      "town": "Town02",
+      "target_speed": 1.02
+    }
+  ],
+  "static": []
+}

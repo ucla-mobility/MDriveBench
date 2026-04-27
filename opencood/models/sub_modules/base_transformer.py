@@ -14,6 +14,17 @@ class PreNorm(nn.Module):
         return self.fn(self.norm(x), **kwargs)
 
 
+class PreNormResidual(nn.Module):
+    """LayerNorm → fn → add residual. Used by SwapFusion (CoBEVT)."""
+    def __init__(self, dim, fn):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.fn = fn
+
+    def forward(self, x, **kwargs):
+        return self.fn(self.norm(x), **kwargs) + x
+
+
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout=0.):
         super().__init__()

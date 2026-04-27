@@ -1,0 +1,64 @@
+{
+  "bicycle": [
+    {
+      "file": "actors/bicycle/town01_bicycle_0.xml",
+      "kind": "bicycle",
+      "name": "bicycle_0",
+      "route_id": "07_placement",
+      "town": "Town01",
+      "model": "vehicle.bh.crossbike"
+    }
+  ],
+  "ego": [
+    {
+      "file": "town01_vehicle_1_0.xml",
+      "kind": "ego",
+      "name": "Vehicle 1",
+      "route_id": "07_placement",
+      "speed": 8.0,
+      "town": "Town01",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 8.0
+    },
+    {
+      "file": "town01_vehicle_2_1.xml",
+      "kind": "ego",
+      "name": "Vehicle 2",
+      "route_id": "07_placement",
+      "speed": 8.0,
+      "town": "Town01",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 8.0
+    },
+    {
+      "file": "town01_ego_vehicle_2.xml",
+      "kind": "ego",
+      "name": "ego_vehicle_2",
+      "route_id": "town01_ego_ego_vehicle_2",
+      "town": "Town01",
+      "model": "vehicle.lincoln.mkz2017"
+    },
+    {
+      "file": "town01_ego_vehicle_3.xml",
+      "kind": "ego",
+      "name": "ego_vehicle_3",
+      "route_id": "town01_ego_ego_vehicle_3",
+      "town": "Town01",
+      "model": "vehicle.lincoln.mkz2017"
+    }
+  ],
+  "npc": [],
+  "pedestrian": [],
+  "static": [
+    {
+      "file": "actors/static/town01_entity_1_parked_vehicle.xml",
+      "kind": "static",
+      "model": "vehicle.carlamotors.carlacola",
+      "name": "entity_1",
+      "route_id": "07_placement",
+      "speed": 0.0,
+      "town": "Town01",
+      "target_speed": 0.0
+    }
+  ]
+}

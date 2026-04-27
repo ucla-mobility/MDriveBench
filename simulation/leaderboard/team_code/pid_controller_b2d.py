@@ -70,22 +70,41 @@ class PIDController(object):
         angle_last = np.degrees(np.pi / 2 - np.arctan2(aim_last[1], aim_last[0])) / 90
         angle_target = np.degrees(np.pi / 2 - np.arctan2(target[1], target[0])) / 90
 
-        # choice of point to aim for steering, removing outlier predictions
-        # use target point if it has a smaller angle or if error is large
-        # predicted point otherwise
-        # (reduces noise in eg. straight roads, helps with sudden turn commands)
-        use_target_to_aim = np.abs(angle_target) < np.abs(angle)
-        use_target_to_aim = use_target_to_aim or (np.abs(angle_target-angle_last) > self.angle_thresh and target[1] < self.dist_thresh)
+        # ── Smooth blend replaces the original binary switch ──────────
+        # The old code: use_target_to_aim = |angle_target| < |angle|
+        # selected either the route target angle or the model trajectory
+        # angle exclusively.  On long straights both angles are near-zero,
+        # so the switch flips on noise each frame, preventing the PID
+        # integral from building a consistent cross-track correction.
+        #
+        # Fix: a sigmoid weight that smoothly favours whichever source
+        # predicts a smaller correction.  At large |Δ| this approximates
+        # the original binary behaviour; at small |Δ| (straight roads) it
+        # produces a ~50/50 blend so the PID integrates smoothly.
+        #
+        # A floor of 0.15 guarantees the route target always contributes
+        # at least 15 %, providing continuous cross-track lane-centring.
+        mag_diff = float(np.abs(angle) - np.abs(angle_target))
+        w_target = 1.0 / (1.0 + np.exp(-8.0 * mag_diff))
+        w_target = max(w_target, 0.15)
+
+        # Override: snap fully to route target on sudden close-range turn
+        # commands (original condition 2, kept for backward compatibility).
+        sudden_turn = bool(
+            np.abs(angle_target - angle_last) > self.angle_thresh
+            and target[1] < self.dist_thresh
+        )
+        if sudden_turn:
+            w_target = 1.0
+
         # Endpoint safety guard: once we're in route tail mode, a behind-ego
         # command target can cause a large wrapped target angle and sharp steer
         # reversal. Keep steering on trajectory angle in this narrow case.
         terminal_behind_guard = bool(tail_mode and target[1] <= 0.0)
         if terminal_behind_guard:
-            use_target_to_aim = False
-        if use_target_to_aim:
-            angle_final = angle_target
-        else:
-            angle_final = angle
+            w_target = 0.0
+
+        angle_final = w_target * angle_target + (1.0 - w_target) * angle
 
         steer = self.turn_controller.step(angle_final)
         steer = np.clip(steer, -1.0, 1.0)
@@ -112,12 +131,13 @@ class PIDController(object):
             'angle': float(angle.astype(np.float64)),
             'angle_last': float(angle_last.astype(np.float64)),
             'angle_target': float(angle_target.astype(np.float64)),
-            'angle_final': float(angle_final.astype(np.float64)),
+            'angle_final': float(angle_final),
             'delta': float(delta.astype(np.float64)),
             'tail_mode': bool(tail_mode),
             'tail_passed_terminal': bool(tail_passed_terminal),
             'terminal_behind_guard': bool(terminal_behind_guard),
-            'use_target_to_aim': bool(use_target_to_aim),
+            'w_target': float(w_target),
+            'sudden_turn': bool(sudden_turn),
         }
 
         return steer, throttle, brake, metadata

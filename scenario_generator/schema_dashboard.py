@@ -1056,7 +1056,7 @@ def _infer_stage_trace_and_pipeline_findings(
                             "trajectory": trajectory,
                             "target_vehicle": str((a.get("placement") or {}).get("target_vehicle", "")),
                             "trigger_type": str(trigger.get("type", "")),
-                            "trigger_vehicle": str(trigger.get("vehicle", "")),
+                            "trigger_vehicle": str(trigger.get("vehicle", "") or trigger.get("preferred_vehicle", "")),
                             "trigger_distance_m": _to_float(trigger.get("distance_m")),
                         }
                     )

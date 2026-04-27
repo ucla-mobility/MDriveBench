@@ -1,0 +1,161 @@
+{
+  "bicycle": [],
+  "ego": [
+    {
+      "file": "town05_vehicle_1_0.xml",
+      "kind": "ego",
+      "name": "Vehicle 1",
+      "route_id": "07_placement",
+      "speed": 8.0,
+      "town": "Town05",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 8.0
+    },
+    {
+      "file": "town05_vehicle_2_1.xml",
+      "kind": "ego",
+      "name": "Vehicle 2",
+      "route_id": "07_placement",
+      "speed": 8.0,
+      "town": "Town05",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 8.0
+    },
+    {
+      "file": "town05_vehicle_3_2.xml",
+      "kind": "ego",
+      "name": "Vehicle 3",
+      "route_id": "07_placement",
+      "speed": 8.0,
+      "town": "Town05",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 8.0
+    },
+    {
+      "file": "town05_vehicle_4_3.xml",
+      "kind": "ego",
+      "name": "Vehicle 4",
+      "route_id": "07_placement",
+      "speed": 7.0,
+      "town": "Town05",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 7.0
+    },
+    {
+      "file": "town05_vehicle_5_4.xml",
+      "kind": "ego",
+      "name": "Vehicle 5",
+      "route_id": "07_placement",
+      "speed": 8.0,
+      "town": "Town05",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 8.0
+    },
+    {
+      "file": "town05_vehicle_6_5.xml",
+      "kind": "ego",
+      "name": "Vehicle 6",
+      "route_id": "07_placement",
+      "speed": 7.0,
+      "town": "Town05",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 7.0
+    }
+  ],
+  "npc": [],
+  "pedestrian": [],
+  "static": [
+    {
+      "file": "actors/static/town05_entity_2_1_barriers_cluster_1.xml",
+      "kind": "static",
+      "model": "static.prop.streetbarrier",
+      "name": "entity_2_1",
+      "route_id": "07_placement",
+      "speed": 0.0,
+      "town": "Town05",
+      "target_speed": 0.0
+    },
+    {
+      "file": "actors/static/town05_entity_2_2_barriers_cluster_1.xml",
+      "kind": "static",
+      "model": "static.prop.streetbarrier",
+      "name": "entity_2_2",
+      "route_id": "07_placement",
+      "speed": 0.0,
+      "town": "Town05",
+      "target_speed": 0.0
+    },
+    {
+      "file": "actors/static/town05_streetbarrier_79.xml",
+      "kind": "static",
+      "name": "Streetbarrier 79",
+      "route_id": "07_placement",
+      "town": "Town05",
+      "model": "static.prop.streetbarrier"
+    },
+    {
+      "file": "actors/static/town05_constructioncone_80.xml",
+      "kind": "static",
+      "name": "Constructioncone 80",
+      "route_id": "07_placement",
+      "town": "Town05",
+      "model": "static.prop.constructioncone"
+    },
+    {
+      "file": "actors/static/town05_constructioncone_81.xml",
+      "kind": "static",
+      "name": "Constructioncone 81",
+      "route_id": "07_placement",
+      "town": "Town05",
+      "model": "static.prop.constructioncone"
+    },
+    {
+      "file": "actors/static/town05_constructioncone_82.xml",
+      "kind": "static",
+      "name": "Constructioncone 82",
+      "route_id": "07_placement",
+      "town": "Town05",
+      "model": "static.prop.constructioncone"
+    },
+    {
+      "file": "actors/static/town05_constructioncone_83.xml",
+      "kind": "static",
+      "name": "Constructioncone 83",
+      "route_id": "07_placement",
+      "town": "Town05",
+      "model": "static.prop.constructioncone"
+    },
+    {
+      "file": "actors/static/town05_constructioncone_84.xml",
+      "kind": "static",
+      "name": "Constructioncone 84",
+      "route_id": "07_placement",
+      "town": "Town05",
+      "model": "static.prop.constructioncone"
+    },
+    {
+      "file": "actors/static/town05_constructioncone_85.xml",
+      "kind": "static",
+      "name": "Constructioncone 85",
+      "route_id": "07_placement",
+      "town": "Town05",
+      "model": "static.prop.constructioncone"
+    },
+    {
+      "file": "actors/static/town05_constructioncone_86.xml",
+      "kind": "static",
+      "name": "Constructioncone 86",
+      "route_id": "07_placement",
+      "town": "Town05",
+      "model": "static.prop.constructioncone"
+    },
+    {
+      "file": "actors/static/town05_constructioncone_87.xml",
+      "kind": "static",
+      "name": "Constructioncone 87",
+      "route_id": "07_placement",
+      "town": "Town05",
+      "model": "static.prop.constructioncone"
+    }
+  ]
+}

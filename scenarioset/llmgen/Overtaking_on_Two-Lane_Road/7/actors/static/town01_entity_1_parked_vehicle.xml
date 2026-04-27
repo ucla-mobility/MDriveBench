@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="utf-8"?>
+<routes><route bbox_height="2.467445" bbox_length="5.203838" bbox_width="2.614572" id="07_placement" model="vehicle.carlamotors.carlacola" role="static" speed="0.00" town="Town01"><weather cloudiness="20.00" fog_density="5.00" fog_distance="80.00" precipitation="0.00" precipitation_deposits="0.00" sun_altitude_angle="-15.00" sun_azimuth_angle="300.00" wetness="10.00" wind_intensity="5.00" /><waypoint x="55.675000" y="331.440000" yaw="0.028648" z="0.000000" /></route></routes>

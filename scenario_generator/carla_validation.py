@@ -9,6 +9,7 @@ reuse the same validation contract and simulation checks.
 from __future__ import annotations
 
 import inspect
+import bisect
 import json
 import logging
 import math
@@ -94,6 +95,248 @@ def _load_actor_manifest(routes_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _load_actor_behaviors(routes_dir: Path) -> Dict[str, Dict[str, Any]]:
+    behavior_path = routes_dir / "actors_behavior.json"
+    if not behavior_path.exists():
+        return {}
+    try:
+        data = json.loads(behavior_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if isinstance(data, dict) and isinstance(data.get("behaviors"), list):
+        entries = data.get("behaviors", [])
+    elif isinstance(data, list):
+        entries = data
+    else:
+        entries = []
+    out: Dict[str, Dict[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = (
+            entry.get("actor_name")
+            or entry.get("name")
+            or entry.get("actor")
+            or entry.get("id")
+        )
+        if name:
+            out[str(name)] = entry
+    return out
+
+
+def _normalize_vehicle_name(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    match = re.search(r"(\d+)", raw)
+    if not match:
+        return ""
+    return f"Vehicle {int(match.group(1))}"
+
+
+def _distance2d(a: Any, b: Any) -> float:
+    dx = float(a.x) - float(b.x)
+    dy = float(a.y) - float(b.y)
+    return math.hypot(dx, dy)
+
+
+def _normalize_xy(dx: float, dy: float) -> Tuple[float, float]:
+    norm = math.hypot(float(dx), float(dy))
+    if norm <= 1e-6:
+        return (0.0, 0.0)
+    return (float(dx) / norm, float(dy) / norm)
+
+
+def _route_points_from_transforms(transforms: Sequence[Any]) -> List[Any]:
+    points: List[Any] = []
+    for tf in list(transforms or []):
+        try:
+            loc = tf.location
+        except Exception:
+            continue
+        if points and _distance2d(points[-1], loc) < 0.05:
+            continue
+        points.append(loc)
+    return points
+
+
+def _polyline_cumulative(points: Sequence[Any]) -> List[float]:
+    points = list(points or [])
+    if not points:
+        return []
+    cumulative = [0.0]
+    for idx in range(1, len(points)):
+        cumulative.append(cumulative[-1] + _distance2d(points[idx - 1], points[idx]))
+    return cumulative
+
+
+def _sample_polyline(points: Sequence[Any], cumulative: Sequence[float], distance_s: float, carla_module: Any) -> Tuple[Any, Tuple[float, float]]:
+    pts = list(points or [])
+    cum = list(cumulative or [])
+    if not pts:
+        return carla_module.Location(x=0.0, y=0.0, z=0.0), (1.0, 0.0)
+    if len(pts) == 1 or len(cum) < 2:
+        return pts[0], (1.0, 0.0)
+    total = float(cum[-1])
+    s = max(0.0, min(float(distance_s), total))
+    idx = max(0, min(len(cum) - 2, bisect.bisect_right(cum, s) - 1))
+    while idx < len(pts) - 1:
+        a = pts[idx]
+        b = pts[idx + 1]
+        seg_len = _distance2d(a, b)
+        if seg_len > 1e-6:
+            ratio = max(0.0, min(1.0, (s - float(cum[idx])) / seg_len))
+            x = float(a.x) + (float(b.x) - float(a.x)) * ratio
+            y = float(a.y) + (float(b.y) - float(a.y)) * ratio
+            z = float(a.z) + (float(b.z) - float(a.z)) * ratio
+            tangent = _normalize_xy(float(b.x) - float(a.x), float(b.y) - float(a.y))
+            return carla_module.Location(x=x, y=y, z=z), tangent
+        idx += 1
+    last = pts[-1]
+    prev = pts[-2]
+    tangent = _normalize_xy(float(last.x) - float(prev.x), float(last.y) - float(prev.y))
+    return last, tangent if tangent != (0.0, 0.0) else (1.0, 0.0)
+
+
+def _project_to_polyline(location: Any, points: Sequence[Any], cumulative: Sequence[float], carla_module: Any) -> Tuple[float, float, Any, Tuple[float, float]]:
+    pts = list(points or [])
+    cum = list(cumulative or [])
+    if not pts:
+        zero = carla_module.Location(x=0.0, y=0.0, z=0.0)
+        return 0.0, float("inf"), zero, (1.0, 0.0)
+    if len(pts) == 1 or len(cum) < 2:
+        return 0.0, _distance2d(location, pts[0]), pts[0], (1.0, 0.0)
+
+    px = float(location.x)
+    py = float(location.y)
+    best_s = 0.0
+    best_dist_sq = float("inf")
+    best_point = pts[0]
+    best_tangent = (1.0, 0.0)
+    for idx in range(len(pts) - 1):
+        a = pts[idx]
+        b = pts[idx + 1]
+        vx = float(b.x) - float(a.x)
+        vy = float(b.y) - float(a.y)
+        seg_len_sq = vx * vx + vy * vy
+        if seg_len_sq <= 1e-8:
+            continue
+        t = ((px - float(a.x)) * vx + (py - float(a.y)) * vy) / seg_len_sq
+        t = max(0.0, min(1.0, float(t)))
+        proj_x = float(a.x) + vx * t
+        proj_y = float(a.y) + vy * t
+        dx = px - proj_x
+        dy = py - proj_y
+        dist_sq = dx * dx + dy * dy
+        if dist_sq < best_dist_sq:
+            seg_len = math.sqrt(seg_len_sq)
+            best_dist_sq = dist_sq
+            best_s = float(cum[idx]) + float(t) * seg_len
+            best_point = carla_module.Location(
+                x=proj_x,
+                y=proj_y,
+                z=float(a.z) + (float(b.z) - float(a.z)) * t,
+            )
+            best_tangent = _normalize_xy(vx, vy)
+    return best_s, math.sqrt(best_dist_sq), best_point, best_tangent
+
+
+def _evaluate_dynamic_forward_conflict(
+    *,
+    ped_actor: Any,
+    ped_route: Sequence[Any],
+    ped_speed: float,
+    ego_actor: Any,
+    ego_route: Sequence[Any],
+    carla_module: Any,
+    min_ego_speed_mps: float = 1.0,
+    base_horizon_s: float = 5.0,
+    max_horizon_s: float = 8.0,
+    sample_dt_s: float = 0.1,
+    corridor_half_width_m: float = 2.25,
+    rear_tolerance_m: float = 0.75,
+    front_window_m: float = 4.0,
+    trigger_clearance_m: float = 0.5,
+    min_conflict_time_s: float = 0.25,
+) -> Optional[Dict[str, float]]:
+    if ped_actor is None or ego_actor is None:
+        return None
+    try:
+        ped_loc = ped_actor.get_location()
+        ego_loc = ego_actor.get_location()
+    except Exception:
+        return None
+
+    ego_speed = math.hypot(float(ego_actor.get_velocity().x), float(ego_actor.get_velocity().y))
+    if ego_speed < float(min_ego_speed_mps):
+        return None
+
+    ped_points = [ped_loc] + [tf.location for tf in list(ped_route or []) if _distance2d(ped_loc, tf.location) >= 0.05]
+    ped_cumulative = _polyline_cumulative(ped_points)
+    if len(ped_points) < 2 or len(ped_cumulative) < 2:
+        return None
+
+    ego_points = _route_points_from_transforms(ego_route)
+    ego_cumulative = _polyline_cumulative(ego_points)
+    if len(ego_points) < 2 or len(ego_cumulative) < 2:
+        return None
+
+    ego_s, _, _, _ = _project_to_polyline(ego_loc, ego_points, ego_cumulative, carla_module)
+    ped_total = float(ped_cumulative[-1])
+    ped_speed = max(0.1, float(ped_speed))
+    horizon_s = min(float(max_horizon_s), max(float(base_horizon_s), ped_total / ped_speed))
+
+    ego_radius = _actor_radius(ego_actor)
+    ped_radius = _actor_radius(ped_actor)
+    best: Optional[Dict[str, float]] = None
+    step_count = max(1, int(math.ceil(horizon_s / max(0.05, float(sample_dt_s)))))
+    for step in range(1, step_count + 1):
+        t = float(step) * max(0.05, float(sample_dt_s))
+        ped_s = min(ped_total, ped_speed * t)
+        ped_loc_t, _ = _sample_polyline(ped_points, ped_cumulative, ped_s, carla_module)
+        ego_loc_t, ego_forward = _sample_polyline(ego_points, ego_cumulative, ego_s + ego_speed * t, carla_module)
+        if ego_forward == (0.0, 0.0):
+            continue
+        rel_x = float(ped_loc_t.x) - float(ego_loc_t.x)
+        rel_y = float(ped_loc_t.y) - float(ego_loc_t.y)
+        longitudinal = rel_x * float(ego_forward[0]) + rel_y * float(ego_forward[1])
+        lateral = rel_x * (-float(ego_forward[1])) + rel_y * float(ego_forward[0])
+        center_dist = math.hypot(rel_x, rel_y)
+        clearance = center_dist - (float(ego_radius) + float(ped_radius))
+        corridor_limit = max(float(corridor_half_width_m), float(ego_radius) + float(ped_radius) + 0.35)
+        front_limit = float(front_window_m) + float(ego_radius) + float(ped_radius)
+        if longitudinal < -float(rear_tolerance_m):
+            continue
+        if longitudinal > front_limit:
+            continue
+        if abs(lateral) > corridor_limit:
+            continue
+        candidate = {
+            "time_to_conflict_s": float(t),
+            "clearance_m": float(clearance),
+            "longitudinal_m": float(longitudinal),
+            "lateral_m": float(lateral),
+        }
+        if best is None or (
+            float(candidate["clearance_m"]),
+            float(candidate["time_to_conflict_s"]),
+            abs(float(candidate["lateral_m"])),
+        ) < (
+            float(best["clearance_m"]),
+            float(best["time_to_conflict_s"]),
+            abs(float(best["lateral_m"])),
+        ):
+            best = candidate
+
+    if best is None:
+        return None
+    if float(best["time_to_conflict_s"]) < float(min_conflict_time_s):
+        return None
+    if float(best["clearance_m"]) > float(trigger_clearance_m):
+        return None
+    return best
 
 
 def _all_manifest_entries(manifest: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
@@ -1114,11 +1357,13 @@ def _run_constant_velocity_baseline(
         spawn_ok: bool = False,
         risk_ok: bool = False,
         route_follow_ok: bool = False,
+        ped_interaction_ok: bool = False,
     ) -> Dict[str, bool]:
         return {
             "spawn_all_actors": bool(spawn_ok),
             "constant_trajectory_risk_check": bool(risk_ok),
             "baseline_route_follow": bool(route_follow_ok),
+            "intended_ped_interaction_check": bool(ped_interaction_ok),
         }
 
     def _default_metrics(
@@ -1133,9 +1378,12 @@ def _run_constant_velocity_baseline(
             "near_miss": False,
             "route_completion_min": 0.0,
             "driving_score_min": 0.0,
+            "intended_pedestrians_total": 0,
+            "intended_pedestrians_satisfied": 0,
         }
 
     manifest = _load_actor_manifest(routes_dir)
+    behavior_by_name = _load_actor_behaviors(routes_dir)
     if not manifest:
         return {
             "ok": False,
@@ -1167,6 +1415,7 @@ def _run_constant_velocity_baseline(
     ego_waypoints: Dict[int, List[Any]] = {}
     ego_entry_speeds: Dict[int, float] = {}
     reached: Dict[int, int] = {}
+    intended_pedestrians: Dict[int, Dict[str, Any]] = {}
 
     spawn_failures: List[Dict[str, Any]] = []
     spawn_repairs: List[Dict[str, Any]] = []
@@ -1234,6 +1483,41 @@ def _run_constant_velocity_baseline(
                 spawned.append(actor)
                 expected_actor_ids.append(actor.id)
                 role_lookup[actor.id] = role_name
+
+                actor_name = str(entry.get("name") or Path(rel).stem)
+                behavior_entry = behavior_by_name.get(actor_name)
+                trigger_spec = behavior_entry.get("trigger") if isinstance(behavior_entry, dict) else None
+                action_spec = (
+                    behavior_entry.get("action") or behavior_entry.get("behavior")
+                    if isinstance(behavior_entry, dict)
+                    else None
+                )
+                trigger_type = str(trigger_spec.get("type", "")).strip() if isinstance(trigger_spec, dict) else ""
+                action_type = str(action_spec.get("type", "")).strip() if isinstance(action_spec, dict) else ""
+                if (
+                    role_group == "pedestrian"
+                    and isinstance(trigger_spec, dict)
+                    and action_type == "start_motion"
+                    and trigger_type in ("distance_to_vehicle", "dynamic_forward_conflict")
+                ):
+                    intended_pedestrians[actor.id] = {
+                        "actor": actor,
+                        "name": actor_name,
+                        "route_waypoints": waypoints,
+                        "target_speed": max(0.1, _safe_float(entry.get("speed"), 1.5)),
+                        "preferred_vehicle": _normalize_vehicle_name(
+                            trigger_spec.get("preferred_vehicle") or trigger_spec.get("vehicle")
+                        ),
+                        "trigger_type": (
+                            "dynamic_forward_conflict"
+                            if role_group == "pedestrian"
+                            else trigger_type
+                        ),
+                        "satisfied": False,
+                        "selected_vehicle": "",
+                        "time_to_conflict_s": None,
+                        "clearance_m": None,
+                    }
 
                 # --- Post-spawn adjustments (mirrors route_scenario.py) ---
                 if role_group in ("static", "static_prop"):
@@ -1391,6 +1675,49 @@ def _run_constant_velocity_baseline(
                     severe = True
                 min_ttc = min(min_ttc, ttc)
 
+            for ped_state in intended_pedestrians.values():
+                if ped_state.get("satisfied"):
+                    continue
+                ped_actor = ped_state.get("actor")
+                if ped_actor is None or not getattr(ped_actor, "is_alive", True):
+                    continue
+                candidates: List[Dict[str, Any]] = []
+                for ego_idx, ego in enumerate(ego_actors):
+                    if ego is None or not getattr(ego, "is_alive", True):
+                        continue
+                    candidate = _evaluate_dynamic_forward_conflict(
+                        ped_actor=ped_actor,
+                        ped_route=ped_state.get("route_waypoints") or [],
+                        ped_speed=float(ped_state.get("target_speed") or 1.5),
+                        ego_actor=ego,
+                        ego_route=ego_waypoints.get(ego_idx) or [],
+                        carla_module=carla_module,
+                    )
+                    if candidate is None:
+                        continue
+                    candidate["ego_idx"] = int(ego_idx)
+                    candidate["vehicle_name"] = f"Vehicle {int(ego_idx) + 1}"
+                    candidates.append(candidate)
+
+                if not candidates:
+                    continue
+
+                preferred_vehicle = str(ped_state.get("preferred_vehicle") or "")
+                candidates.sort(
+                    key=lambda c: (
+                        float(c["clearance_m"]),
+                        float(c["time_to_conflict_s"]),
+                        0 if preferred_vehicle and c["vehicle_name"] == preferred_vehicle else 1,
+                    )
+                )
+                best = candidates[0]
+                ped_state["satisfied"] = True
+                ped_state["selected_vehicle"] = best["vehicle_name"]
+                ped_state["time_to_conflict_s"] = round(float(best["time_to_conflict_s"]), 3)
+                ped_state["clearance_m"] = round(float(best["clearance_m"]), 3)
+                ped_state["longitudinal_m"] = round(float(best["longitudinal_m"]), 3)
+                ped_state["lateral_m"] = round(float(best["lateral_m"]), 3)
+
             if all(reached[i] >= max(0, len(ego_waypoints[i]) - 1) for i in reached):
                 break
 
@@ -1405,6 +1732,26 @@ def _run_constant_velocity_baseline(
 
         route_completion_min = min(rc_vals) if rc_vals else 0.0
         driving_score_min = min(ds_vals) if ds_vals else 0.0
+        ped_interaction_results = []
+        ped_satisfied = 0
+        for ped_state in intended_pedestrians.values():
+            ok = bool(ped_state.get("satisfied"))
+            if ok:
+                ped_satisfied += 1
+            ped_interaction_results.append(
+                {
+                    "name": str(ped_state.get("name") or ""),
+                    "trigger_type": str(ped_state.get("trigger_type") or ""),
+                    "preferred_vehicle": str(ped_state.get("preferred_vehicle") or ""),
+                    "selected_vehicle": str(ped_state.get("selected_vehicle") or ""),
+                    "ok": ok,
+                    "time_to_conflict_s": ped_state.get("time_to_conflict_s"),
+                    "clearance_m": ped_state.get("clearance_m"),
+                    "longitudinal_m": ped_state.get("longitudinal_m"),
+                    "lateral_m": ped_state.get("lateral_m"),
+                }
+            )
+        ped_interaction_ok = all(item.get("ok") for item in ped_interaction_results) if ped_interaction_results else True
 
         risk_ok = bool(near_miss) if require_risk else True
         route_follow_ok = route_completion_min >= 0.95 and driving_score_min >= 0.95
@@ -1413,6 +1760,7 @@ def _run_constant_velocity_baseline(
             "spawn_all_actors": bool(spawn_ok and spawn_actual >= spawn_expected),
             "constant_trajectory_risk_check": bool(risk_ok),
             "baseline_route_follow": bool(route_follow_ok),
+            "intended_ped_interaction_check": bool(ped_interaction_ok),
         }
 
         failed_reasons: List[str] = []
@@ -1422,6 +1770,8 @@ def _run_constant_velocity_baseline(
             failed_reasons.append("risk_check_failed")
         if not checks["baseline_route_follow"]:
             failed_reasons.append("route_follow_failed")
+        if not checks["intended_ped_interaction_check"]:
+            failed_reasons.append("ped_interaction_failed")
 
         return {
             "ok": all(checks.values()),
@@ -1434,10 +1784,13 @@ def _run_constant_velocity_baseline(
                 "near_miss": bool(near_miss or severe),
                 "route_completion_min": round(float(route_completion_min), 4),
                 "driving_score_min": round(float(driving_score_min), 4),
+                "intended_pedestrians_total": int(len(intended_pedestrians)),
+                "intended_pedestrians_satisfied": int(ped_satisfied),
             },
             "spawn_failed_entries": spawn_failures,
             "spawn_repairs": spawn_repairs,
             "near_miss_hits": hits_debug,
+            "ped_interaction_checks": ped_interaction_results,
         }
     finally:
         _destroy_actors(spawned)

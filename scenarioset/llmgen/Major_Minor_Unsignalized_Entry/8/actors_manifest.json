@@ -1,0 +1,58 @@
+{
+  "bicycle": [],
+  "ego": [
+    {
+      "file": "town02_vehicle_1_0.xml",
+      "kind": "ego",
+      "name": "Vehicle 1",
+      "route_id": "07_placement",
+      "speed": 8.0,
+      "town": "Town02",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 8.0
+    },
+    {
+      "file": "town02_vehicle_2_1.xml",
+      "kind": "ego",
+      "name": "Vehicle 2",
+      "route_id": "07_placement",
+      "speed": 8.0,
+      "town": "Town02",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 8.0
+    },
+    {
+      "file": "town02_vehicle_3_2.xml",
+      "kind": "ego",
+      "name": "Vehicle 3",
+      "route_id": "07_placement",
+      "speed": 7.0,
+      "town": "Town02",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 7.0
+    },
+    {
+      "file": "town02_vehicle_4_3.xml",
+      "kind": "ego",
+      "name": "Vehicle 4",
+      "route_id": "07_placement",
+      "speed": 8.0,
+      "town": "Town02",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 8.0
+    },
+    {
+      "file": "town02_vehicle_5_4.xml",
+      "kind": "ego",
+      "name": "Vehicle 5",
+      "route_id": "07_placement",
+      "speed": 8.0,
+      "town": "Town02",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 8.0
+    }
+  ],
+  "npc": [],
+  "pedestrian": [],
+  "static": []
+}

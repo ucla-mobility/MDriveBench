@@ -32,6 +32,7 @@ from srunner.scenariomanager.scenarioatomics.atomic_criteria import RouteComplet
 from leaderboard.scenarios.scenarioatomics.atomic_criteria import ActorSpeedAboveThresholdTest
 
 from leaderboard.autoagents.agent_wrapper import AgentWrapper, AgentError
+from leaderboard.scenarios.tick_forensics import make_forensics
 from leaderboard.envs.sensor_interface import SensorReceivedNoData
 from leaderboard.utils.result_writer import ResultOutputProvider
 
@@ -99,13 +100,23 @@ class ScenarioManager(object):
         self.set_flag = True
 
         # Position-based stall detection (conservative fallback)
-        # Tracks position history to detect when ALL vehicles are stuck
+        # Tracks position history to detect when ALL vehicles are stuck.
+        #
+        # DEFAULT NOW DISABLED: forensics showed scenarios were repeatedly killed
+        # by this 90s/0.5m heuristic during legitimately stationary phases (egos
+        # waiting at red lights, blocked behind a stopped lead vehicle, queuing
+        # at intersections).  False-positive rate was high.  Re-enable with
+        # CUSTOM_ENABLE_STALL_DETECTION=1 if a specific debug session needs it.
         self._stall_position_history = {}  # {ego_id: [(time, x, y, z), ...]}
         self._stall_check_interval = 5.0   # Check every 5 seconds
         self._stall_last_check_time = 0.0
-        self._stall_threshold_time = 90.0  # 90 seconds of minimal movement = stall
-        self._stall_min_distance = 0.5     # Must move at least 0.5 meters in threshold_time
-        self._stall_detection_enabled = not self._env_flag("CUSTOM_DISABLE_STALL_DETECTION", False)
+        self._stall_threshold_time = 600.0  # 10 min of minimal movement (was 90s)
+        self._stall_min_distance = 0.5      # Must move at least 0.5m in threshold_time
+        # Default: OFF.  Opt-in via CUSTOM_ENABLE_STALL_DETECTION=1.
+        # CUSTOM_DISABLE_STALL_DETECTION still recognized for backward compat.
+        _opt_in = self._env_flag("CUSTOM_ENABLE_STALL_DETECTION", False)
+        _opt_out = self._env_flag("CUSTOM_DISABLE_STALL_DETECTION", False)
+        self._stall_detection_enabled = _opt_in and not _opt_out
         if not self._stall_detection_enabled:
             print(
                 "[ScenarioManager] Position-based stall detection disabled "
@@ -160,6 +171,27 @@ class ScenarioManager(object):
         self._runtime_dead_ego_cleanup_done = set()
         # Track egos that already reached route completion and were despawned.
         self._runtime_completed_ego_cleanup_done = set()
+        # Tier 2 early-termination: per-ego "softly completed" tracking.
+        # Maps ego_idx -> first sim_time at which (RC>=threshold AND speed below cutoff).
+        # If the condition holds continuously for SOFT_COMPLETE_DWELL_S sim seconds the
+        # ego is treated as "done" without waiting for AgentBlockedTest's full timeout.
+        # Saves wall time on the common pattern: ego reaches near-end-of-route, stops,
+        # and would otherwise block the scenario for the full blocked-timer duration.
+        self._soft_complete_first_seen: dict[int, float] = {}
+        self._soft_complete_done: set[int] = set()
+        # Per-ego termination-path metadata, surfaced into results so we can
+        # validate Tier 1/2 didn't change scores.  Values: "route_complete",
+        # "blocked", "soft_complete", "stationary_timeout", or absent.
+        self._termination_path: dict[int, str] = {}
+        # Position-based stuck detector.  Backstops AgentBlockedTest, which
+        # has speed-spike-reset bugs.  Tracks (sim_t, x, y) history per ego;
+        # if cumulative distance moved over the last STATIONARY_WINDOW_S
+        # sim seconds is below STATIONARY_DISTANCE_M, the ego is marked
+        # terminal.  Position-based instead of speed-based, so micro-spikes
+        # (slip/rebound off walls) don't reset the detection — what matters
+        # is whether the ego actually went somewhere.
+        self._ego_position_history: dict[int, list[tuple[float, float, float]]] = {}
+        self._stationary_terminal: set[int] = set()
         self._external_tick_callback = None
         self._logical_frame_id = 0
         self._last_ego_action = None
@@ -855,7 +887,68 @@ class ScenarioManager(object):
 
         self._watchdog.start()
         self._running = True
-        
+
+        # ------------------------------------------------------------------
+        # Tick forensics: comprehensive instrumentation for tick rate,
+        # phase timing, RPC liveness, and stall detection.  Off unless
+        # CARLA_TICK_FORENSICS=1 is set.  See tick_forensics.py for full
+        # documentation of emitted events.
+        # ------------------------------------------------------------------
+        try:
+            self._forensics = make_forensics(CarlaDataProvider.get_world())
+            self._forensics.start()
+        except Exception as _e:
+            print(f"[TICK_FORENSICS] INIT_FAILED err={type(_e).__name__}: {_e}", flush=True)
+            self._forensics = make_forensics(None)  # falls back to no-op
+
+        # ------------------------------------------------------------------
+        # Sensor pre-warm: tick the world a few times BEFORE entering the
+        # main agent() loop so all CARLA sensor streaming sessions get a
+        # chance to establish their first packet delivery.
+        #
+        # Why this is needed
+        # ------------------
+        # CARLA's streaming layer opens a TCP session per sensor lazily.
+        # For multi-ego scenarios, late-spawned IMU/GPS/LiDAR sensors lose
+        # the race against the setup_sensors world.tick() and don't deliver
+        # their first packet during setup.  Once run_scenario starts and
+        # agent()->get_data() blocks waiting for those sensors, the world
+        # cannot tick (tick is at the END of _tick_scenario, after agent()).
+        # That deadlocks until the leaderboard timeout fires.
+        #
+        # Pre-warming with explicit ticks here -- BEFORE any agent() call --
+        # gives the streaming server time to deliver first packets while
+        # the world can still tick freely.
+        #
+        # Configurable via env (default 10 ticks ~= 0.5s sim time, ~1s wall):
+        #   CARLA_SENSOR_WARMUP_TICKS     int, default 10
+        #   CARLA_SENSOR_WARMUP_DISABLE   set to 1 to skip entirely
+        # ------------------------------------------------------------------
+        if not os.environ.get("CARLA_SENSOR_WARMUP_DISABLE", "").lower() in ("1", "true", "yes"):
+            try:
+                _warmup_n = max(0, int(os.environ.get("CARLA_SENSOR_WARMUP_TICKS", "10")))
+            except (TypeError, ValueError):
+                _warmup_n = 10
+            if _warmup_n > 0:
+                _world = CarlaDataProvider.get_world()
+                if _world is not None:
+                    _warmup_t0 = time.time()
+                    _warmup_completed = 0
+                    _warmup_failed_at = None
+                    for _i in range(_warmup_n):
+                        try:
+                            _world.tick(self._timeout)
+                            _warmup_completed += 1
+                        except Exception as _e:
+                            _warmup_failed_at = (_i, str(_e))
+                            break
+                    print(
+                        f"[SENSOR_WARMUP] completed={_warmup_completed}/{_warmup_n} "
+                        f"wall_s={time.time() - _warmup_t0:.2f} "
+                        f"failed_at={_warmup_failed_at}",
+                        flush=True,
+                    )
+
         while self._running:
             timestamp = None
             world = CarlaDataProvider.get_world()
@@ -878,6 +971,13 @@ class ScenarioManager(object):
         if self._timestamp_last_run < timestamp.elapsed_seconds and self._running:
             self._timestamp_last_run = timestamp.elapsed_seconds
             _tick_t0 = time.time()
+            # Forensics: begin tick + first phase. self._forensics is a no-op
+            # stub when CARLA_TICK_FORENSICS is unset, so this is free.
+            try:
+                self._forensics.begin_tick(self._logical_frame_id)
+                self._forensics.begin_phase("world_state_setup")
+            except Exception:
+                pass
             self._watchdog.update()
             # Heartbeat for external freeze watchdog (see run_carla_rootcause_capture.sh)
             _hb_path = os.environ.get("CARLA_TICK_HEARTBEAT_FILE", "")
@@ -990,6 +1090,11 @@ class ScenarioManager(object):
 
             # Agent take action (eg. save data/produce control signal)
             try:
+                self._forensics.end_phase("world_state_setup")
+                self._forensics.begin_phase("agent_call")
+            except Exception:
+                pass
+            try:
                 ego_action = self._agent()
                 self._last_ego_action = ego_action
 
@@ -999,6 +1104,11 @@ class ScenarioManager(object):
 
             except Exception as e:
                 raise AgentError(e)
+            try:
+                self._forensics.end_phase("agent_call")
+                self._forensics.begin_phase("apply_control_and_scenario")
+            except Exception:
+                pass
 
             _tick_t2 = time.time()  # end of agent call phase
 
@@ -1160,6 +1270,18 @@ class ScenarioManager(object):
                             "all_egos_nonrunning_or_dead",
                             details=f"nonrunning={nonrunning_egos} dead={dead_egos} statuses={status_list}",
                         )
+                        try:
+                            _now_sim_outer = float(GameTime.get_time())
+                        except Exception:
+                            _now_sim_outer = -1.0
+                        print(
+                            f"[SCENARIO_TERMINATED] sim_t={_now_sim_outer:.1f}s "
+                            f"trigger=outer_all_nonrunning_or_dead "
+                            f"n_egos={self.ego_vehicles_num} "
+                            f"missing={missing_egos} dead={dead_egos} nonrunning={nonrunning_egos} "
+                            f"tree_statuses={status_list}",
+                            flush=True,
+                        )
                         self._running = False
 
             # set spectator
@@ -1279,16 +1401,72 @@ class ScenarioManager(object):
                         continue
                     if scenario_instance is None:
                         continue
+                    # If the ego actor itself is gone or dead (despawned by
+                    # the runtime cleanup, or destroyed by a hard collision),
+                    # treat the ego as terminal so the inner all_egos_done
+                    # rollup doesn't get blocked waiting on a vehicle that
+                    # no longer exists.  Without this, scenarios with one
+                    # despawned-early ego + N stuck egos kept ticking forever
+                    # because the despawned ego's criteria never satisfied
+                    # any of (route_complete, blocked, soft_complete).
+                    try:
+                        _ego_actor_check = CarlaDataProvider.get_hero_actor(hero_id=idx)
+                    except Exception:
+                        _ego_actor_check = None
+                    if _ego_actor_check is None or not _ego_actor_check.is_alive:
+                        was_first = idx not in self._termination_path
+                        self._termination_path.setdefault(idx, "ego_despawned_or_dead")
+                        if was_first:
+                            try:
+                                _now_sim = float(GameTime.get_time())
+                            except Exception:
+                                _now_sim = -1.0
+                            print(
+                                f"[TERM_DECISION] ego={idx} sim_t={_now_sim:.1f}s "
+                                f"path=ego_despawned_or_dead "
+                                f"actor_is_none={_ego_actor_check is None} "
+                                f"is_alive={getattr(_ego_actor_check, 'is_alive', 'n/a')}",
+                                flush=True,
+                            )
+                        # Don't gate all_egos_done on this ego — it's already gone.
+                        continue
                     criteria = scenario_instance.get_criteria()
                     if not criteria:
+                        # Empty criteria means this ego's scenario_instance is a
+                        # no-test placeholder. In multi-ego scenarios the criteria
+                        # (RouteCompletionTest, ActorSpeedAboveThresholdTest, etc.)
+                        # attach only to the primary ego's instance; instances 1..N
+                        # for additional egos legitimately have no criteria.
+                        # Previous behaviour was to set all_egos_done=False and
+                        # break, which made the scenario never terminate via the
+                        # all_egos_done path: the loop saw ego_0 as terminal
+                        # (e.g. stationary), then bailed at ego_1 with empty
+                        # criteria, leaving the run ticking forever even when all
+                        # egos were physically parked. Symmetrise with the
+                        # despawned-ego handling above: treat empty-criteria as
+                        # "nothing to gate on" and continue.
                         if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
-                            print(f"[DEBUG FINISH] Ego {idx}: No criteria found")
-                        all_egos_done = False
-                        break
+                            print(f"[DEBUG FINISH] Ego {idx}: No criteria found -- skipping (not blocking all_egos_done)")
+                        was_first = idx not in self._termination_path
+                        self._termination_path.setdefault(idx, "no_criteria_placeholder")
+                        if was_first:
+                            try:
+                                _now_sim = float(GameTime.get_time())
+                            except Exception:
+                                _now_sim = -1.0
+                            print(
+                                f"[TERM_DECISION] ego={idx} sim_t={_now_sim:.1f}s "
+                                f"path=no_criteria_placeholder "
+                                f"reason=multi-ego_secondary_with_empty_criteria",
+                                flush=True,
+                            )
+                        continue
                     # Check if this ego is either completed (SUCCESS) or blocked (FAILURE)
                     ego_completed = False
                     ego_blocked = False
                     ego_route_completion_100 = False
+                    ego_deviated = False    # InRouteTest FAILURE — ego went off-route
+                    ego_collided_terminal = False  # CollisionTest with terminate_on_failure
                     # Debug: Show criterion types (every 10 seconds)
                     if not hasattr(self, '_last_debug_time'):
                         self._last_debug_time = 0
@@ -1298,6 +1476,7 @@ class ScenarioManager(object):
                             for c in criteria:
                                 print(f"[DEBUG FINISH]   - {type(c).__name__}: status={getattr(c, 'test_status', 'N/A')}")
                         self._last_debug_time = time.time()
+                    route_completion_pct_for_ego = 0.0
                     for criterion in criteria:
                         if isinstance(criterion, RouteCompletionTest):
                             try:
@@ -1306,6 +1485,7 @@ class ScenarioManager(object):
                                 )
                             except Exception:
                                 route_completion_pct = 0.0
+                            route_completion_pct_for_ego = route_completion_pct
                             if route_completion_pct >= 100.0 - 1e-3:
                                 # Despawn immediately once route completion reaches 100%,
                                 # even if RouteCompletionTest has not switched to SUCCESS yet
@@ -1320,6 +1500,117 @@ class ScenarioManager(object):
                                 ego_blocked = True
                                 if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
                                     print(f"[DEBUG FINISH] Ego {idx}: AgentBlockedTest FAILURE")
+                        else:
+                            # Catch other terminal-on-failure criteria that
+                            # py_trees might not propagate up to scenario_tree.
+                            # InRouteTest fires FAILURE when ego goes >30m off
+                            # route (terminate_on_failure=True).  CollisionTest
+                            # may fire on hard impact.  Both should mark the
+                            # ego terminal even if scenario_tree.status didn't
+                            # change.  Match by class name (avoid extra imports).
+                            cls_name = type(criterion).__name__
+                            ts = getattr(criterion, "test_status", None)
+                            if cls_name == "InRouteTest" and ts == "FAILURE":
+                                ego_deviated = True
+                            elif cls_name == "CollisionTest" and ts == "FAILURE":
+                                ego_collided_terminal = True
+
+                    # Tier 2 early-termination check: ego is at high RC AND has
+                    # been stopped for >SOFT_COMPLETE_DWELL_S sim seconds.  This
+                    # is the "near-goal stop" pattern — the agent has essentially
+                    # reached the destination but didn't quite tick over to 100%.
+                    # We treat it as done without waiting for AgentBlockedTest's
+                    # full timer.  Disabled when CARLA_TIER2_SOFT_COMPLETE_ENABLED=0.
+                    ego_soft_complete = False
+                    if (
+                        not ego_completed
+                        and not ego_route_completion_100
+                        and not ego_blocked
+                        and os.environ.get("CARLA_TIER2_SOFT_COMPLETE_ENABLED", "1").lower() not in ("0", "false", "no")
+                    ):
+                        try:
+                            _rc_threshold = float(os.environ.get("CARLA_TIER2_SOFT_COMPLETE_RC_PCT", "95.0"))
+                            _dwell_s = float(os.environ.get("CARLA_TIER2_SOFT_COMPLETE_DWELL_S", "5.0"))
+                            _speed_cutoff = float(os.environ.get("CARLA_TIER2_SOFT_COMPLETE_SPEED_MPS", "0.1"))
+                        except Exception:
+                            _rc_threshold, _dwell_s, _speed_cutoff = 95.0, 5.0, 0.1
+                        if route_completion_pct_for_ego >= _rc_threshold:
+                            try:
+                                _ego_actor = CarlaDataProvider.get_hero_actor(hero_id=idx)
+                                _ego_speed = CarlaDataProvider.get_velocity(_ego_actor) if _ego_actor else None
+                            except Exception:
+                                _ego_speed = None
+                            try:
+                                _now_sim = float(GameTime.get_time())
+                            except Exception:
+                                _now_sim = None
+                            if _ego_speed is not None and _now_sim is not None:
+                                if _ego_speed < _speed_cutoff:
+                                    if idx not in self._soft_complete_first_seen:
+                                        self._soft_complete_first_seen[idx] = _now_sim
+                                    elif (_now_sim - self._soft_complete_first_seen[idx]) >= _dwell_s:
+                                        ego_soft_complete = True
+                                        self._soft_complete_done.add(idx)
+                                        self._termination_path.setdefault(idx, "soft_complete")
+                                        try:
+                                            _stop_dur = _now_sim - self._soft_complete_first_seen[idx]
+                                            print(
+                                                f"[TERM_DECISION] ego={idx} sim_t={_now_sim:.1f}s "
+                                                f"path=soft_complete (Tier 2) "
+                                                f"rc={route_completion_pct_for_ego:.1f}% "
+                                                f"stopped_for={_stop_dur:.1f}s speed={_ego_speed:.3f}m/s "
+                                                f"(saved up to ~{30.0 - _stop_dur:.1f}s of blocked-timer wait)",
+                                                flush=True,
+                                            )
+                                        except Exception:
+                                            pass
+                                else:
+                                    # Speed went above cutoff again — reset the
+                                    # dwell timer so we only fire on continuous stop.
+                                    self._soft_complete_first_seen.pop(idx, None)
+
+                    # Record which path triggered "done" for this ego (first one wins).
+                    if idx not in self._termination_path:
+                        try:
+                            _now_sim_log = float(GameTime.get_time())
+                        except Exception:
+                            _now_sim_log = -1.0
+                        if ego_completed or ego_route_completion_100:
+                            path = "route_complete"
+                            self._termination_path[idx] = path
+                            print(
+                                f"[TERM_DECISION] ego={idx} sim_t={_now_sim_log:.1f}s "
+                                f"path={path} rc={route_completion_pct_for_ego:.1f}% "
+                                f"completed={ego_completed} rc100={ego_route_completion_100}",
+                                flush=True,
+                            )
+                        elif ego_blocked:
+                            path = "blocked"
+                            self._termination_path[idx] = path
+                            print(
+                                f"[TERM_DECISION] ego={idx} sim_t={_now_sim_log:.1f}s "
+                                f"path={path} (AgentBlockedTest fired) "
+                                f"rc={route_completion_pct_for_ego:.1f}%",
+                                flush=True,
+                            )
+                        elif ego_deviated:
+                            path = "deviated"
+                            self._termination_path[idx] = path
+                            print(
+                                f"[TERM_DECISION] ego={idx} sim_t={_now_sim_log:.1f}s "
+                                f"path={path} (InRouteTest FAILURE) "
+                                f"rc={route_completion_pct_for_ego:.1f}%",
+                                flush=True,
+                            )
+                        elif ego_collided_terminal:
+                            path = "collided_terminal"
+                            self._termination_path[idx] = path
+                            print(
+                                f"[TERM_DECISION] ego={idx} sim_t={_now_sim_log:.1f}s "
+                                f"path={path} (CollisionTest FAILURE) "
+                                f"rc={route_completion_pct_for_ego:.1f}%",
+                                flush=True,
+                            )
                     if (ego_completed or ego_route_completion_100) and idx not in self._runtime_completed_ego_cleanup_done:
                         # Once route completion reaches terminal state (SUCCESS or 100% RC),
                         # retire this ego immediately so it cannot keep receiving controls.
@@ -1353,8 +1644,88 @@ class ScenarioManager(object):
                                 f"[DEBUG FINISH] Ego {idx}: completed ego despawn triggered "
                                 f"(success={ego_completed}, rc100={ego_route_completion_100})"
                             )
-                    # Ego is "done" if it completed OR if it's blocked
-                    if not (ego_completed or ego_route_completion_100 or ego_blocked):
+                    # Position-based stuck detector.  Independent backstop
+                    # for AgentBlockedTest — uses cumulative DISTANCE over a
+                    # rolling window, so micro-spikes (ego slipping against
+                    # a wall, or rebound from collision) don't reset the
+                    # detection.  An ego that hasn't moved more than
+                    # STATIONARY_DISTANCE_M (default 2 m) over the past
+                    # STATIONARY_WINDOW_S (default 30 sim sec) is marked
+                    # terminal.  Resistant to noise that breaks
+                    # AgentBlockedTest's instant-reset semantics.
+                    # Disable: CARLA_STATIONARY_DETECTOR_DISABLE=1.
+                    ego_stationary_terminal = False
+                    if (
+                        not ego_completed
+                        and not ego_route_completion_100
+                        and not ego_blocked
+                        and not ego_soft_complete
+                        and os.environ.get("CARLA_STATIONARY_DETECTOR_DISABLE", "0").lower() not in ("1", "true", "yes")
+                    ):
+                        try:
+                            _stat_window_s = float(os.environ.get("CARLA_STATIONARY_WINDOW_S", "30.0"))
+                            _stat_dist_m = float(os.environ.get("CARLA_STATIONARY_DISTANCE_M", "2.0"))
+                        except Exception:
+                            _stat_window_s, _stat_dist_m = 30.0, 2.0
+                        try:
+                            _ego_actor = CarlaDataProvider.get_hero_actor(hero_id=idx)
+                            _ego_loc = CarlaDataProvider.get_location(_ego_actor) if _ego_actor else None
+                            _now_sim = float(GameTime.get_time())
+                        except Exception:
+                            _ego_loc = None
+                            _now_sim = None
+                        if _ego_loc is not None and _now_sim is not None:
+                            # Maintain a rolling deque of (sim_t, x, y) per ego.
+                            if not hasattr(self, "_ego_position_history"):
+                                self._ego_position_history = {}
+                            hist = self._ego_position_history.setdefault(idx, [])
+                            hist.append((_now_sim, float(_ego_loc.x), float(_ego_loc.y)))
+                            # Trim history older than 2x window.
+                            cutoff = _now_sim - 2 * _stat_window_s
+                            while hist and hist[0][0] < cutoff:
+                                hist.pop(0)
+                            # Find the position from window_s ago.
+                            target_t = _now_sim - _stat_window_s
+                            past_pos = None
+                            if hist[0][0] <= target_t:
+                                # Binary search would be nicer; linear is fine for short list.
+                                for h in hist:
+                                    if h[0] <= target_t:
+                                        past_pos = h
+                                    else:
+                                        break
+                            if past_pos is not None:
+                                dist_moved = ((_ego_loc.x - past_pos[1]) ** 2
+                                              + (_ego_loc.y - past_pos[2]) ** 2) ** 0.5
+                                if dist_moved < _stat_dist_m:
+                                    ego_stationary_terminal = True
+                                    self._stationary_terminal.add(idx)
+                                    self._termination_path.setdefault(idx, "stationary_position")
+                                    try:
+                                        print(
+                                            f"[TERM_DECISION] ego={idx} sim_t={_now_sim:.1f}s "
+                                            f"path=stationary_position "
+                                            f"rc={route_completion_pct_for_ego:.1f}% "
+                                            f"moved_in_last_{_stat_window_s:.0f}s={dist_moved:.2f}m "
+                                            f"(threshold={_stat_dist_m:.1f}m, position-based, "
+                                            f"micro-spike-immune)",
+                                            flush=True,
+                                        )
+                                    except Exception:
+                                        pass
+
+                    # Ego is "done" if it satisfies ANY of:
+                    #   1. ego_completed              (RouteCompletionTest SUCCESS)
+                    #   2. ego_route_completion_100   (RC% >= 100, faster than #1)
+                    #   3. ego_blocked                (AgentBlockedTest FAILURE)
+                    #   4. ego_soft_complete          (Tier 2: high RC + stopped + dwell)
+                    #   5. ego_stationary_terminal    (position-based: didn't move in window)
+                    #   6. ego_deviated               (InRouteTest FAILURE — off-route)
+                    #   7. ego_collided_terminal      (CollisionTest FAILURE — destroyed)
+                    # The despawned-ego case is handled earlier (continue at top of loop).
+                    if not (ego_completed or ego_route_completion_100 or ego_blocked
+                            or ego_soft_complete or ego_stationary_terminal
+                            or ego_deviated or ego_collided_terminal):
                         all_egos_done = False
                         break
 
@@ -1371,6 +1742,24 @@ class ScenarioManager(object):
                 self._debug_reset("all_egos_done", details=done_details)
                 if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
                     print(f"[DEBUG FINISH] ALL EGOS DONE - setting _running = False")
+                # Single-line termination summary so an offline analyzer can
+                # confirm WHY the scenario ended without parsing per-ego logs.
+                # Each ego appears with its resolved termination_path; absent
+                # entries mean "skipped via _runtime_completed_ego_cleanup_done"
+                # (route-completion despawn).
+                try:
+                    _now_sim_end = float(GameTime.get_time())
+                except Exception:
+                    _now_sim_end = -1.0
+                paths_summary = ",".join(
+                    f"ego_{i}={self._termination_path.get(i, 'cleanup_completed') if i in self._runtime_completed_ego_cleanup_done else self._termination_path.get(i, 'unknown')}"
+                    for i in range(self.ego_vehicles_num)
+                )
+                print(
+                    f"[SCENARIO_TERMINATED] sim_t={_now_sim_end:.1f}s "
+                    f"trigger=all_egos_done n_egos={self.ego_vehicles_num} paths=[{paths_summary}]",
+                    flush=True,
+                )
                 self._running = False
 
             # Position-based stall detection (conservative fallback)
@@ -1412,7 +1801,25 @@ class ScenarioManager(object):
                 )
 
         if self._running and self.get_running_status():
+            try:
+                self._forensics.end_phase("apply_control_and_scenario")
+                self._forensics.begin_phase("world_tick")
+            except Exception:
+                pass
             CarlaDataProvider.get_world().tick(self._timeout)
+            try:
+                self._forensics.end_phase("world_tick")
+                self._forensics.end_tick()
+            except Exception:
+                pass
+        else:
+            # Tick was skipped (running=False or watchdog tripped). Still
+            # close out the tick record so forensics totals stay accurate.
+            try:
+                self._forensics.end_phase("apply_control_and_scenario")
+                self._forensics.end_tick()
+            except Exception:
+                pass
 
     def _record_pdm_sample(self, vehicle_num, ego, timestamp):
         """
@@ -1698,6 +2105,12 @@ class ScenarioManager(object):
         """
         self._debug_reset("stop_scenario_called")
         self._watchdog.stop()
+        # Stop tick forensics so daemon threads exit and final snapshot fires.
+        try:
+            if hasattr(self, "_forensics") and self._forensics is not None:
+                self._forensics.stop()
+        except Exception as _e:
+            print(f"[TICK_FORENSICS] STOP_FAILED err={type(_e).__name__}: {_e}", flush=True)
 
         # Print and optionally save per-tick timing summary
         _tick_count = len(self.a_time_record)

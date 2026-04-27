@@ -184,10 +184,23 @@ def run_object_placer(args, model=None, tokenizer=None):
 
             trig = a.get("trigger")
             if trig is None or not isinstance(trig, dict):
-                trig = {"type": "distance_to_vehicle", "distance_m": 8.0, "vehicle": best_vehicle, "evidence": ""}
+                if kind == "walker":
+                    trig = {
+                        "type": "dynamic_forward_conflict",
+                        "preferred_vehicle": best_vehicle,
+                        "evidence": "",
+                    }
+                else:
+                    trig = {"type": "distance_to_vehicle", "distance_m": 8.0, "vehicle": best_vehicle, "evidence": ""}
             else:
                 trig = dict(trig)
-                trig["vehicle"] = best_vehicle
+                if kind == "walker":
+                    trig["type"] = "dynamic_forward_conflict"
+                    trig["preferred_vehicle"] = best_vehicle
+                    trig.pop("vehicle", None)
+                    trig.pop("distance_m", None)
+                else:
+                    trig["vehicle"] = best_vehicle
             a_mod = dict(a)
             a_mod["trigger"] = trig
             adjusted.append(a_mod)
@@ -832,13 +845,30 @@ def run_object_placer(args, model=None, tokenizer=None):
     def _sanitize_trigger_action(ent: Dict[str, Any]) -> None:
         trigger = ent.get("trigger")
         action = ent.get("action")
+        actor_kind = str(ent.get("actor_kind") or ent.get("category") or "").strip().lower()
+        is_walker_like = actor_kind in ("walker", "pedestrian")
 
         # Trigger sanitization
         if not isinstance(trigger, dict):
             ent["trigger"] = None
         else:
             ttype = str(trigger.get("type", "")).strip()
-            if ttype != "distance_to_vehicle":
+            evidence = str(trigger.get("evidence", "")).strip()
+            if evidence and not _contains_exact_quote(args.description, evidence):
+                evidence = ""
+            if ttype == "dynamic_forward_conflict":
+                preferred_vehicle = str(
+                    trigger.get("preferred_vehicle", "") or trigger.get("vehicle", "")
+                ).strip()
+                if preferred_vehicle:
+                    m = re.match(r"^(?:Vehicle|vehicle)\s+(\d+)$", preferred_vehicle)
+                    preferred_vehicle = f"Vehicle {m.group(1)}" if m else ""
+                ent["trigger"] = {
+                    "type": "dynamic_forward_conflict",
+                    "preferred_vehicle": preferred_vehicle or None,
+                    "evidence": evidence,
+                }
+            elif ttype != "distance_to_vehicle":
                 ent["trigger"] = None
             else:
                 vehicle = str(trigger.get("vehicle", "")).strip()
@@ -853,15 +883,19 @@ def run_object_placer(args, model=None, tokenizer=None):
                         distance_m = 8.0
                     # Clamp to a sane range
                     distance_m = max(1.0, min(50.0, distance_m))
-                    evidence = str(trigger.get("evidence", "")).strip()
-                    if evidence and not _contains_exact_quote(args.description, evidence):
-                        evidence = ""
-                    ent["trigger"] = {
-                        "type": "distance_to_vehicle",
-                        "vehicle": vehicle,
-                        "distance_m": distance_m,
-                        "evidence": evidence,
-                    }
+                    if is_walker_like:
+                        ent["trigger"] = {
+                            "type": "dynamic_forward_conflict",
+                            "preferred_vehicle": vehicle,
+                            "evidence": evidence,
+                        }
+                    else:
+                        ent["trigger"] = {
+                            "type": "distance_to_vehicle",
+                            "vehicle": vehicle,
+                            "distance_m": distance_m,
+                            "evidence": evidence,
+                        }
 
         # Action sanitization
         if not isinstance(action, dict):
@@ -1023,12 +1057,21 @@ def run_object_placer(args, model=None, tokenizer=None):
             if not _is_moving_entity(ent):
                 continue
             if ent.get("trigger") is None:
-                ent["trigger"] = {
-                    "type": "distance_to_vehicle",
-                    "vehicle": _default_trigger_vehicle(ent),
-                    "distance_m": 8.0,
-                    "evidence": "",
-                }
+                actor_kind = str(ent.get("actor_kind") or ent.get("category") or "").strip().lower()
+                default_vehicle = _default_trigger_vehicle(ent)
+                if actor_kind in ("walker", "pedestrian"):
+                    ent["trigger"] = {
+                        "type": "dynamic_forward_conflict",
+                        "preferred_vehicle": default_vehicle,
+                        "evidence": "",
+                    }
+                else:
+                    ent["trigger"] = {
+                        "type": "distance_to_vehicle",
+                        "vehicle": default_vehicle,
+                        "distance_m": 8.0,
+                        "evidence": "",
+                    }
             if ent.get("action") is None:
                 ent["action"] = {
                     "type": "start_motion",

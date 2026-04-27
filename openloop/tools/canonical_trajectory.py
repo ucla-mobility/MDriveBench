@@ -9,7 +9,31 @@ from typing import Any, Optional
 import numpy as np
 
 
-CANONICAL_TIMESTAMPS = np.asarray([0.5, 1.0, 1.5, 2.0, 2.5, 3.0], dtype=np.float64)
+def _env_positive_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return float(default)
+    try:
+        value = float(raw)
+    except Exception as exc:
+        raise ValueError(f"{name} must be a positive float, got {raw!r}") from exc
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError(f"{name} must be a positive finite float, got {raw!r}")
+    return float(value)
+
+
+CANONICAL_DT = 0.5
+CANONICAL_HORIZON_S = _env_positive_float("OPENLOOP_CANONICAL_HORIZON_S", 3.0)
+_n_steps = int(round(CANONICAL_HORIZON_S / CANONICAL_DT))
+if _n_steps <= 0 or abs(_n_steps * CANONICAL_DT - CANONICAL_HORIZON_S) > 1e-9:
+    raise ValueError(
+        "OPENLOOP_CANONICAL_HORIZON_S must be a positive multiple of 0.5 s; "
+        f"got {CANONICAL_HORIZON_S!r}"
+    )
+CANONICAL_TIMESTAMPS = np.asarray(
+    [CANONICAL_DT * float(i) for i in range(1, _n_steps + 1)],
+    dtype=np.float64,
+)
 _INFERRED_TIMESTAMP_PLANNERS = frozenset(
     {"vad", "uniad", "tcp", "lmdrive", "codriving", "colmdriver", "colmdriver_rulebase"}
 )
@@ -239,7 +263,7 @@ def _resample_to_canonical(
         return canonical_positions, valid_mask, "linear_world_interp_no_extrapolation", notes
 
     # Stage-4 optional mode: linearly extrapolate beyond native horizon so
-    # short-horizon planners can still be compared on the canonical 3.0 s grid.
+    # short-horizon planners can still be compared on the configured canonical grid.
     dt_head = float(ordered_t[1] - ordered_t[0])
     dt_tail = float(ordered_t[-1] - ordered_t[-2])
     if abs(dt_head) <= 1e-12 or abs(dt_tail) <= 1e-12:

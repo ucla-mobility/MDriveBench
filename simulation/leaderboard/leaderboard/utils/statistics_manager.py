@@ -69,8 +69,36 @@ def to_route_record(record_dict):
     return record
 
 
+def _select_trajectory_for_ego(config, ego_car_id):
+    trajectory = None
+    multi_traj = getattr(config, "multi_traj", None)
+    if multi_traj:
+        try:
+            trajectory = multi_traj[ego_car_id]
+        except Exception:
+            trajectory = None
+
+    if trajectory is None:
+        raw_trajectory = getattr(config, "trajectory", None)
+        if raw_trajectory is None:
+            return []
+        try:
+            candidate = raw_trajectory[ego_car_id]
+        except Exception:
+            candidate = raw_trajectory
+        if hasattr(candidate, "x") and hasattr(candidate, "y"):
+            return list(raw_trajectory) if isinstance(raw_trajectory, (list, tuple)) else []
+        trajectory = candidate
+
+    if trajectory is None:
+        return []
+    if isinstance(trajectory, (list, tuple)):
+        return trajectory
+    return [trajectory]
+
+
 def compute_route_length(config, ego_car_id):
-    trajectory = config.trajectory[ego_car_id]
+    trajectory = _select_trajectory_for_ego(config, ego_car_id)
 
     route_length = 0.0
     previous_location = None

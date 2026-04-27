@@ -1,0 +1,2 @@
+<?xml version='1.0' encoding='utf-8'?>
+<routes><route id="town05_ego_ego_vehicle_4" model="vehicle.lincoln.mkz2017" role="ego" town="Town05"><waypoint x="-123.647000" y="120.610000" yaw="-90.511577" z="0.000000" /><waypoint x="-124.118000" y="67.893000" yaw="-90.508487" z="0.000000" /><weather id="default" cloudiness="30.0" precipitation="0.0" precipitation_deposits="0.0" wind_intensity="0.35" sun_azimuth_angle="0.0" sun_altitude_angle="70.0" wetness="0.0" fog_distance="0.0" fog_density="0.0" fog_falloff="0.0" /></route></routes>

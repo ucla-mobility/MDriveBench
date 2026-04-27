@@ -13,6 +13,7 @@ import textwrap
 import yaml
 import cv2
 import torch
+torch.backends.cudnn.benchmark = True
 import carla
 import numpy as np
 from PIL import Image

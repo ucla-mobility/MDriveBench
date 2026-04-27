@@ -11,6 +11,7 @@ from collections import OrderedDict
 import yaml
 
 import torch
+torch.backends.cudnn.benchmark = True
 import carla
 import numpy as np
 from PIL import Image
@@ -156,6 +157,62 @@ class TCPAgent(autonomous_agent.AutonomousAgent):
 
 		return gps
 
+	def _append_route_diag_file(self, payload):
+		if self.save_path is None:
+			return
+		try:
+			diag_path = self.save_path / "tcp_route_diag.jsonl"
+			with open(diag_path, "a") as handle:
+				handle.write(json.dumps(payload, sort_keys=True) + "\n")
+		except Exception:
+			pass
+
+	def _emit_route_command_diagnostic(self, ego_id, pos, next_wp, next_cmd):
+		route_debug = {}
+		try:
+			route_debug = self._route_planner.get_last_debug_snapshot(ego_id)
+		except Exception:
+			route_debug = {}
+
+		hero = None
+		try:
+			hero = CarlaDataProvider.get_hero_actor(hero_id=ego_id)
+		except Exception:
+			hero = None
+
+		world_plan_len = None
+		if hasattr(self, "_global_plan_world_coord_all") and self._global_plan_world_coord_all is not None:
+			try:
+				world_plan_len = len(self._global_plan_world_coord_all[ego_id])
+			except Exception:
+				world_plan_len = None
+
+		downsampled_plan_len = None
+		if hasattr(self, "_global_plan_world_coord") and self._global_plan_world_coord is not None:
+			try:
+				downsampled_plan_len = len(self._global_plan_world_coord[ego_id])
+			except Exception:
+				downsampled_plan_len = None
+
+		payload = {
+			"event": "tcp_route_command_none",
+			"ego_id": int(ego_id),
+			"step": int(self.step),
+			"sim_time_s": round(float(time.time() - self.wall_start), 4),
+			"gps_x": round(float(pos[0]), 4),
+			"gps_y": round(float(pos[1]), 4),
+			"next_wp_x": round(float(next_wp[0]), 4),
+			"next_wp_y": round(float(next_wp[1]), 4),
+			"next_cmd_is_none": next_cmd is None,
+			"hero_actor_id": None if hero is None else int(hero.id),
+			"global_plan_len": downsampled_plan_len,
+			"global_plan_world_coord_all_len": world_plan_len,
+			"route_debug": route_debug,
+		}
+		rendered = json.dumps(payload, sort_keys=True)
+		print("[TCP_ROUTE_DIAG] " + rendered)
+		self._append_route_diag_file(payload)
+
 	def sensors(self):
 		rgb_w = _env_int("TCP_RGB_WIDTH", 900, minimum=1)
 		rgb_h = _env_int("TCP_RGB_HEIGHT", 256, minimum=1)
@@ -256,6 +313,10 @@ class TCPAgent(autonomous_agent.AutonomousAgent):
 		pos = self._get_position(result)
 		result['gps'] = pos
 		next_wp, next_cmd = self._route_planner.run_step(pos, vehicle_num=ego_id)
+		if next_cmd is None:
+			self._emit_route_command_diagnostic(ego_id, pos, next_wp, next_cmd)
+			from agents.navigation.local_planner import RoadOption
+			next_cmd = RoadOption.LANEFOLLOW
 		result['next_command'] = next_cmd.value
 
 
@@ -276,11 +337,15 @@ class TCPAgent(autonomous_agent.AutonomousAgent):
 		control_all = []
 		self.step += 1
 		for ego_id in range(self.ego_vehicles_num):
-			if CarlaDataProvider.get_hero_actor(hero_id=ego_id) is not None:
-				control = self.run_step_single_vehicle(ego_id, input_data, timestamp)
-				control_all.append(control)
-			else:
+			hero = CarlaDataProvider.get_hero_actor(hero_id=ego_id)
+			if hero is None or not getattr(hero, "is_alive", True):
 				control_all.append(None)
+				continue
+			if f'rgb_{ego_id}' not in input_data:
+				control_all.append(None)
+				continue
+			control = self.run_step_single_vehicle(ego_id, input_data, timestamp)
+			control_all.append(control)
 		return control_all
 
 	@torch.no_grad()

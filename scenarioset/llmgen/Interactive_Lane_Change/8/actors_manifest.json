@@ -1,0 +1,42 @@
+{
+  "bicycle": [],
+  "ego": [
+    {
+      "file": "town06_vehicle_1_0.xml",
+      "kind": "ego",
+      "name": "Vehicle 1",
+      "route_id": "07_placement",
+      "speed": 8.0,
+      "town": "Town06",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 8.0
+    },
+    {
+      "file": "town06_ego_vehicle_1.xml",
+      "kind": "ego",
+      "name": "ego_vehicle_1",
+      "route_id": "town06_ego_ego_vehicle_1",
+      "town": "Town06",
+      "model": "vehicle.lincoln.mkz2017"
+    },
+    {
+      "file": "town06_ego_vehicle_2.xml",
+      "kind": "ego",
+      "name": "ego_vehicle_2",
+      "route_id": "town06_ego_ego_vehicle_2",
+      "town": "Town06",
+      "model": "vehicle.lincoln.mkz2017"
+    },
+    {
+      "file": "town06_ego_vehicle_3.xml",
+      "kind": "ego",
+      "name": "ego_vehicle_3",
+      "route_id": "town06_ego_ego_vehicle_3",
+      "town": "Town06",
+      "model": "vehicle.lincoln.mkz2017"
+    }
+  ],
+  "npc": [],
+  "pedestrian": [],
+  "static": []
+}

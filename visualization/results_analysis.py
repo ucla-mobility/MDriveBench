@@ -794,12 +794,27 @@ def load_negotiation_logs(base_path: str):
 
 def analyze_results(main_path: str):
     discovered_routes = []
+    skipped_partial = 0
     for route_dir in sorted(os.listdir(main_path)):
         route_path = os.path.join(main_path, route_dir)
         if not os.path.isdir(route_path):
             continue
+        # Skip retry-attempt artifacts. tools/run_custom_eval.py renames
+        # failed/retried run dirs from "<scenario>" to
+        # "<scenario>_partial_<timestamp>" (see run_custom_eval.py:9291). The
+        # rename is one-way, so any directory containing "_partial_" in its
+        # name is a stale attempt — never the canonical run for that scenario
+        # — and must not contribute to aggregate metrics.
+        if "_partial_" in route_dir:
+            skipped_partial += 1
+            continue
         mode, prefix = detect_mode_label(route_dir)
         discovered_routes.append((mode, prefix, route_dir))
+    if skipped_partial:
+        print(
+            f"[results_analysis] Skipped {skipped_partial} _partial_* retry "
+            f"directory(ies) under {main_path}"
+        )
     if not discovered_routes:
         return None
 
@@ -1048,6 +1063,7 @@ def analyze_results(main_path: str):
         "communication_summary": communication_summary,
         "negotiation_records": negotiation_records,
         "negotiation_sources": negotiation_sources,
+        "category_summaries": {},
     }
 
 

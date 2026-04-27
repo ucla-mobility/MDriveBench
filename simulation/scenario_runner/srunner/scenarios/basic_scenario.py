@@ -12,6 +12,10 @@ This module provide BasicScenario, the basic class of all the scenarios.
 from __future__ import print_function
 
 import operator
+import os
+import threading
+import time
+
 import py_trees
 
 import carla
@@ -222,17 +226,100 @@ class BasicScenario(object):
 
     def remove_all_actors(self):
         """
-        Remove all actors
+        Remove all actors using a single batched RPC.
+
+        The legacy implementation called ``remove_actor_by_id`` once per actor in
+        a serial Python loop. With the safe-cleanup retries added in CARLA 0.9.12
+        teardown (commit dea4f9f), each per-actor call costs ~3–9 s when actors
+        survive their first destroy, so a 121-actor scenario could spend 10–20
+        minutes here. ``destroy_actor_ids`` collapses the destroys into one
+        ``apply_batch_sync`` and a single ``_wait_for_actor_ids_gone`` poll, so
+        typical teardown is one round-trip (~1 s) regardless of actor count.
+
+        The hard wall-clock guard below is the safety net for the case where the
+        CARLA RPC itself wedges: if cleanup hasn't returned within the budget,
+        we abandon the remaining actors and hard-exit so the orchestrator can
+        restart this CARLA session for the next scenario. Per-ego results.json
+        files are already on disk by the time we reach here, so nothing of value
+        is lost.
         """
         try:
-            for i, _ in enumerate(self.other_actors):
-                if self.other_actors[i] is not None:
-                    if CarlaDataProvider.actor_id_exists(self.other_actors[i].id):
-                        CarlaDataProvider.remove_actor_by_id(self.other_actors[i].id)
-                    self.other_actors[i] = None
-            self.other_actors = []
+            other_actors = list(self.other_actors or [])
         except AttributeError:
+            return
+
+        actor_ids = []
+        for actor in other_actors:
+            if actor is None:
+                continue
+            try:
+                if CarlaDataProvider.actor_id_exists(actor.id):
+                    actor_ids.append(int(actor.id))
+            except Exception:  # pylint: disable=broad-except
+                continue
+        self.other_actors = []
+
+        if not actor_ids:
+            return
+
+        try:
+            hard_budget_s = float(os.environ.get("CARLA_REMOVE_ACTORS_HARD_TIMEOUT_S", "30"))
+        except Exception:  # pylint: disable=broad-except
+            hard_budget_s = 30.0
+
+        bail = threading.Event()
+        if hard_budget_s > 0:
+            def _hard_bail():
+                if bail.wait(hard_budget_s):
+                    return
+                print(
+                    "[CLEANUP_HARD_TIMEOUT] basic_scenario.remove_all_actors "
+                    "exceeded {:.0f}s budget for {} actor(s); abandoning "
+                    "CARLA session (process will hard-exit so the wrapper "
+                    "can restart CARLA for the next scenario).".format(
+                        hard_budget_s, len(actor_ids)
+                    ),
+                    flush=True,
+                )
+                os._exit(0)
+
+            threading.Thread(
+                target=_hard_bail,
+                name="basic_scenario_cleanup_bail",
+                daemon=True,
+            ).start()
+
+        # Inner timeouts bound apply_batch_sync's wait-for-gone phase. With a
+        # 30s outer budget, give the batched RPC a reasonable share but leave
+        # margin for the watchdog to fire before the inner wait exits cleanly
+        # against a wedged server.
+        inner_wait_s = max(2.0, min(hard_budget_s * 0.4, 10.0)) if hard_budget_s > 0 else 5.0
+
+        start = time.monotonic()
+        try:
+            CarlaDataProvider.destroy_actor_ids(
+                actor_ids,
+                stop_sensors=True,
+                max_retries=1,
+                timeout_s=inner_wait_s,
+                poll_s=0.1,
+                direct_fallback=True,
+                reason="basic_scenario_cleanup",
+                phase="remove_all_actors",
+            )
+        except Exception:  # pylint: disable=broad-except
             pass
+        finally:
+            bail.set()
+            elapsed = time.monotonic() - start
+            if elapsed > 1.0:
+                print(
+                    "[CLEANUP] basic_scenario.remove_all_actors: {} actor(s) "
+                    "in {:.1f}s (budget={:.0f}s).".format(
+                        len(actor_ids), elapsed, hard_budget_s
+                    ),
+                    flush=True,
+                )
 
 # overhaul
 class Scenario(object):

@@ -1,5 +1,5 @@
 <?xml version='1.0' encoding='utf-8'?>
-<routes>
+<routes actor_control_mode="replay" log_replay_actors="true">
   <route id="2023-04-05-16-17-26_14_0" role="ego" snap_to_road="false" town="ucla_v2">
     <waypoint pitch="1.201373" roll="-1.703118" time="0.000000" x="-443.260109" y="-163.192658" yaw="-87.885996" z="13.452987" />
     <waypoint pitch="1.193263" roll="-1.693086" time="0.100000" x="-443.168881" y="-164.116551" yaw="-87.926103" z="13.461705" />

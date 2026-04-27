@@ -26,6 +26,7 @@ import copy
 import signal
 import torch
 import time
+import threading
 import json
 import yaml
 import numpy as np
@@ -200,6 +201,18 @@ class LeaderboardEvaluator(object):
         Setup CARLA client and world
         Setup ScenarioManager
         """
+        # Pre-init teardown bookkeeping to its zero state BEFORE any code path
+        # that can call _cleanup() — including the SIGINT handler installed
+        # later in __init__.  Without this, a signal arriving between the
+        # signal.signal() call and the legacy "self._teardown_seq = 0" line
+        # below trips an AttributeError in _cleanup, which the failure
+        # classifier then maps to no_route_execution.
+        self._teardown_seq = 0
+        self._teardown_in_progress = False
+        self._last_teardown_completed_seq = 0
+        self._last_teardown_duration_s = 0.0
+        self.ego_vehicles = []
+
         self.statistics_manager = statistics_manager
         self._args = args
         self.sensors = None
@@ -269,6 +282,68 @@ class LeaderboardEvaluator(object):
                 args=args,
                 run_root=os.path.dirname(args.checkpoint),
             )
+        self._reset_route_runtime_ego_mapping()
+
+    def _reset_route_runtime_ego_mapping(self):
+        self._current_route_runtime_ego_count = int(self.ego_vehicles_num)
+        self._current_route_active_to_original_ego_index = list(
+            range(int(self.ego_vehicles_num))
+        )
+        self._current_route_original_to_active_ego_index = {
+            int(idx): int(idx) for idx in range(int(self.ego_vehicles_num))
+        }
+        self._current_route_spawn_metadata = {}
+
+    def _capture_route_runtime_ego_mapping(self, scenario):
+        runtime_ego_count = int(
+            getattr(
+                scenario,
+                "runtime_ego_vehicle_count",
+                getattr(scenario, "ego_vehicles_num", self.ego_vehicles_num),
+            )
+            or 0
+        )
+        active_to_original = list(
+            getattr(
+                scenario,
+                "active_to_original_ego_index",
+                list(range(runtime_ego_count)),
+            )
+            or []
+        )
+        if len(active_to_original) != runtime_ego_count:
+            active_to_original = list(range(runtime_ego_count))
+        original_to_active = {
+            int(original_idx): int(active_idx)
+            for active_idx, original_idx in enumerate(active_to_original)
+        }
+        requested_ego_count = int(
+            getattr(scenario, "requested_ego_vehicle_count", self.ego_vehicles_num)
+            or self.ego_vehicles_num
+        )
+        skipped_ego_indices = [
+            idx
+            for idx in range(requested_ego_count)
+            if idx not in original_to_active
+        ]
+        spawn_failures = list(getattr(scenario, "ego_spawn_failures", []) or [])
+        self._current_route_runtime_ego_count = runtime_ego_count
+        self._current_route_active_to_original_ego_index = active_to_original
+        self._current_route_original_to_active_ego_index = original_to_active
+        self._current_route_spawn_metadata = {
+            "partial_spawn_accepted": bool(
+                getattr(scenario, "partial_ego_spawn_accepted", False)
+            ),
+            "requested_ego_count": requested_ego_count,
+            "runtime_ego_count": runtime_ego_count,
+            "active_to_original_ego_index": active_to_original,
+            "original_to_active_ego_index": {
+                str(key): value for key, value in original_to_active.items()
+            },
+            "skipped_ego_indices": skipped_ego_indices,
+            "ego_spawn_failures": spawn_failures,
+        }
+        return runtime_ego_count
 
     def _count_manager_tracked_sensors(self):
         manager_agent = getattr(getattr(self, "manager", None), "_agent", None)
@@ -367,6 +442,34 @@ class LeaderboardEvaluator(object):
             "world_sensor_actors": int(len(self._collect_world_sensor_actor_ids())),
             "ego_refs": int(len(self.ego_vehicles)),
         }
+
+    def _collect_investigative_actor_counts(self):
+        counts = dict(self._collect_teardown_counts())
+        world_actor_total = None
+        if hasattr(self, "world") and self.world is not None:
+            try:
+                world_actor_total = int(len(self.world.get_actors()))
+            except Exception:
+                world_actor_total = None
+        hero_alive = 0
+        for ego_id in range(int(getattr(self, "ego_vehicles_num", 0) or 0)):
+            try:
+                hero = CarlaDataProvider.get_hero_actor(hero_id=ego_id)
+            except Exception:
+                hero = None
+            if hero is not None and getattr(hero, "is_alive", True):
+                hero_alive += 1
+        counts["world_actor_total"] = world_actor_total
+        counts["hero_alive"] = int(hero_alive)
+        return counts
+
+    def _emit_actor_snapshot(self, label, **extra_fields):
+        payload = {"label": str(label)}
+        payload.update(self._collect_investigative_actor_counts())
+        for key, value in extra_fields.items():
+            if value is not None:
+                payload[str(key)] = value
+        print("[ACTOR SNAPSHOT] " + json.dumps(payload, sort_keys=True))
 
     def _wait_for_teardown_ready(self, *, stage, timeout_s=10.0):
         deadline = time.monotonic() + max(0.0, float(timeout_s))
@@ -538,6 +641,7 @@ class LeaderboardEvaluator(object):
         self._teardown_in_progress = True
         start_monotonic = time.monotonic()
         counts_before = self._collect_teardown_counts()
+        self._emit_actor_snapshot("teardown_begin", stage=stage, seq=int(seq))
         log_carla_event(
             "EVALUATOR_TEARDOWN_BEGIN",
             process_name=EVALUATOR_PROCESS_NAME,
@@ -548,6 +652,37 @@ class LeaderboardEvaluator(object):
             world_sensor_actors=counts_before["world_sensor_actors"],
             ego_refs=counts_before["ego_refs"],
         )
+
+        # Lower the carla.Client RPC timeout for teardown only.  During the
+        # scenario itself the timeout is large because individual ticks can
+        # legitimately take many seconds under load (median 3.85s, p99 545s,
+        # max 557s observed in this repo).  Teardown RPCs are queries, not
+        # ticks: destroy_actor / get_actors / apply_settings should each
+        # complete in <1s on a healthy server.  A 10s deadline here lets
+        # the known-stuck CARLA teardown paths (those Fix 3-4 don't cover)
+        # fail fast instead of blocking select() for minutes.  We don't
+        # restore — by the time _teardown_barrier returns the process is
+        # heading for exit anyway.
+        try:
+            client_for_timeout = getattr(self, "client", None)
+            if client_for_timeout is not None:
+                try:
+                    teardown_rpc_timeout_s = float(
+                        os.environ.get("LEADERBOARD_TEARDOWN_RPC_TIMEOUT_S", "10")
+                    )
+                except Exception:
+                    teardown_rpc_timeout_s = 10.0
+                if teardown_rpc_timeout_s > 0:
+                    client_for_timeout.set_timeout(teardown_rpc_timeout_s)
+                    print(
+                        f"[TEARDOWN] carla.Client.set_timeout({teardown_rpc_timeout_s:.1f}s) "
+                        f"for stage={stage}",
+                        flush=True,
+                    )
+        except Exception:
+            # If the client is gone or set_timeout fails, just continue —
+            # the post-results watchdog is the second-line safety net.
+            pass
 
         try:
             # Keep simulator async during teardown to avoid blocking shutdown calls.
@@ -614,6 +749,12 @@ class LeaderboardEvaluator(object):
             duration_s = max(0.0, time.monotonic() - start_monotonic)
             self._last_teardown_duration_s = duration_s
             self._last_teardown_completed_seq = seq
+            self._emit_actor_snapshot(
+                "teardown_end",
+                stage=stage,
+                seq=int(seq),
+                duration_s=round(float(duration_s), 4),
+            )
             log_carla_event(
                 "EVALUATOR_TEARDOWN_END",
                 process_name=EVALUATOR_PROCESS_NAME,
@@ -689,12 +830,16 @@ class LeaderboardEvaluator(object):
         """
         Remove and destroy all actors
         """
+        # Defensive: if a SIGINT or other early failure invokes _cleanup
+        # before __init__ finishes initialising teardown state, the
+        # AttributeError compounds the failure into no_route_execution
+        # in the wrapper's classifier.  Fall back to safe defaults instead.
         log_carla_event(
             "EVALUATOR_CLEANUP_BEGIN",
             process_name=EVALUATOR_PROCESS_NAME,
-            ego_vehicle_count=len(self.ego_vehicles),
-            teardown_seq=int(self._teardown_seq),
-            teardown_in_progress=int(bool(self._teardown_in_progress)),
+            ego_vehicle_count=len(getattr(self, "ego_vehicles", []) or []),
+            teardown_seq=int(getattr(self, "_teardown_seq", 0) or 0),
+            teardown_in_progress=int(bool(getattr(self, "_teardown_in_progress", False))),
         )
         self._teardown_barrier(stage="cleanup", preserve_agent_instance=preserve_agent_instance)
         log_carla_event(
@@ -857,13 +1002,35 @@ class LeaderboardEvaluator(object):
             route_plots_only=self._route_plots_only,
         )
         config.trajectory = scenario.get_new_config_trajectory()
+        runtime_ego_count = self._capture_route_runtime_ego_mapping(scenario)
+        if runtime_ego_count < int(self.ego_vehicles_num):
+            skipped = self._current_route_spawn_metadata.get("skipped_ego_indices", [])
+            print(
+                "[WARN] Proceeding with partial ego spawn during evaluation: "
+                f"runtime_egos={runtime_ego_count}/{int(self.ego_vehicles_num)} "
+                f"skipped_original_egos={skipped}"
+            )
 
         if not self._route_plots_only:
-            if self.ego_vehicles_num != 1:
-                for j in range(self.ego_vehicles_num):
-                    self.statistics_manager[j].set_scenario(scenario.scenario[j])
+            if runtime_ego_count != 1:
+                for active_idx, original_idx in enumerate(
+                    self._current_route_active_to_original_ego_index
+                ):
+                    self.statistics_manager[int(original_idx)].set_scenario(
+                        scenario.scenario[active_idx]
+                    )
             else:
-                self.statistics_manager[0].set_scenario(scenario.scenario)
+                original_idx = (
+                    self._current_route_active_to_original_ego_index[0]
+                    if self._current_route_active_to_original_ego_index
+                    else 0
+                )
+                scenario_obj = (
+                    scenario.scenario[0]
+                    if isinstance(scenario.scenario, list)
+                    else scenario.scenario
+                )
+                self.statistics_manager[int(original_idx)].set_scenario(scenario_obj)
 
             if config.weather.sun_altitude_angle < 0.0:
                 for vehicle in scenario.ego_vehicles:
@@ -873,7 +1040,7 @@ class LeaderboardEvaluator(object):
                 scenario,
                 self.agent_instance,
                 config.repetition_index,
-                self.ego_vehicles_num,
+                runtime_ego_count,
                 save_root=config.save_path_root,
                 sensor_tf_list=scenario.get_sensor_tf(),
                 is_crazy=(scenario_parameter.get('Background', {}) or {}).get('turn_off_light', False),
@@ -907,22 +1074,94 @@ class LeaderboardEvaluator(object):
                 traceback.print_exc()
         return scenario
 
+    # ── Post-valid-result hard-exit watchdog ────────────────────────────────
+    # Once per-ego results.json files are committed to disk we have everything
+    # we care about for this scenario. CARLA 0.9.12 has known RPC paths that
+    # can wedge teardown indefinitely (Fix 3 covers one; others remain), and
+    # without this watchdog a stuck destroy_actor / world.get_actors() call
+    # in `_teardown_barrier` blocks the subprocess for the whole 1500s
+    # `timeout` wrapper or until the parent-side POOL_STUCK_KILLER fires
+    # (default 600s).  This watchdog caps that wasted wait at ~90s post-save.
+    #
+    # Cancel hooks: if a NEW scenario starts (`_load_and_run_scenario` runs
+    # again), we cancel the previous arming so multi-scenario runs are not
+    # killed mid-route. For the LAST scenario (no `peek()` follow-up) the
+    # watchdog is what actually unblocks the process exit.
+    def _arm_post_results_watchdog(self):
+        try:
+            budget_s = float(os.environ.get("LEADERBOARD_POST_RESULTS_KILL_S", "90"))
+        except Exception:
+            budget_s = 90.0
+        if budget_s <= 0:
+            return  # disabled
+        self._disarm_post_results_watchdog()
+        cancel = threading.Event()
+        def _wait_and_kill():
+            if cancel.wait(budget_s):
+                return  # disarmed before timeout — normal teardown completed
+            print(
+                f"[POST_RESULTS_KILL] hard-exiting after {budget_s:.0f}s of "
+                f"post-result teardown — per-ego results.json already on disk",
+                flush=True,
+            )
+            os._exit(0)
+        t = threading.Thread(target=_wait_and_kill, name="post_results_kill", daemon=True)
+        self._post_results_kill_cancel = cancel
+        self._post_results_kill_thread = t
+        t.start()
+        print(
+            f"[POST_RESULTS_KILL] armed (budget={budget_s:.0f}s); cancel on next "
+            f"scenario start, fire if teardown stalls past budget",
+            flush=True,
+        )
+
+    def _disarm_post_results_watchdog(self):
+        cancel = getattr(self, "_post_results_kill_cancel", None)
+        if cancel is not None:
+            cancel.set()
+        self._post_results_kill_cancel = None
+        self._post_results_kill_thread = None
+
     def _register_statistics(self, config, ego_car_num, checkpoint, entry_status, crash_message="",):
         """
         Computes and saved the simulation statistics
         """
         # register statistics
-        
+
         current_stats_record = []
         current_stats_record.extend([[] for _ in range(0,ego_car_num)])
+        spawn_meta = dict(self._current_route_spawn_metadata or {})
+        original_to_active = dict(self._current_route_original_to_active_ego_index or {})
+        runtime_ego_count = int(
+            spawn_meta.get("runtime_ego_count", self._current_route_runtime_ego_count)
+            or self._current_route_runtime_ego_count
+            or ego_car_num
+        )
+        spawn_failures_by_original = {}
+        for failure in spawn_meta.get("ego_spawn_failures", []) or []:
+            try:
+                original_idx = int(failure.get("original_ego_index"))
+            except Exception:
+                continue
+            spawn_failures_by_original[original_idx] = dict(failure)
         for i in range(ego_car_num):
-            
+            active_idx = original_to_active.get(i)
+            route_failure = crash_message
+            if active_idx is None and bool(spawn_meta.get("partial_spawn_accepted", False)):
+                route_failure = "Ego spawn skipped"
             current_stats_record[i] = self.statistics_manager[i].compute_route_statistics(
                 config,
                 self.manager.scenario_duration_system,
                 self.manager.scenario_duration_game,
-                crash_message,
-                pdm_trace=self.manager.pdm_traces[i] if hasattr(self.manager, "pdm_traces") else None,
+                route_failure,
+                pdm_trace=(
+                    self.manager.pdm_traces[active_idx]
+                    if hasattr(self.manager, "pdm_traces")
+                    and isinstance(self.manager.pdm_traces, (list, tuple))
+                    and active_idx is not None
+                    and active_idx < len(self.manager.pdm_traces)
+                    else None
+                ),
                 pdm_world_trace=getattr(self.manager, "pdm_world_trace", None),
                 pdm_tl_polygons=getattr(self.manager, "pdm_tl_polygons", None),
             )
@@ -935,6 +1174,32 @@ class LeaderboardEvaluator(object):
                 current_stats_record[i].meta.update(recovery_meta)
             if not isinstance(current_stats_record[i].meta, dict):
                 current_stats_record[i].meta = {}
+            if spawn_meta:
+                current_stats_record[i].meta["requested_ego_count"] = int(
+                    spawn_meta.get("requested_ego_count", ego_car_num) or ego_car_num
+                )
+                current_stats_record[i].meta["runtime_ego_count"] = runtime_ego_count
+                current_stats_record[i].meta["skipped_ego_indices"] = list(
+                    spawn_meta.get("skipped_ego_indices", []) or []
+                )
+                current_stats_record[i].meta["active_to_original_ego_index"] = list(
+                    spawn_meta.get("active_to_original_ego_index", []) or []
+                )
+                current_stats_record[i].meta["original_to_active_ego_index"] = dict(
+                    spawn_meta.get("original_to_active_ego_index", {}) or {}
+                )
+                current_stats_record[i].meta["partial_spawn_accepted"] = bool(
+                    spawn_meta.get("partial_spawn_accepted", False)
+                )
+                if active_idx is None:
+                    current_stats_record[i].meta["ego_spawn_status"] = "skipped"
+                    failure_detail = spawn_failures_by_original.get(i)
+                    if failure_detail is not None:
+                        current_stats_record[i].meta["ego_spawn_failure"] = failure_detail
+                else:
+                    current_stats_record[i].meta["ego_spawn_status"] = "spawned"
+                    current_stats_record[i].meta["runtime_ego_index"] = int(active_idx)
+                    current_stats_record[i].meta["original_ego_index"] = int(i)
             route_status = str(getattr(current_stats_record[i], "status", "") or "")
             lower_status = route_status.lower()
             runtime_markers = (
@@ -959,6 +1224,25 @@ class LeaderboardEvaluator(object):
             else:
                 terminal_state = "completed_clean"
             current_stats_record[i].meta["route_terminal_status"] = terminal_state
+            # Tier 1/2 metadata: which exit path triggered "done" for this ego.
+            # Values: "route_complete" (RC=100% or RouteCompletionTest SUCCESS),
+            # "blocked" (AgentBlockedTest fired), "soft_complete" (Tier 2:
+            # near-goal stop detected before blocked-timer fires), or absent if
+            # the scenario terminated for another reason (timeout, signal, etc.).
+            try:
+                _path_dict = getattr(self.manager, "_termination_path", None) or {}
+                _path = _path_dict.get(int(i))
+                if _path:
+                    current_stats_record[i].meta["termination_path"] = str(_path)
+                _soft_seen = getattr(self.manager, "_soft_complete_first_seen", None) or {}
+                if int(i) in _soft_seen:
+                    current_stats_record[i].meta["soft_complete_first_seen_sim_s"] = float(
+                        _soft_seen[int(i)]
+                    )
+                if int(i) in (getattr(self.manager, "_soft_complete_done", None) or set()):
+                    current_stats_record[i].meta["soft_complete_done"] = True
+            except Exception:
+                pass
 
             print("\033[1m> Registering the route statistics\033[0m")
             path_tmp = os.path.join(os.path.dirname(checkpoint), "ego_vehicle_{}".format(i), os.path.basename(checkpoint))
@@ -989,6 +1273,11 @@ class LeaderboardEvaluator(object):
             config: srunner.scenarioconfigs.route_scenario_configuration.RouteScenarioConfiguration, config for route scenarios
 
         """
+        # New scenario starting → cancel any post-results watchdog left over
+        # from the previous scenario's teardown (it completed, so we don't
+        # need the safety-net kill).
+        self._disarm_post_results_watchdog()
+
         crash_message = ""
         entry_status = "Started"
         scenario = None
@@ -1004,6 +1293,7 @@ class LeaderboardEvaluator(object):
         _phase_times = {}   # phase_name -> elapsed seconds; printed in finally block
         scenario_parameter = {}
         self._current_route_recovery_metadata = {}
+        self._reset_route_runtime_ego_mapping()
 
         self._wait_for_teardown_ready(stage="pre_route_start", timeout_s=10.0)
 
@@ -1025,6 +1315,12 @@ class LeaderboardEvaluator(object):
 
         # Hard teardown gate: never begin a new route until prior teardown is fully quiesced.
         gate_counts_before = self._collect_teardown_counts()
+        self._emit_actor_snapshot(
+            "route_start_gate_begin",
+            route_name=config.name,
+            route_index=config.index,
+            repetition=config.repetition_index,
+        )
         log_carla_event(
             "ROUTE_START_GATE_BEGIN",
             process_name=EVALUATOR_PROCESS_NAME,
@@ -1038,6 +1334,13 @@ class LeaderboardEvaluator(object):
         )
         self._teardown_barrier(stage="route_start_gate")
         gate_counts_after = self._collect_teardown_counts()
+        self._emit_actor_snapshot(
+            "route_start_gate_end",
+            route_name=config.name,
+            route_index=config.index,
+            repetition=config.repetition_index,
+            teardown_seq=int(self._last_teardown_completed_seq),
+        )
         log_carla_event(
             "ROUTE_START_GATE_END",
             process_name=EVALUATOR_PROCESS_NAME,
@@ -1364,6 +1667,34 @@ class LeaderboardEvaluator(object):
                     traceback.print_exc()
                     _append_traceback_to_log(log_file_dir)
 
+            # Arm the post-results hard-exit watchdog NOW, immediately before
+            # scenario.remove_all_actors() and the post-scenario _cleanup().
+            # All meaningful work for this route is done at this point:
+            #   • per-ego results.json is on disk (if _register_statistics ran)
+            #   • or the scenario crashed and there are no results to protect
+            # Either way, anything beyond here is teardown — and CARLA RPC
+            # paths in remove_all_actors() and _teardown_barrier can wedge
+            # select() for minutes. The watchdog gives us a hard ceiling on
+            # that wait.
+            #
+            # Placement chosen carefully:
+            #   • _cleanup() is also called from the recovery path
+            #     (_rebuild_route_runtime_for_recovery), where we DO want the
+            #     RPCs to complete, not be cut short. By arming here, only at
+            #     the per-route end-of-life teardown, we avoid arming during
+            #     recovery.
+            #   • Armed BEFORE remove_all_actors so the watchdog covers actor
+            #     destroy too — basic_scenario.remove_all_actors has its own
+            #     30s hard-bail (CARLA_REMOVE_ACTORS_HARD_TIMEOUT_S) for the
+            #     batched cleanup itself; this 90s budget catches the wider
+            #     teardown including _teardown_barrier.
+            #   • The next _load_and_run_scenario() disarms at entry, so
+            #     multi-scenario / --scenario-pool runs won't trip it.
+            try:
+                self._arm_post_results_watchdog()
+            except Exception:
+                traceback.print_exc()
+
             if scenario is not None:
                 try:
                     scenario.remove_all_actors()
@@ -1503,6 +1834,46 @@ class LeaderboardEvaluator(object):
 
         route_indexer = None
         if args.ego_num > 0:
+            # Build the ego_id -> XML mapping the scheduler will use.  Some
+            # scenarios are authored with ego XMLs starting at index 1 (e.g.
+            # the v2xpnp set, where the only ego file is "..._1.xml").  Ask
+            # for ego_num=1 against such a scenario and the strict
+            # ``str(0) not in route_path_dict`` check below would raise.
+            # Instead, fall back to the lowest-numbered keys present and
+            # rebind them to the contiguous ``range(args.ego_num)`` slot
+            # space the rest of this function expects.
+            def _ego_key_order(key: str):
+                try:
+                    return (0, int(key))
+                except (TypeError, ValueError):
+                    return (1, str(key))
+
+            usable_keys = [k for k in route_path_dict.keys() if k != "REPLAY"]
+            usable_keys.sort(key=_ego_key_order)
+            need_remap = any(
+                str(eid) not in route_path_dict for eid in range(args.ego_num)
+            )
+            if need_remap and len(usable_keys) >= args.ego_num:
+                remapped_keys = usable_keys[: args.ego_num]
+                if any(remapped_keys[i] != str(i) for i in range(args.ego_num)):
+                    log_carla_event(
+                        "ROUTE_INPUT_VALIDATION_REMAP",
+                        process_name=EVALUATOR_PROCESS_NAME,
+                        stage="ego_route_mapping",
+                        routes_dir=getattr(args, "routes_dir", None),
+                        ego_num=int(args.ego_num),
+                        discovered_keys=sorted(route_path_dict.keys()),
+                        remapped_keys=remapped_keys,
+                    )
+                    print(
+                        "[INFO] Remapping ego route XML keys "
+                        f"{remapped_keys} -> {[str(i) for i in range(args.ego_num)]} "
+                        f"(discovered_keys={sorted(route_path_dict.keys())})"
+                    )
+                    route_path_dict = {
+                        str(i): route_path_dict[remapped_keys[i]]
+                        for i in range(args.ego_num)
+                    }
             for ego_id in range(args.ego_num):
                 if str(ego_id) not in route_path_dict:
                     message = (

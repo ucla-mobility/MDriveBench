@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="utf-8"?>
+<routes><route bbox_height="0.860000" bbox_length="0.450000" bbox_width="0.450000" id="town05_static_8" model="static.prop.constructioncone" role="static" town="Town05"><weather id="night" cloudiness="20.0" precipitation="0.0" precipitation_deposits="0.0" wind_intensity="5.0" sun_azimuth_angle="300.0" sun_altitude_angle="-15.0" wetness="10.0" fog_distance="80.0" fog_density="5.0" fog_falloff="2.0" /><waypoint x="-137.100000" y="83.500000" yaw="0.000000" z="0.000000" /></route></routes>

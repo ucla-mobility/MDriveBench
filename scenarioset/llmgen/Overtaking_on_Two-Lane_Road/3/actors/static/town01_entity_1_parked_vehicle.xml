@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="utf-8"?>
+<routes><route bbox_height="1.547087" bbox_length="3.705369" bbox_width="1.788679" id="07_placement" model="vehicle.audi.a2" role="static" speed="0.00" town="Town01"><weather cloudiness="100.00" fog_density="18.00" fog_distance="70.00" precipitation="15.00" precipitation_deposits="25.00" sun_altitude_angle="20.00" sun_azimuth_angle="210.00" wetness="35.00" wind_intensity="45.00" /><waypoint x="61.009000" y="331.442000" yaw="0.028648" z="0.000000" /></route></routes>

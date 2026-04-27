@@ -1,0 +1,10 @@
+# PerceptionSwapAgent — CoBEVT detector + rule-based planner.
+detector: cobevt
+cooperative: true
+comm_range_m: 70
+max_cooperators: 4
+cruise_speed: 6.0
+score_threshold: 0.20
+detection_radius: 1.5
+collect_ap_metrics: true
+disable_brake: false          # set to true ONLY for AP-only probe runs (defeats closed-loop perception ablation)

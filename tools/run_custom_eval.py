@@ -199,8 +199,16 @@ DEFAULT_NPC_PARAMETER = (
     "simulation/leaderboard/leaderboard/scenarios/scenario_parameter_Interdrive_npc.yaml"
 )
 
-CARLA_STARTUP_TIMEOUT = 60.0
-CARLA_RESTART_WAIT = 2.0
+CARLA_STARTUP_TIMEOUT = 180.0   # was 60s — Vulkan/UE4 cold start can exceed 60s under GPU contention; failures here cause the GPU-blacklist storm pattern
+
+
+def _pool_quiet_mode() -> bool:
+    """Centralized check for pool-mode quiet logging.  Default ON when the
+    POOL DASHBOARD is the primary status source; the dashboard already
+    covers what the per-event prints are saying.  Override with
+    CARLA_POOL_QUIET=0 to restore verbose output for triage."""
+    return os.environ.get("CARLA_POOL_QUIET", "1").lower() in ("1", "true", "yes", "on")
+CARLA_RESTART_WAIT = 8.0
 CARLA_POST_START_BUFFER_DEFAULT = 5.0
 CARLA_CRASH_MULTIPLIER = 2.0
 CARLA_PORT_TRIES = 8
@@ -234,12 +242,17 @@ OOM_RECOVERY_PENALTY_DECAY_STEP_DEFAULT = 1024
 OOM_BACKOFF_DECAY_SECONDS_DEFAULT = 600.0  # stale OOM penalty fully decays after this many seconds
 
 # --- VRAM-aware scheduler defaults ------------------------------------------------
-CARLA_FIXED_VRAM_MIB_DEFAULT = 4096
-VRAM_SAFETY_BUFFER_MIB_DEFAULT = 2048
-VRAM_SAFETY_BUFFER_AGGRESSIVE_MIB_DEFAULT = 512
-MIN_FREE_AGGRESSIVE_MIB_DEFAULT = 1024
+CARLA_FIXED_VRAM_MIB_DEFAULT = 6500   # observed max 5961 MiB across 27 live CARLA processes; +539 MiB margin. Was 8500 — 43% over-conservative, caused 100% defer rate for LMDrive (needs 17000+CARLA, never fit on any GPU). Lowering this lets LMDrive (25.5GB->23.5GB) and VAD (19.5GB->17.5GB) actually pack onto GPUs with 18-24GB free. Safety buffer raised to 2000 to compensate for any CARLA mid-run growth or measurement noise.
+# VRAM safety buffer.  Empirical OOM analysis showed 4 OOMs in 66 min came
+# from the 5-second race window between dispatch and nvidia-smi update.
+# PyTorch caching allocator + per-tenant CARLA growth typically adds ~1.5 GB
+# beyond the initial planner load over ~30s.  Bumped from 1500 to 2000 to
+# compensate for the lowered CARLA estimate above and reduce OOM races.
+VRAM_SAFETY_BUFFER_MIB_DEFAULT = 2000              # was 1500 (after CARLA estimate lowered); was 512 (caused OOMs); was 2048 originally
+VRAM_SAFETY_BUFFER_AGGRESSIVE_MIB_DEFAULT = 768    # was 256
+MIN_FREE_AGGRESSIVE_MIB_DEFAULT = 768              # was 512
 GPU_MONITOR_POLL_SECONDS_DEFAULT = 2.0
-SCHEDULER_TICK_POLL_TIMEOUT_S_DEFAULT = 0.5
+SCHEDULER_TICK_POLL_TIMEOUT_S_DEFAULT = 0.1   # was 0.5; faster ramp-up to fill VRAM. Loop dispatches one job per iteration; lower interval = more dispatches per second.
 VRAM_ESTIMATE_CACHE_DEFAULT = str(
     Path.home() / ".cache" / "colmdriver" / "planner_vram_estimates.json"
 )
@@ -250,14 +263,19 @@ VRAM_ESTIMATE_EMA_ALPHA_DEFAULT = 0.4  # weight for the new observation when upd
 # seed when no persistent observation exists yet; the scheduler refines them
 # automatically via :class:`PlannerVramEstimator`.
 PLANNER_VRAM_ESTIMATE_MIB: Dict[str, int] = {
+    # Estimates calibrated against live nvidia-smi observations.  Each value
+    # is observed max + ~15% safety margin so the scheduler can't OOM by
+    # over-committing.  uniad was previously 12 GB but actually uses ~4 GB
+    # — a major win.  Codriving/vad were over-shrunk in the previous round
+    # and bumped back up.
     "autopilot": 1500,
     "log-replay": 1500,
     "minimal": 1500,
-    "tcp": 3500,
-    "codriving": 6000,
-    "vad": 10000,
-    "uniad": 12000,
-    "lmdrive": 20000,
+    "tcp": 2800,          # observed max ~2350 MB (live confirmed, 16% slack)
+    "codriving": 7000,    # was 5500 — caused 6 OOMs in this run. Bump to 7000 (observed max ~4916 MB but under contention saw OOMs at 5500 cap + carla overhead).
+    "vad": 11000,         # observed max ~10476 MB (live confirmed, 5% slack — tight but OK)
+    "uniad": 5000,        # observed max ~4036 MB (live confirmed, 24% slack). Note: this run had 5 OOMs — likely from dispatch-race conditions, not under-estimation. Safety buffer raised to 2000 to compensate.
+    "lmdrive": 17000,     # observed max ~15146 MB (live confirmed, 12% slack)
     "colmdriver": 6000,
     "colmdriver_rulebase": 6000,
 }
@@ -271,8 +289,19 @@ UCLA_V2_CROSSWALK_TRIM_DEFAULT = 1
 UCLA_V2_CROSSWALK_HIGH_Z_PRUNE_DEFAULT = 4
 UCLA_V2_CROSSWALK_POLL_SEC_DEFAULT = 2.0
 UCLA_V2_CROSSWALK_CACHE_DEFAULT = "v2xpnp/map/ucla_v2_crosswalk_surface_z_cache.json"
-SCENARIO_STALL_OUTPUT_TIMEOUT_DEFAULT = 30.0
-TICK_HEARTBEAT_FREEZE_TIMEOUT_S = 300.0  # 5 min — kill frozen sim (no tick activity)
+# Watchdog defaults are intentionally extreme.  Operator policy: as long as
+# a scenario is making ANY progress, leave it running.  Only kill on TRUE
+# multi-hour silence.  The heartbeat watchdog resets on every successful
+# tick, so even a scenario ticking once per minute will never trigger it.
+# A scenario hits these timeouts only if it has produced ZERO sim activity
+# for the entire window.  Real CARLA crashes still get caught immediately
+# via carla_manager.is_running() and the OOM/crash marker scans.
+SCENARIO_STALL_OUTPUT_TIMEOUT_DEFAULT = 86400.0  # 24 hr of output silence (was 30s)
+# Effectively disabled (24h) — the parent-side POOL_STUCK_KILLER (default 300s
+# in tools/_pool_integration.py) is the primary stuck-detection mechanism and
+# is strictly better (independent process, can't hang itself).  We keep this
+# in-process watchdog as an opt-in override; default off avoids redundancy.
+TICK_HEARTBEAT_FREEZE_TIMEOUT_S = 86400.0
 SCENARIO_STARTUP_QUIET_TIMEOUT_DEFAULT = 0.0
 SCENARIO_RETRY_LIMIT_DEFAULT = 0
 STALLED_NEAR_END_MIN_ROUTE_SCORE_DEFAULT = 90.0
@@ -280,7 +309,10 @@ STALLED_NEAR_END_LOG_TAIL_BYTES_DEFAULT = 512 * 1024
 RESULT_LOG_FALLBACK_TAIL_BYTES_DEFAULT = 2 * 1024 * 1024
 MULTI_PLANNER_CHILD_SCENARIO_RETRY_BURST_DEFAULT = 3
 SCENARIO_RETRY_HARD_CEILING = 5  # absolute max retries even when --scenario-retry-limit is unlimited
-CARLA_DOWN_ABORT_GRACE_S = 15.0
+# When True, partial/problematic result directories are deleted outright instead of
+# being renamed to a `_partial_<timestamp>` sibling. Set from --delete-partial-results.
+_DELETE_PARTIAL_RESULTS = False
+CARLA_DOWN_ABORT_GRACE_S = 3600.0   # 1 hr.  carla_manager.is_running() catches actual process death immediately (PID-level check, no probe needed).  This long grace only covers transient world-port unresponsiveness while the process is still alive — likely a slow tick or saturated render queue, not a real crash.  Don't kill on this alone.
 CARLA_TEARDOWN_GATE_TIMEOUT_DEFAULT = 20.0
 CARLA_TEARDOWN_GATE_POLL_S_DEFAULT = 0.25
 CARLA_TEARDOWN_GATE_STABLE_SAMPLES_DEFAULT = 4
@@ -314,6 +346,10 @@ _PERF_COUNTERS: "PerformanceCounters | None" = None
 _GPU_QUERY_CACHE_LOCK = threading.Lock()
 _GPU_QUERY_CACHE: Dict[str, tuple[float, Dict[str, "GPUMemoryStats"]]] = {}
 _GPU_QUERY_CACHE_TTL_S = GPU_QUERY_CACHE_TTL_S_DEFAULT
+_GPU_UUID_CACHE_LOCK = threading.Lock()
+_GPU_UUID_BY_INDEX_CACHE: Dict[str, str] | None = None
+_VULKAN_ADAPTER_CACHE_LOCK = threading.Lock()
+_VULKAN_ADAPTER_INDEX_BY_GPU_INDEX_CACHE: Dict[str, int] | None = None
 
 
 @dataclass
@@ -378,6 +414,10 @@ class MonitoredRunResult:
     last_output_age_s: float
     output_tail: List[str]
     terminated_reason: str | None = None
+    pid: int | None = None
+    signal_num: int | None = None
+    signal_name: str | None = None
+    last_any_output_age_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -567,6 +607,32 @@ PLANNER_SPECS: dict[str, PlannerSpec] = {
         agent="simulation/leaderboard/team_code/lmdriver_agent.py",
         agent_config="simulation/leaderboard/team_code/agent_config/lmdriver_config_8_10.py",
     ),
+    "perception_swap_fcooper": PlannerSpec(
+        agent="simulation/leaderboard/team_code/perception_swap_agent.py",
+        agent_config="simulation/leaderboard/team_code/agent_config/perception_swap_fcooper.yaml",
+    ),
+    "perception_swap_attfuse": PlannerSpec(
+        agent="simulation/leaderboard/team_code/perception_swap_agent.py",
+        agent_config="simulation/leaderboard/team_code/agent_config/perception_swap_attfuse.yaml",
+    ),
+    "perception_swap_disco": PlannerSpec(
+        agent="simulation/leaderboard/team_code/perception_swap_agent.py",
+        agent_config="simulation/leaderboard/team_code/agent_config/perception_swap_disco.yaml",
+    ),
+    "perception_swap_cobevt": PlannerSpec(
+        agent="simulation/leaderboard/team_code/perception_swap_agent.py",
+        agent_config="simulation/leaderboard/team_code/agent_config/perception_swap_cobevt.yaml",
+    ),
+    # GT-perception oracle: same agent, but the detection forward pass is
+    # bypassed and the planner is fed Detections derived from
+    # world.get_actors() (the "control row" of the perception-vs-planning
+    # study). The yaml sets use_gt_perception=true; detector=fcooper is only
+    # there to load a model the agent expects to instantiate (its forward
+    # pass is skipped at runtime).
+    "perception_swap_gt": PlannerSpec(
+        agent="simulation/leaderboard/team_code/perception_swap_agent.py",
+        agent_config="simulation/leaderboard/team_code/agent_config/perception_swap_gt.yaml",
+    ),
 }
 
 DEFAULT_PLANNER = "colmdriver"
@@ -632,8 +698,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--start-carla",
+        dest="start_carla",
         action="store_true",
+        default=False,
         help="Launch a local CARLA server from CARLA_ROOT/carla912 before evaluation.",
+    )
+    parser.add_argument(
+        "--no-start-carla",
+        dest="start_carla",
+        action="store_false",
+        help="Use an already-running CARLA server instead of launching one.",
     )
     parser.add_argument(
         "--carla-rootcause",
@@ -701,6 +775,20 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         help="Extra arguments to pass to CarlaUE4.sh (repeatable).",
+    )
+    parser.add_argument(
+        "--carla-quality",
+        choices=["low", "epic", "off"],
+        default="off",
+        help=(
+            "CARLA -quality-level setting. 'off' (default) leaves -quality-level "
+            "unset so CARLA uses its built-in default and behaviour is unchanged "
+            "vs. before this flag existed. 'low' drops shader/lighting quality "
+            "for ~30%% faster ticks on headless dedicated GPUs (recommended for "
+            "codriving-only runs that don't need pretty rendering). 'epic' "
+            "forces CARLA's highest preset. Has no effect if -quality-level=... "
+            "is already present in --carla-arg."
+        ),
     )
     parser.add_argument(
         "--carla-port-tries",
@@ -1009,6 +1097,109 @@ def parse_args() -> argparse.Namespace:
         help="Disable the dynamic VRAM-aware scheduler (fall back to legacy policy).",
     )
     parser.add_argument(
+        "--no-auto-conda-reexec",
+        dest="no_auto_conda_reexec",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable the parent's auto-reexec under a planner conda env when "
+            "the parent's CARLA client version doesn't match the bundled "
+            "CARLA server (default 0.9.12).  By default, when the parent's "
+            "carla version differs and at least one --planner [name,env] pair "
+            "names an env with a matching carla, the parent silently re-execs "
+            "via that env's python.  Pass this flag to keep the original "
+            "interpreter (and accept the version-mismatch failures it implies)."
+        ),
+    )
+    parser.add_argument(
+        "--no-pool-preflight-validate",
+        dest="pool_no_preflight_validate",
+        action="store_true",
+        default=False,
+        help=(
+            "In --scenario-pool mode, disable the pre-flight scenario-data "
+            "validator that rejects scenarios with duplicate ego spawn "
+            "coordinates (< 3m apart) or 1-waypoint ego routes.  Those "
+            "scenarios deterministically fail in CARLA; by default the "
+            "scheduler drops them before queueing, saving ~500s per bad "
+            "scenario.  Pass this flag to force every scenario into the "
+            "queue regardless of validation."
+        ),
+    )
+    parser.add_argument(
+        "--pool-idle-recycle-seconds",
+        dest="pool_idle_recycle_seconds",
+        type=float,
+        default=180.0,
+        help=(
+            "Seconds of idle (CLEAN-state, no active lease) before a pooled "
+            "CARLA instance is automatically recycled to free VRAM.  With "
+            "the default town-affinity reuse, warm CARLAs can accumulate "
+            "on every GPU (one per town served); each holds ~4GB.  Recycling "
+            "idle instances frees headroom for the scheduler to start fresh "
+            "CARLAs where jobs are queued.  Set to 0 to disable "
+            "(default: 180.0)."
+        ),
+    )
+    parser.add_argument(
+        "--scenario-pool",
+        dest="scenario_pool",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable the scenario-pool architecture. Parent orchestrator "
+            "maintains a pool of long-lived CARLA instances (sized dynamically by VRAM) "
+            "and dispatches grandchild evaluator processes concurrently against that "
+            "pool, with town-affinity reuse. Replaces the per-planner serial scenario "
+            "loop. Off by default while soaking; use tools/soak_scenario_pool.py for "
+            "pre-deployment validation. When off, today's hierarchical execution path "
+            "is used."
+        ),
+    )
+    parser.add_argument(
+        "--no-scenario-pool",
+        dest="scenario_pool",
+        action="store_false",
+        help="Force today's hierarchical execution path (default).",
+    )
+    parser.add_argument(
+        "--scenario-pool-no-reuse",
+        dest="scenario_pool_no_reuse",
+        action="store_true",
+        default=False,
+        help=(
+            "When --scenario-pool is enabled, always recycle a CARLA instance after "
+            "each scenario (no town reuse, no defensive cleanup). Slower but provides "
+            "maximum isolation between scenarios. Use for debugging pool-related "
+            "state-leakage suspicions."
+        ),
+    )
+    parser.add_argument(
+        "--pool-max-leases-per-gpu",
+        dest="pool_max_leases_per_gpu",
+        type=int,
+        default=0,
+        help=(
+            "Maximum concurrent evaluator leases per GPU in --scenario-pool mode. "
+            "DEFAULT 0 = NO CAP, VRAM-only admission.  Forensics showed lower caps "
+            "did not reduce failure rate while limiting throughput.  Set to a "
+            "positive integer if you want to artificially limit concurrency."
+        ),
+    )
+    parser.add_argument(
+        "--pool-oom-recovery-idle-s",
+        dest="pool_oom_recovery_idle_s",
+        type=float,
+        default=180.0,
+        help=(
+            "How long a GPU in --scenario-pool mode must be idle with no new OOMs "
+            "before the scheduler nudges its OOM-backoff multiplier back toward 1.0. "
+            "Without this, the multiplier can wedge at its floor forever once all "
+            "small-VRAM planners drain, because the success-based recovery path "
+            "requires jobs to actually run."
+        ),
+    )
+    parser.add_argument(
         "--planner-vram-estimate-cache",
         default=VRAM_ESTIMATE_CACHE_DEFAULT,
         help=(
@@ -1151,7 +1342,19 @@ def parse_args() -> argparse.Namespace:
         help=argparse.SUPPRESS,
     )
     parser.add_argument("--track", default="SENSORS", help="Leaderboard track name.")
-    parser.add_argument("--timeout", type=float, default=600.0, help="Route timeout.")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=86400.0,
+        help=(
+            "Route timeout (seconds).  Drives the leaderboard's CARLA RPC "
+            "timeout AND the in-grandchild Watchdog (timeout-2) AND the agent "
+            "Watchdog (timeout-3).  Set to 24 hours by default so that the "
+            "in-process watchdogs effectively never fire on a scenario that "
+            "is making any progress.  Real CARLA crashes still surface via "
+            "the lower-level RPC connection state."
+        ),
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug output.")
     parser.add_argument(
         "--host",
@@ -1676,10 +1879,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--align-ego-routes",
+        default=True,
         action="store_true",
         help=(
-            "Align ego route waypoints to the CARLA map using the scenario_generator "
-            "route alignment module (uses CARLA GRP to snap headings/lanes)."
+            "Rewrite each ego route XML with the dense GRP trace the "
+            "leaderboard would interpolate at eval time (same trace the "
+            "scenario_builder 'Run GRP' preview plots). Also dedupes "
+            "near-duplicate input waypoints to prevent GRP A* from "
+            "selecting loop-around-the-block paths between coincident nodes."
         ),
     )
     parser.add_argument(
@@ -1698,6 +1905,16 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=2.0,
         help="GRP sampling resolution (meters) used for ego route alignment.",
+    )
+    parser.add_argument(
+        "--align-ego-min-spacing-m",
+        type=float,
+        default=2.0,
+        help=(
+            "Min arc-length spacing (meters) between waypoints in the rewritten "
+            "ego XML. Curve detail is preserved (points are still kept if heading "
+            "chang es >8°). Set to 0 to disable subsampling. Default 5.0m."
+        ),
     )
     parser.add_argument(
         "--llm-port",
@@ -1916,6 +2133,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--delete-partial-results",
+        action="store_true",
+        help=(
+            "Delete partial/problematic result directories outright when a scenario "
+            "fails or is retried, instead of renaming them to a `_partial_<timestamp>` "
+            "sibling. Useful for full benchmark runs where stale artifacts should not "
+            "accumulate; omit for debugging when you want to inspect the failed attempt."
+        ),
+    )
+    parser.add_argument(
         "--planner-retry-limit",
         type=int,
         default=PLANNER_RETRY_LIMIT_DEFAULT,
@@ -2059,6 +2286,19 @@ def parse_args() -> argparse.Namespace:
         for arg in sys.argv[1:]
     ]
     args = parser.parse_args(normalized_argv)
+    global _DELETE_PARTIAL_RESULTS
+    _DELETE_PARTIAL_RESULTS = bool(getattr(args, "delete_partial_results", False))
+    # Inject -quality-level=<value> into args.carla_arg so it threads through
+    # _resolve_carla_launch_args to every CARLA spawn (master pool, per-scenario
+    # workers, root-cause restarts). Default is 'off' — meaning we DO NOT touch
+    # CARLA's quality setting and behaviour matches pre-flag runs. Pass
+    # --carla-quality low explicitly (typically for codriving-only headless
+    # runs) to opt into the speedup. Skipped if the user already passed
+    # -quality-level via --carla-arg.
+    _quality = str(getattr(args, "carla_quality", "off") or "off").strip().lower()
+    if _quality in ("low", "epic") and not _has_quality_level_arg(args.carla_arg):
+        _quality_value = "Low" if _quality == "low" else "Epic"
+        args.carla_arg.append(f"-quality-level={_quality_value}")
     if args.carla_rootcause and not args.start_carla:
         parser.error("--carla-rootcause requires --start-carla.")
     if int(args.carla_rootcause_diag_interval) <= 0:
@@ -2284,13 +2524,49 @@ def build_tick_heartbeat_checker(
     grace_s = max(0.0, float(grace_s))
     start_time = time.monotonic()
 
+    # Track previous heartbeat age so we can emit early-warning logs as the
+    # heartbeat grows stale, not just at the kill moment.  Important for
+    # distinguishing "watchdog false positive" (heartbeat updated 290s ago and
+    # was about to update) from "true freeze" (heartbeat updated 1500s ago).
+    state = {"last_warning_age": 0.0, "last_log_at": 0.0}
+    warning_thresholds = (60.0, 120.0, 200.0, 250.0)
+
     def _checker() -> str | None:
         if time.monotonic() - start_time < grace_s:
             return None
         try:
-            age = time.time() - heartbeat_path.stat().st_mtime
+            stat_result = heartbeat_path.stat()
+            age = time.time() - stat_result.st_mtime
         except OSError:
             return None  # file not yet created — scenario hasn't started ticking
+
+        # Periodic info log -- emit only every 5min to keep logs quiet.  The
+        # main dashboard handles routine status; this exists only to confirm
+        # the watchdog itself is alive when triaging an issue.
+        now = time.monotonic()
+        if now - state["last_log_at"] >= 300.0:
+            print(f"[WATCHDOG_FORENSICS] heartbeat_age_s={age:.1f} "
+                  f"freeze_timeout_s={freeze_timeout_s:.0f} status=ok",
+                  flush=True)
+            state["last_log_at"] = now
+
+        # Pre-kill staircase warnings: emit at 60s/120s/200s/250s so we know
+        # how long the freeze had been growing before the final SIGKILL.
+        for threshold in warning_thresholds:
+            if age >= threshold and state["last_warning_age"] < threshold:
+                state["last_warning_age"] = threshold
+                print(f"[WATCHDOG_FORENSICS] heartbeat_stale_warning "
+                      f"heartbeat_age_s={age:.1f} threshold_s={threshold:.0f} "
+                      f"freeze_timeout_s={freeze_timeout_s:.0f} "
+                      f"will_kill_in_s={max(0.0, freeze_timeout_s - age):.1f}",
+                      flush=True)
+
+        # Reset warning state if heartbeat recovered
+        if age < 5.0 and state["last_warning_age"] > 0:
+            print(f"[WATCHDOG_FORENSICS] heartbeat_recovered prior_max_warning_s={state['last_warning_age']:.0f}",
+                  flush=True)
+            state["last_warning_age"] = 0.0
+
         if age < freeze_timeout_s:
             return None
         return (
@@ -2354,18 +2630,337 @@ def wait_for_process_port(
     return False
 
 
-def wait_for_carla_rpc_ready(host: str, port: int, timeout: float = 60.0) -> bool:
+_POOL_PRE_SCENARIO_SWEEP_KEEP_PREFIXES: tuple[str, ...] = (
+    # CARLA internal / map actors we must NEVER destroy.  These are owned
+    # by the server itself and live for the whole process lifetime.
+    "traffic.",
+    "static.",
+    "spectator",
+)
+
+
+def pool_pre_scenario_world_sweep(
+    host: str,
+    port: int,
+    *,
+    timeout_s: float = 5.0,
+    quiet: bool = False,
+    target_town: str | None = None,
+    rpc_ready_timeout_s: float = 8.0,
+    settle_ticks: int = 3,
+    load_world_threshold: int = 25,
+) -> dict[str, int]:
+    """Prepare a pool-managed CARLA for the next scenario.
+
+    Performs three jobs, in order:
+
+    1. **RPC liveness check** — confirms the CARLA at ``host:port`` is
+       responding to ``get_world()`` within ``rpc_ready_timeout_s``.  If
+       not, returns ``ok=False`` and the caller should recycle the
+       instance (and re-enqueue the job *without* burning a retry).
+    2. **Stale-actor cleanup** — destroys every non-map actor.  When the
+       leftover-actor count is high (``> load_world_threshold``) or
+       ``target_town`` differs from the currently loaded map, the sweep
+       additionally calls ``world.load_world(target_town)`` for a hard
+       reset, which is the only reliable way to clear a CARLA whose
+       internal state has gotten wedged after a prior tenant SIGKILL.
+    3. **Settle** — ticks the world ``settle_ticks`` times and re-queries
+       to *prove* it is empty before handing it back.
+
+    Rationale
+    ---------
+    In ``--scenario-pool`` mode the same CARLA process is leased to many
+    scenarios in sequence.  When a scenario's evaluator exits cleanly,
+    ``CarlaDataProvider.cleanup()`` destroys its tracked actors.  But when
+    the evaluator is SIGKILL'd by the parent watchdog (observed as
+    ``reason=stalled`` / ``no_route_execution`` with ``returncode=-9``),
+    none of that runs -- the Python process is torn down before its
+    finally/atexit handlers execute.  The warm CARLA then still holds
+    the dead scenario's egos, sensors, and NPCs, and the NEXT scenario's
+    ``try_spawn_actor`` call collides with them.  Worse, the
+    leaderboard's own teardown loop will then issue ``destroy_actor`` for
+    hundreds of stale IDs from its own CarlaDataProvider, which floods
+    CARLA's RPC queue and starves the tick loop -- triggering the 300s
+    heartbeat watchdog SIGKILL on the new tenant before its route ever
+    starts.  This was the dominant failure mode in the baseline run
+    (~70% of partial dirs).
+
+    Returns a counts dict; ``ok`` field is False if the instance should
+    be recycled before any tenant gets it.
+    """
+    counts = {
+        "initial": 0,
+        "destroyed": 0,
+        "remaining": 0,
+        "failures": 0,
+        "load_world_used": 0,
+        "rpc_attempts": 0,
+        "ok": False,
+    }
+    try:
+        import carla  # type: ignore[import]
+    except ImportError:
+        # Without the carla package we cannot validate; the caller must
+        # treat this as "ok" so non-CARLA-aware test paths don't break.
+        counts["ok"] = True
+        return counts
+
+    # --- Step 1: RPC liveness check ---
+    deadline = time.monotonic() + max(1.0, float(rpc_ready_timeout_s))
+    client = None
+    last_exc: Exception | None = None
+    while time.monotonic() < deadline:
+        counts["rpc_attempts"] += 1
+        try:
+            client = carla.Client(host, int(port))
+            client.set_timeout(min(float(timeout_s), max(1.0, deadline - time.monotonic())))
+            client.get_world()
+            break
+        except Exception as exc:
+            last_exc = exc
+            client = None
+            time.sleep(0.5)
+    if client is None:
+        if not quiet:
+            print(
+                f"[WARN][POOL SWEEP] CARLA at {host}:{port} did not become "
+                f"RPC-ready within {rpc_ready_timeout_s:.1f}s "
+                f"({counts['rpc_attempts']} attempts; "
+                f"last={type(last_exc).__name__ if last_exc else 'unknown'})."
+            )
+        return counts  # ok=False
+
+    try:
+        world = client.get_world()
+        # --- Step 2: enumerate stale actors ---
+        actors = world.get_actors()
+        candidates: list = []
+        for actor in actors:
+            type_id = str(getattr(actor, "type_id", "") or "")
+            if not type_id:
+                continue
+            if any(type_id.startswith(prefix) for prefix in _POOL_PRE_SCENARIO_SWEEP_KEEP_PREFIXES):
+                continue
+            candidates.append(actor)
+        counts["initial"] = len(candidates)
+
+        # --- Decide whether to do a heavy load_world reset ---
+        current_town = ""
+        try:
+            current_town = str(world.get_map().name).split("/")[-1]
+        except Exception:
+            current_town = ""
+        # Decide whether to do the heavy load_world reset.
+        #
+        # Originally this was gated on (a) town mismatch OR (b) more
+        # leftover actors than ``load_world_threshold``.  In practice
+        # the threshold-based gate races against the previous tenant's
+        # leaderboard_evaluator: by the time we re-enumerate after the
+        # destroy step, the previous tenant may have spawned more
+        # actors than the gate originally observed -- exactly the
+        # ``remaining_actors=112 load_world_used=0`` symptom seen in
+        # the live run.  When ``target_town`` is known we now always
+        # reset, which is the only definitive way to guarantee the
+        # next tenant gets a CARLA whose state is not being mutated by
+        # a stale client.  The ~5-10s cost per scenario is negligible
+        # next to the 220-300s cost of a single SIGKILL'd partial.
+        wants_load_world = False
+        if target_town:
+            wants_load_world = True
+        elif counts["initial"] > int(load_world_threshold):
+            wants_load_world = True
+
+        if wants_load_world and target_town:
+            if not quiet:
+                print(
+                    f"[INFO][POOL SWEEP] {host}:{port} resetting world to "
+                    f"{target_town} (current={current_town or '?'}, "
+                    f"stale_actors={counts['initial']})"
+                )
+            try:
+                # load_world is a heavy synchronous call (5-15s); raise
+                # the client timeout so we don't trip on its own latency.
+                client.set_timeout(60.0)
+                client.load_world(target_town)
+                counts["load_world_used"] = 1
+                # Re-acquire world reference; the old one is invalid.
+                world = client.get_world()
+                actors = world.get_actors()
+                candidates = []
+                for actor in actors:
+                    type_id = str(getattr(actor, "type_id", "") or "")
+                    if not type_id:
+                        continue
+                    if any(
+                        type_id.startswith(prefix)
+                        for prefix in _POOL_PRE_SCENARIO_SWEEP_KEEP_PREFIXES
+                    ):
+                        continue
+                    candidates.append(actor)
+                counts["initial"] = len(candidates)
+                client.set_timeout(float(timeout_s))
+            except Exception as exc:
+                # load_world failure means CARLA is in a bad state;
+                # signal recycle.
+                if not quiet:
+                    print(
+                        f"[WARN][POOL SWEEP] load_world({target_town}) failed on "
+                        f"{host}:{port}: {type(exc).__name__}: {exc}"
+                    )
+                return counts  # ok=False; caller will recycle
+
+        # --- Targeted destroy of any leftovers (post-reset or no-reset path) ---
+        if candidates:
+            sensors = [a for a in candidates if str(getattr(a, "type_id", "")).startswith("sensor.")]
+            others = [a for a in candidates if a not in sensors]
+            for actor in sensors:
+                try:
+                    actor.stop()
+                except Exception:
+                    pass
+            batch = [carla.command.DestroyActor(a.id) for a in sensors + others]
+            try:
+                responses = client.apply_batch_sync(batch, True)
+                for resp in responses:
+                    if getattr(resp, "error", ""):
+                        counts["failures"] += 1
+                    else:
+                        counts["destroyed"] += 1
+            except Exception:
+                for actor in sensors + others:
+                    try:
+                        if actor.destroy():
+                            counts["destroyed"] += 1
+                        else:
+                            counts["failures"] += 1
+                    except Exception:
+                        counts["failures"] += 1
+
+        # --- Step 3: settle the simulation and verify clean state ---
+        for _ in range(max(1, int(settle_ticks))):
+            try:
+                world.tick()
+            except Exception:
+                # async-mode worlds just step on their own; not fatal
+                break
+        remaining = 0
+        try:
+            for actor in world.get_actors():
+                type_id = str(getattr(actor, "type_id", "") or "")
+                if not type_id:
+                    continue
+                if any(
+                    type_id.startswith(prefix)
+                    for prefix in _POOL_PRE_SCENARIO_SWEEP_KEEP_PREFIXES
+                ):
+                    continue
+                remaining += 1
+        except Exception:
+            pass
+        counts["remaining"] = remaining
+        # If after a load_world + destroy + settle there are still many
+        # leftovers, the instance is unusable -- caller should recycle.
+        if remaining <= max(2, int(load_world_threshold) // 5):
+            counts["ok"] = True
+    except Exception as exc:
+        if not quiet:
+            print(
+                f"[WARN][POOL SWEEP] pre-scenario sweep failed on {host}:{port}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+    finally:
+        client = None  # release probe client; the caller's evaluator opens its own
+    if not quiet and (counts.get("initial", 0) > 0 or not counts.get("ok", False)):
+        print(
+            f"[INFO][POOL SWEEP] {host}:{port} ok={counts['ok']} "
+            f"destroyed={counts['destroyed']}/{counts['initial']} "
+            f"remaining={counts['remaining']} failures={counts['failures']} "
+            f"load_world_used={counts['load_world_used']}"
+        )
+    return counts
+
+
+# Cache of carla.Client instances keyed by (host, port). CARLA 0.9.12's Python
+# binding spawns 2-3 internal rpclib threads per client and does NOT join them
+# when the Python object is garbage-collected. Repeatedly creating-and-discarding
+# clients (e.g. one per probe attempt, on every dispatch) accumulates dozens of
+# thousands of zombie threads in the master process, which eventually trips the
+# per-process thread limit and crashes the orchestrator. Reusing a single client
+# per CARLA endpoint bounds the leak to ~3 threads per CARLA instance.
+_CARLA_PROBE_CLIENTS: Dict[Tuple[str, int], Any] = {}
+_CARLA_PROBE_CLIENT_LOCK = threading.Lock()
+# Counters for diagnostic emission. All accessed under
+# _CARLA_PROBE_CLIENT_LOCK so they stay consistent across threads.
+_CARLA_PROBE_CACHE_STATS: Dict[str, int] = {
+    "hits": 0,        # cached client returned
+    "misses": 0,      # new client created
+    "evictions": 0,   # cache entry dropped (probe failure or instance recycle)
+}
+
+
+def _get_or_create_probe_client(carla_module: Any, host: str, port: int) -> Any:
+    """Return a cached carla.Client for (host, port), creating one if needed."""
+    key = (host, int(port))
+    with _CARLA_PROBE_CLIENT_LOCK:
+        client = _CARLA_PROBE_CLIENTS.get(key)
+        if client is not None:
+            _CARLA_PROBE_CACHE_STATS["hits"] += 1
+            return client
+        client = carla_module.Client(host, int(port))
+        try:
+            client.set_timeout(3.0)
+        except Exception:
+            pass
+        _CARLA_PROBE_CLIENTS[key] = client
+        _CARLA_PROBE_CACHE_STATS["misses"] += 1
+        return client
+
+
+def _drop_probe_client(host: str, port: int) -> None:
+    """Evict a cached probe client so the next probe creates a fresh one.
+
+    Call when the underlying CARLA instance is known to have died/recycled --
+    a stale cached client would keep failing to talk to the new instance on
+    the same port (post-recycle, port is reused).
+    """
+    key = (host, int(port))
+    with _CARLA_PROBE_CLIENT_LOCK:
+        if _CARLA_PROBE_CLIENTS.pop(key, None) is not None:
+            _CARLA_PROBE_CACHE_STATS["evictions"] += 1
+
+
+def get_probe_client_cache_stats() -> Dict[str, int]:
+    """Return a snapshot of probe-client cache stats for diagnostic logging.
+
+    Hit-rate >= 95% indicates the rpclib-thread-leak fix is working as designed.
+    Low hit-rate (high miss/eviction churn) means probes are repeatedly hitting
+    fresh CARLA instances -- which still bounds the leak per-instance, but
+    suggests upstream instability worth investigating.
+    """
+    with _CARLA_PROBE_CLIENT_LOCK:
+        snap = dict(_CARLA_PROBE_CACHE_STATS)
+        snap["cached_clients"] = len(_CARLA_PROBE_CLIENTS)
+    return snap
+
+
+def wait_for_carla_rpc_ready(host: str, port: int, timeout: float = 60.0, *, quiet: bool = False) -> bool:
     """Active RPC readiness check: retries carla.Client.get_world() until it succeeds.
 
     TCP port open does not mean CARLA's RPC layer is ready.  This function
     confirms the RPC handshake by calling get_world(), which is the first
     call any evaluator or planner will make.  Returns True once confirmed
-    ready, False on timeout.
+    ready, False on timeout.  When ``quiet=True``, per-attempt success /
+    exception lines are suppressed; the final failure warning is kept.
+
+    Uses a cached carla.Client per (host, port) to avoid leaking rpclib
+    threads -- see ``_get_or_create_probe_client`` docstring for the
+    motivation.
     """
     try:
         import carla  # type: ignore[import]
     except ImportError:
-        print("[WARN][CARLA CONNECT] carla package not importable; skipping RPC readiness check.")
+        if not quiet:
+            print("[WARN][CARLA CONNECT] carla package not importable; skipping RPC readiness check.")
         return True  # can't verify; don't block startup unnecessarily
 
     deadline = time.monotonic() + timeout
@@ -2373,18 +2968,8 @@ def wait_for_carla_rpc_ready(host: str, port: int, timeout: float = 60.0) -> boo
     last_exc: Exception | None = None
     while time.monotonic() < deadline:
         attempt += 1
-        client = None
         try:
-            client = create_logged_client(
-                carla,
-                host,
-                port,
-                timeout_s=3.0,
-                context="startup_rpc_probe",
-                attempt=attempt,
-                process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
-            )
-            probe_client_id = get_logged_client_id(client)
+            client = _get_or_create_probe_client(carla, host, port)
             client.get_world()
             log_client_rpc_ready(
                 host=host,
@@ -2392,13 +2977,18 @@ def wait_for_carla_rpc_ready(host: str, port: int, timeout: float = 60.0) -> boo
                 context="startup_rpc_probe",
                 attempt=attempt,
                 process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
-                client_id=probe_client_id,
+                client_id=get_logged_client_id(client),
             )
-            print(f"[CARLA CONNECT attempt={attempt}] RPC ready on {host}:{port}")
+            if not quiet:
+                print(f"[CARLA CONNECT attempt={attempt}] RPC ready on {host}:{port}")
             return True
         except Exception as exc:
             last_exc = exc
             exc_type = type(exc).__name__
+            # Evict the cached client so a stale connection doesn't keep
+            # failing forever -- some failure modes (CARLA mid-recycle,
+            # port reused by a fresh instance) require a brand-new client.
+            _drop_probe_client(host, port)
             log_client_retry(
                 host=host,
                 port=port,
@@ -2408,22 +2998,9 @@ def wait_for_carla_rpc_ready(host: str, port: int, timeout: float = 60.0) -> boo
                 reason=f"{exc_type}: {exc}",
                 process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
             )
-            print(f"[CARLA CONNECT attempt={attempt}] exception={exc_type}: {exc}")
+            if not quiet:
+                print(f"[CARLA CONNECT attempt={attempt}] exception={exc_type}: {exc}")
             time.sleep(1.0)
-        finally:
-            release_client_id = log_client_release_begin(
-                client,
-                context="startup_rpc_probe",
-                process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
-                reason="startup_rpc_probe_attempt_end",
-            )
-            client = None
-            log_client_release_end(
-                release_client_id,
-                context="startup_rpc_probe",
-                process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
-                reason="startup_rpc_probe_attempt_end",
-            )
 
     print(
         f"[CARLA CONNECT] RPC not ready after {attempt} attempt(s) "
@@ -3230,6 +3807,96 @@ def should_add_offscreen(extra_args: List[str]) -> bool:
     return True
 
 
+def _has_graphics_adapter_arg(extra_args: List[str]) -> bool:
+    for arg in extra_args:
+        if str(arg).strip().lower().startswith("-graphicsadapter"):
+            return True
+    return False
+
+
+def _has_quality_level_arg(extra_args: List[str]) -> bool:
+    for arg in extra_args:
+        if str(arg).strip().lower().startswith("-quality-level"):
+            return True
+    return False
+
+
+def _normalize_gpu_uuid(raw: str | None) -> str:
+    text = str(raw or "").strip().lower()
+    if text.startswith("gpu-"):
+        text = text[4:]
+    return text
+
+
+def _infer_primary_visible_gpu_token_from_env(env: Dict[str, str]) -> str | None:
+    raw = str(env.get("CUDA_VISIBLE_DEVICES", "")).strip()
+    if not raw:
+        return None
+    token = raw.split(",", 1)[0].strip()
+    return token or None
+
+
+def _infer_primary_visible_gpu_id_from_env(env: Dict[str, str]) -> int | None:
+    token = _infer_primary_visible_gpu_token_from_env(env)
+    if not token or not token.lstrip("-").isdigit():
+        return None
+    gpu_id = int(token)
+    if gpu_id < 0:
+        return None
+    return gpu_id
+
+
+def _resolve_physical_gpu_index_from_visible_token(token: str | None) -> str | None:
+    text = str(token or "").strip()
+    if not text:
+        return None
+    if text.lstrip("-").isdigit():
+        gpu_id = int(text)
+        if gpu_id < 0:
+            return None
+        return str(gpu_id)
+    normalized_uuid = _normalize_gpu_uuid(text)
+    if not normalized_uuid:
+        return None
+    gpu_index_by_uuid = {
+        uuid: index
+        for index, uuid in _query_nvidia_gpu_uuid_by_index().items()
+    }
+    return gpu_index_by_uuid.get(normalized_uuid)
+
+
+def _resolve_physical_gpu_index_from_env(env: Dict[str, str]) -> str | None:
+    return _resolve_physical_gpu_index_from_visible_token(
+        _infer_primary_visible_gpu_token_from_env(env)
+    )
+
+
+def _resolve_carla_launch_args(extra_args: List[str], env: Dict[str, str]) -> List[str]:
+    resolved = list(extra_args)
+    if not _has_graphics_adapter_arg(resolved):
+        physical_gpu_index = _resolve_physical_gpu_index_from_env(env)
+        if physical_gpu_index is not None:
+            adapter_index = _query_vulkan_adapter_index_by_gpu_index().get(physical_gpu_index)
+            if adapter_index is not None:
+                if not _pool_quiet_mode():
+                    print(
+                        f"[INFO] Vulkan adapter mapping: physical GPU {physical_gpu_index} "
+                        f"-> -graphicsadapter={adapter_index} (UUID-based)"
+                    )
+                resolved.append(f"-graphicsadapter={adapter_index}")
+            else:
+                print(
+                    f"[WARN] Vulkan adapter mapping unavailable for physical GPU "
+                    f"{physical_gpu_index}; falling back to identity mapping "
+                    f"-graphicsadapter={physical_gpu_index}. "
+                    "CARLA may render on the wrong GPU if the Vulkan adapter order "
+                    "does not match the physical GPU order (run: vulkaninfo --summary)."
+                )
+                resolved.append(f"-graphicsadapter={physical_gpu_index}")
+    if should_add_offscreen(resolved):
+        resolved.append("-RenderOffScreen")
+    return resolved
+
 def _ensure_carla_arg(extra_args: List[str], arg: str) -> None:
     arg_lower = arg.lower()
     for current in extra_args:
@@ -3320,7 +3987,7 @@ def _build_conda_launch_env(base_env: Dict[str, str]) -> Dict[str, str]:
             stripped.append(entry)
         elif entry:
             kept.append(entry)
-    if stripped:
+    if stripped and not _pool_quiet_mode():
         print(f"[EVAL ENV] Stripped venv PATH entries: {stripped}")
     env["PATH"] = os.pathsep.join(kept)
     return env
@@ -3337,16 +4004,21 @@ def _append_text_log_line(log_path: Path | None, line: str) -> None:
         print(f"[WARN] Failed to append log line to {log_path}: {exc}")
 
 
-def terminate_process_tree(proc: subprocess.Popen[Any], grace_s: float = 15.0) -> None:
+def terminate_process_tree(
+    proc: subprocess.Popen[Any],
+    grace_s: float = 15.0,
+    *,
+    initial_signal: int = signal.SIGTERM,
+) -> None:
     if proc.poll() is not None:
         return
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        os.killpg(os.getpgid(proc.pid), int(initial_signal))
     except ProcessLookupError:
         return
     except Exception:
         try:
-            proc.terminate()
+            proc.send_signal(int(initial_signal))
         except Exception:
             pass
 
@@ -3371,10 +4043,11 @@ def wait_for_carla_post_start_buffer(buffer_s: float) -> None:
     buffer_s = max(0.0, float(buffer_s))
     if buffer_s <= 0:
         return
-    print(
-        "[INFO] Waiting "
-        f"{buffer_s:.1f}s for managed CARLA to settle before launching the evaluator."
-    )
+    if not _pool_quiet_mode():
+        print(
+            "[INFO] Waiting "
+            f"{buffer_s:.1f}s for managed CARLA to settle before launching the evaluator."
+        )
     time.sleep(buffer_s)
 
 
@@ -3551,6 +4224,32 @@ class MonitoredSubprocessRunner:
         line += " ===\n"
         self._log_handle.write(line)
 
+    def _update_open_run_metadata(self, **fields: Any) -> None:
+        state = self._load_run_log_state()
+        open_run = state.get("open_run")
+        if not isinstance(open_run, dict):
+            open_run = {}
+        for key, value in fields.items():
+            if value is not None:
+                open_run[key] = value
+        state["open_run"] = open_run
+        self._write_run_log_state(state)
+
+    def _build_returncode_provenance(self, returncode: int | None) -> Dict[str, Any]:
+        signal_num = returncode_signal_num(returncode)
+        signal_name = returncode_signal_name(returncode)
+        return {
+            "child_pid": None if self.process is None else self.process.pid,
+            "signal_num": signal_num,
+            "signal_name": signal_name,
+            "elapsed_s": round(float(self._get_elapsed_s()), 3),
+            "last_output_age_s": round(float(self._get_last_output_age_s()), 3),
+            "last_any_output_age_s": round(
+                float(self._get_last_output_age_s(include_diagnostic=True)),
+                3,
+            ),
+        }
+
     def _begin_run_log(self) -> None:
         if self.log_path is None:
             return
@@ -3621,6 +4320,7 @@ class MonitoredSubprocessRunner:
     ) -> None:
         now_iso = dt.datetime.now().isoformat(timespec="seconds")
         state = self._load_run_log_state()
+        provenance = self._build_returncode_provenance(returncode)
         state["open_run"] = None
         state["last_run"] = {
             "run_seq": self._run_log_seq,
@@ -3630,6 +4330,12 @@ class MonitoredSubprocessRunner:
             "returncode": returncode,
             "stalled": bool(self._stalled.is_set()),
             "terminated_reason": self._termination_reason,
+            "child_pid": provenance["child_pid"],
+            "signal_num": provenance["signal_num"],
+            "signal_name": provenance["signal_name"],
+            "elapsed_s": provenance["elapsed_s"],
+            "last_output_age_s": provenance["last_output_age_s"],
+            "last_any_output_age_s": provenance["last_any_output_age_s"],
         }
         if error:
             state["last_run"]["error"] = str(error)
@@ -3643,6 +4349,12 @@ class MonitoredSubprocessRunner:
                 returncode=returncode,
                 stalled=bool(self._stalled.is_set()),
                 terminated_reason=self._termination_reason,
+                child_pid=provenance["child_pid"],
+                signal_num=provenance["signal_num"],
+                signal_name=provenance["signal_name"],
+                elapsed_s=provenance["elapsed_s"],
+                last_output_age_s=provenance["last_output_age_s"],
+                last_any_output_age_s=provenance["last_any_output_age_s"],
                 error=error,
             )
             self._log_handle.flush()
@@ -3688,6 +4400,7 @@ class MonitoredSubprocessRunner:
         proc = self.process
         return {
             "running": proc is not None and proc.poll() is None,
+            "pid": None if proc is None else proc.pid,
             "returncode": None if proc is None else proc.poll(),
             "elapsed_s": self._get_elapsed_s(),
             "last_output_age_s": self._get_last_output_age_s(),
@@ -3740,6 +4453,32 @@ class MonitoredSubprocessRunner:
             )
         terminate_process_tree(proc)
 
+    def interrupt(self, reason: str | None = None) -> None:
+        proc = self.process
+        if proc is None or self._terminated.is_set():
+            return
+        self._terminated.set()
+        if reason:
+            if self._termination_reason is None:
+                self._termination_reason = reason.rstrip("\n")
+            if self.emit_stdout:
+                print(reason)
+            elif self._log_handle is not None:
+                self._log_handle.write(reason.rstrip("\n") + "\n")
+                self._log_handle.flush()
+            log_carla_event(
+                "CHILD_INTERRUPT_REQUEST",
+                process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
+                reason=self._termination_reason,
+                pid=None if proc is None else proc.pid,
+                command=" ".join(self.cmd),
+            )
+        terminate_process_tree(
+            proc,
+            grace_s=10.0,
+            initial_signal=signal.SIGINT,
+        )
+
     def _reader_loop(self) -> None:
         proc = self.process
         if proc is None or proc.stdout is None:
@@ -3766,6 +4505,18 @@ class MonitoredSubprocessRunner:
                     else:
                         sys.stdout.write(raw_line)
                     sys.stdout.flush()
+        except (ValueError, OSError):
+            # Benign teardown race: another thread (terminate path,
+            # process-finalization, signal handler) closed proc.stdout
+            # while we were blocked in readline().  When the syscall
+            # returns to a now-closed FD Python raises ValueError("I/O
+            # operation on closed file") or OSError(EBADF).  Neither is
+            # a real failure -- the subprocess is on its way out -- but
+            # the unhandled traceback was being printed to the
+            # operator's terminal and looked alarming.  Swallow them
+            # here; the watchdog/wait path is what actually decides
+            # the run's outcome.
+            pass
         finally:
             if line_count:
                 _perf_add("child_output_lines", line_count)
@@ -3848,6 +4599,25 @@ class MonitoredSubprocessRunner:
                 bufsize=1,
                 start_new_session=True,
             )
+            self._update_open_run_metadata(
+                child_pid=int(self.process.pid),
+                spawned_at=dt.datetime.now().isoformat(timespec="seconds"),
+            )
+            if self._log_handle is not None:
+                self._write_run_log_marker(
+                    "RUN CHILD",
+                    dt.datetime.now().isoformat(timespec="seconds"),
+                    run_seq=self._run_log_seq,
+                    child_pid=int(self.process.pid),
+                )
+                self._log_handle.flush()
+            log_carla_event(
+                "CHILD_RUN_SPAWNED",
+                process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
+                pid=int(self.process.pid),
+                command=" ".join(self.cmd),
+                cwd=self.cwd,
+            )
         except Exception as exc:
             log_carla_event(
                 "CHILD_RUN_SPAWN_FAIL",
@@ -3912,6 +4682,20 @@ class MonitoredSubprocessRunner:
                     pass
             reader_thread.join(timeout=5.0)
             watchdog_thread.join(timeout=5.0)
+            # Reap the grandchild's entire process group.  ``process.wait()``
+            # only collects the immediate child; descendants the child
+            # spawned (e.g. ``leaderboard_evaluator_parameter.py``, planner
+            # vLLM workers) inherit the same pgid (because we used
+            # ``start_new_session=True``) but may still be alive after the
+            # leader returns -- especially when the leader exited with a
+            # non-zero code or via signal.  If we don't kill them here,
+            # they will keep talking to the warm CARLA the pool is about
+            # to hand to the next tenant: spawning actors, holding sensor
+            # streams, and starving the new scenario's tick loop.  This
+            # was the dominant cause of the residual "300s tick freeze /
+            # no_route_execution" cascade observed even after the
+            # pre-scenario world sweep was added.
+            self._reap_process_group(grace_s=2.0)
             elapsed_s = time.monotonic() - self._start_time
             self._finish_run_log(
                 status=self._derive_run_log_status(returncode),
@@ -3935,10 +4719,82 @@ class MonitoredSubprocessRunner:
                 last_output_age_s=self._get_last_output_age_s(),
                 output_tail=self._get_output_tail(),
                 terminated_reason=self._termination_reason,
+                pid=None if self.process is None else self.process.pid,
+                signal_num=returncode_signal_num(returncode),
+                signal_name=returncode_signal_name(returncode),
+                last_any_output_age_s=self._get_last_output_age_s(include_diagnostic=True),
             )
         finally:
             with _active_monitored_runners_lock:
                 _active_monitored_runners.discard(self)
+
+    def _reap_process_group(self, *, grace_s: float = 2.0) -> None:
+        """Kill any descendants of ``self.process`` that survived the
+        leader's exit.  The leader's own pid is still a valid pgid
+        identifier even after it dies -- ``kill(-pgid, signal)`` reaches
+        every process still in the group.  Called unconditionally from
+        :meth:`run` so the next pool tenant gets a CARLA that is no
+        longer being mutated by stale clients from the previous run.
+        """
+        proc = self.process
+        if proc is None:
+            return
+        leader_pid = int(proc.pid)
+        try:
+            pgid = os.getpgid(leader_pid)
+        except (ProcessLookupError, PermissionError, OSError):
+            # Leader is gone but the pgid we requested at spawn time is
+            # the leader's own pid (start_new_session=True), so use that.
+            pgid = leader_pid
+
+        def _alive_in_pgroup() -> int:
+            """Best-effort count of PIDs still in ``pgid``."""
+            try:
+                out = subprocess.check_output(
+                    ["ps", "-o", "pid=,pgid=", "-eo", "pid,pgid"],
+                    text=True, stderr=subprocess.DEVNULL, timeout=2.0,
+                )
+            except Exception:
+                return 0
+            n = 0
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        if int(parts[1]) == pgid and int(parts[0]) != leader_pid:
+                            n += 1
+                    except ValueError:
+                        continue
+            return n
+
+        # Quick check: if no descendants remain we're done.
+        if _alive_in_pgroup() == 0:
+            return
+
+        # Try graceful first: SIGTERM the whole group.
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        deadline = time.monotonic() + max(0.0, float(grace_s))
+        while time.monotonic() < deadline:
+            if _alive_in_pgroup() == 0:
+                return
+            time.sleep(0.1)
+
+        # Force-kill any survivors.  Logged so the operator knows we
+        # had to shoot something.
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+            log_carla_event(
+                "CHILD_PROCESS_GROUP_REAPED",
+                process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
+                leader_pid=leader_pid,
+                pgid=pgid,
+                command=" ".join(self.cmd),
+            )
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
 
 
 class CarlaProcessManager:
@@ -3954,6 +4810,7 @@ class CarlaProcessManager:
         port_step: int,
         server_log_path: Path | None = None,
         rootcause_config: CarlaRootCauseConfig | None = None,
+        quiet: bool = False,
     ) -> None:
         self.carla_root = carla_root
         self.host = host
@@ -3966,6 +4823,10 @@ class CarlaProcessManager:
         self.port_step = port_step
         self.rootcause_config = rootcause_config
         self.server_log_path = server_log_path
+        # quiet=True suppresses per-instance CARLA startup banners and per-RPC
+        # retry chatter.  Used by the CARLA pool so a parallel run emits one
+        # high-level status line per event instead of 20+ per instance.
+        self.quiet = bool(quiet)
         if self.rootcause_config is not None and self.server_log_path is not None:
             print(
                 "[WARN] Ignoring --carla-forensics-server-log-file because --carla-rootcause "
@@ -3978,6 +4839,10 @@ class CarlaProcessManager:
         self._rootcause_launch_count = 0
         self._pending_logdir_outcome: str | None = None
         self._stopped = False
+        # Populated by _launch_bundle whenever it returns False, so the outer
+        # start() loop can propagate the actual root cause (port/RPC/GPU
+        # binding) instead of the generic "failed to open RPC port" message.
+        self._last_launch_failure: str | None = None
 
     def plan_logdir_outcome(self, outcome: str) -> None:
         """Schedule the current rootcause logdir to be renamed with *outcome* when stop() is called."""
@@ -4169,9 +5034,7 @@ class CarlaProcessManager:
         gpu_value = str(self.env.get("CUDA_VISIBLE_DEVICES", "")).strip()
         if gpu_value:
             cmd.extend(["--gpu", gpu_value])
-        carla_extra_args = list(self.extra_args)
-        if should_add_offscreen(carla_extra_args):
-            carla_extra_args.append("-RenderOffScreen")
+        carla_extra_args = _resolve_carla_launch_args(self.extra_args, self.env)
         if carla_extra_args:
             cmd.extend(["--", *carla_extra_args])
 
@@ -4246,6 +5109,27 @@ class CarlaProcessManager:
                     )
                 if selected_reason:
                     print(f"[INFO] Root-cause port selection reason: {selected_reason}")
+                rpc_timeout = max(30.0, min(float(CARLA_STARTUP_TIMEOUT), max(5.0, deadline - time.monotonic())))
+                if not wait_for_carla_rpc_ready(self.host, self.port, timeout=rpc_timeout, quiet=self.quiet):
+                    print(
+                        f"[WARN] Root-cause CARLA port {self.port} is open but RPC not ready "
+                        f"within {rpc_timeout:.0f}s; treating as failed startup."
+                    )
+                    self.stop(timeout=5.0)
+                    return False
+                gpu_binding_ok, gpu_binding_reason = wait_for_carla_gpu_binding(
+                    self.process,
+                    self.env,
+                    timeout=min(15.0, max(2.0, deadline - time.monotonic())),
+                    quiet=self.quiet,
+                )
+                if not gpu_binding_ok:
+                    print(
+                        "[WARN] Root-cause CARLA reached RPC readiness but failed GPU placement "
+                        f"validation: {gpu_binding_reason}"
+                    )
+                    self.stop(timeout=5.0)
+                    return False
                 log_carla_event(
                     "ROOTCAUSE_LAUNCH_READY",
                     process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
@@ -4308,17 +5192,17 @@ class CarlaProcessManager:
         return False
 
     def _launch_bundle(self, bundle: PortBundle) -> bool:
+        self._last_launch_failure = None
         if self.rootcause_config is not None:
             return self._launch_bundle_with_rootcause(bundle)
         carla_script = self.carla_root / "CarlaUE4.sh"
         cmd = [str(carla_script), f"--world-port={bundle.port}"]
-        if should_add_offscreen(self.extra_args):
-            cmd.append("-RenderOffScreen")
-        cmd.extend(self.extra_args)
-        print(
-            f"[CARLA START] host={self.host} port={bundle.port} tm_port={bundle.tm_port}"
-        )
-        print(f"[INFO] Starting CARLA: {' '.join(cmd)}")
+        cmd.extend(_resolve_carla_launch_args(self.extra_args, self.env))
+        if not self.quiet:
+            print(
+                f"[CARLA START] host={self.host} port={bundle.port} tm_port={bundle.tm_port}"
+            )
+            print(f"[INFO] Starting CARLA: {' '.join(cmd)}")
         log_carla_event(
             "CARLA_LAUNCH_BEGIN",
             process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
@@ -4339,6 +5223,11 @@ class CarlaProcessManager:
             )
             self._server_log_handle.flush()
             popen_kwargs["stdout"] = self._server_log_handle
+            popen_kwargs["stderr"] = subprocess.STDOUT
+        elif self.quiet:
+            # Pool/dashboard mode wants one high-level status line per CARLA,
+            # not the wrapper's full startup chatter on stdout/stderr.
+            popen_kwargs["stdout"] = subprocess.DEVNULL
             popen_kwargs["stderr"] = subprocess.STDOUT
 
         try:
@@ -4389,6 +5278,11 @@ class CarlaProcessManager:
                 startup_timeout_s=CARLA_STARTUP_TIMEOUT,
                 returncode=returncode,
             )
+            self._last_launch_failure = (
+                f"CARLA failed to open port {bundle.port} within "
+                f"{CARLA_STARTUP_TIMEOUT:.0f}s"
+                + (f" (exit_code={returncode})." if returncode is not None else ".")
+            )
             self.stop(timeout=5.0)
             return False
 
@@ -4396,7 +5290,7 @@ class CarlaProcessManager:
         # declaring startup successful — opening the socket does not mean
         # CARLA's UE4 RPC server is ready to service get_world() calls.
         rpc_timeout = max(30.0, CARLA_STARTUP_TIMEOUT)
-        if not wait_for_carla_rpc_ready(self.host, bundle.port, timeout=rpc_timeout):
+        if not wait_for_carla_rpc_ready(self.host, bundle.port, timeout=rpc_timeout, quiet=self.quiet):
             print(
                 f"[WARN] CARLA port {bundle.port} is open but RPC not ready "
                 f"within {rpc_timeout:.0f}s; treating as failed startup."
@@ -4409,6 +5303,36 @@ class CarlaProcessManager:
                 tm_port=bundle.tm_port,
                 pid=None if self.process is None else self.process.pid,
                 rpc_timeout_s=rpc_timeout,
+            )
+            self._last_launch_failure = (
+                f"CARLA port {bundle.port} is open but RPC not ready within "
+                f"{rpc_timeout:.0f}s."
+            )
+            self.stop(timeout=5.0)
+            return False
+        gpu_binding_ok, gpu_binding_reason = wait_for_carla_gpu_binding(
+            self.process,
+            self.env,
+            timeout=45.0,
+            quiet=self.quiet,
+        )
+        if not gpu_binding_ok:
+            print(
+                "[WARN] CARLA reached RPC readiness but failed GPU placement "
+                f"validation: {gpu_binding_reason}"
+            )
+            log_carla_event(
+                "CARLA_LAUNCH_GPU_BIND_FAIL",
+                process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
+                host=self.host,
+                port=bundle.port,
+                tm_port=bundle.tm_port,
+                pid=None if self.process is None else self.process.pid,
+                reason=gpu_binding_reason,
+            )
+            self._last_launch_failure = (
+                "CARLA reached RPC readiness but failed GPU placement validation: "
+                f"{gpu_binding_reason}"
             )
             self.stop(timeout=5.0)
             return False
@@ -4470,10 +5394,11 @@ class CarlaProcessManager:
         elif self._cleanup_stale_port_owners(desired_bundle, grace_s=10.0) and are_ports_available(
             self.host, desired_ports
         ):
-            print(
-                "[INFO] Freed stale CARLA listener(s) on "
-                f"{desired_bundle.port}/{desired_bundle.tm_port} before startup."
-            )
+            if not self.quiet:
+                print(
+                    "[INFO] Freed stale CARLA listener(s) on "
+                    f"{desired_bundle.port}/{desired_bundle.tm_port} before startup."
+                )
             candidate_bundles.append(desired_bundle)
 
         additional_needed = max(0, int(self.port_tries) - len(candidate_bundles))
@@ -4497,7 +5422,7 @@ class CarlaProcessManager:
 
         last_error = None
         for bundle in candidate_bundles:
-            if bundle != desired_bundle:
+            if bundle != desired_bundle and not self.quiet:
                 print(
                     "[INFO] CARLA port set is busy or failed previously. Switching from "
                     f"{desired_bundle.port}/{desired_bundle.tm_port} to "
@@ -4514,10 +5439,15 @@ class CarlaProcessManager:
                 )
                 _perf_add("carla_start_time_s", time.monotonic() - start_t)
                 return PortBundle(port=self.port, tm_port=self.tm_port)
-            last_error = (
-                f"CARLA failed to open RPC port on {bundle.port}/{bundle.tm_port}. "
-                "Trying the next free port set."
-            )
+            bundle_tag = f"{bundle.port}/{bundle.tm_port}"
+            reason = self._last_launch_failure
+            if reason:
+                last_error = f"CARLA launch on {bundle_tag} failed: {reason}"
+            else:
+                last_error = (
+                    f"CARLA failed to open RPC port on {bundle_tag}. "
+                    "Trying the next free port set."
+                )
             wait_for_port_close(self.host, bundle.port, timeout=5.0)
 
         _perf_add("carla_start_time_s", time.monotonic() - start_t)
@@ -4546,7 +5476,8 @@ class CarlaProcessManager:
                 self._server_log_handle.close()
                 self._server_log_handle = None
         elif self.process.poll() is None:
-            print("[INFO] Stopping CARLA...")
+            if not self.quiet:
+                print("[INFO] Stopping CARLA...")
             terminate_process_tree(self.process, grace_s=timeout)
             try:
                 self.process.wait(timeout=timeout)
@@ -4871,16 +5802,86 @@ _active_crosswalk_worker: "UCLAV2CrosswalkWorker | None" = None
 _active_colmdriver_vllm_manager: ColmDriverVLLMManager | None = None
 _active_monitored_runners: set[MonitoredSubprocessRunner] = set()
 _active_monitored_runners_lock = threading.Lock()
+_active_interrupt_result_roots: tuple[Path, ...] = ()
+_active_interrupt_result_roots_lock = threading.Lock()
+_interrupt_delete_active_results = threading.Event()
 _signal_handlers_installed = False
 
 
-def _cleanup_active_managers() -> None:
+def set_active_interrupt_result_roots(result_roots: Sequence[Path | str]) -> None:
+    normalized: list[Path] = []
+    for root in result_roots:
+        try:
+            normalized_root = Path(root).expanduser().resolve()
+        except Exception:
+            continue
+        if normalized_root not in normalized:
+            normalized.append(normalized_root)
+    with _active_interrupt_result_roots_lock:
+        global _active_interrupt_result_roots
+        _active_interrupt_result_roots = tuple(normalized)
+
+
+def clear_active_interrupt_result_roots() -> None:
+    global _active_interrupt_result_roots
+    with _active_interrupt_result_roots_lock:
+        _active_interrupt_result_roots = ()
+
+
+def interrupt_delete_active_results_requested() -> bool:
+    return _interrupt_delete_active_results.is_set()
+
+
+def _delete_active_interrupt_result_roots() -> None:
+    global _active_interrupt_result_roots
+    with _active_interrupt_result_roots_lock:
+        roots = sorted(
+            _active_interrupt_result_roots,
+            key=lambda path: (-len(path.parts), str(path)),
+        )
+        _active_interrupt_result_roots = ()
+    for root in roots:
+        if not root.exists():
+            continue
+        print(f"[INFO] Removing interrupted result directory: {root}")
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _cleanup_active_managers(
+    *,
+    interrupt_children: bool = False,
+    delete_active_results: bool = False,
+) -> None:
     global _active_carla_manager, _active_crosswalk_worker, _active_colmdriver_vllm_manager
     log_carla_event("LAUNCHER_CLEANUP_BEGIN", process_name=RUN_CUSTOM_EVAL_PROCESS_NAME)
     with _active_monitored_runners_lock:
         active_runners = list(_active_monitored_runners)
-    for runner in active_runners:
-        runner.terminate("[INFO] Stopping active child process during launcher shutdown.")
+    # Terminate children in parallel.  Serial termination was taking up to
+    # ``15s * N`` during a Ctrl-C because ``terminate_process_tree`` waits
+    # SIGTERM -> 15s grace -> SIGKILL per process.  With 10+ active pool
+    # grandchildren the interactive teardown looked hung for minutes.
+    if active_runners:
+        threads = []
+        for runner in active_runners:
+            stop_fn = runner.interrupt if interrupt_children else runner.terminate
+            reason = (
+                "[INFO] Interrupting active child process during launcher shutdown."
+                if interrupt_children
+                else "[INFO] Stopping active child process during launcher shutdown."
+            )
+            t = threading.Thread(
+                target=stop_fn,
+                args=(reason,),
+                name=f"cleanup-{id(runner):x}",
+                daemon=True,
+            )
+            t.start()
+            threads.append(t)
+        # Bound the total wait so a hung terminate doesn't pin the launcher.
+        deadline = time.monotonic() + 20.0
+        for t in threads:
+            remaining = max(0.1, deadline - time.monotonic())
+            t.join(timeout=remaining)
     if _active_carla_manager is not None:
         _active_carla_manager.stop()
         _active_carla_manager = None
@@ -4890,10 +5891,786 @@ def _cleanup_active_managers() -> None:
     if _active_colmdriver_vllm_manager is not None:
         _active_colmdriver_vllm_manager.stop()
         _active_colmdriver_vllm_manager = None
+    if delete_active_results:
+        _delete_active_interrupt_result_roots()
     log_carla_event("LAUNCHER_CLEANUP_END", process_name=RUN_CUSTOM_EVAL_PROCESS_NAME)
 
 
 atexit.register(_cleanup_active_managers)
+
+
+# ─── EMERGENCY THREAD-LEAK / CARLA-COLLAPSE RESTART GUARD ─────────────────
+#
+# Problem this addresses (observed live):
+#   * Master accumulates rpclib threads from leaked carla.Client objects (~3
+#     threads per evicted client). Even after the probe-cache patch, the
+#     evict-on-failure path still leaks ~3 threads per recycled CARLA.
+#   * Once master crosses ~25k threads, the GIL pressure starves the master's
+#     own RPC verify-thread, so newly spawned CARLAs fail their 180s readiness
+#     probe even though they're healthy. CARLAs get recycled, more clients
+#     created and evicted, more threads leaked. Positive feedback loop.
+#   * Net effect: the pool collapses (CARLAs drop to 0) and the master
+#     eventually crashes uncontrollably from hitting Linux's per-process
+#     thread cap (~32k). Every in-flight scenario is orphaned on crash.
+#
+# This guard detects the cascade early and proactively restarts the master
+# cleanly — kills all OUR descendants (not other masters), waits for VRAM
+# on OUR GPUs to clear, then execvps the same command. Behaves as if the
+# operator had Ctrl+C'd and re-launched. Already-completed scenarios are
+# skipped on the next run via result_roots_have_completed_outcomes.
+
+class EmergencyGuard:
+    """Self-restart watchdog for the master process.
+
+    Runs as a daemon thread. Monitors:
+      1. Total thread count of this master process (CRITICAL: hard limit).
+      2. Sustained-elevated thread count (WARN: must hold for N minutes).
+      3. carla.Client probe-cache eviction rate (sustained recycle storm).
+
+    On trigger, executes the kill-and-respawn sequence:
+      1. SIGINT all descendants (graceful; leaderboards write results.json
+         via their existing handlers).
+      2. 30s grace period.
+      3. SIGKILL anything still alive.
+      4. Wait for VRAM on this master's GPUs to drop near baseline (90s
+         timeout).
+      5. ``os.execvp`` ourselves with the original argv.
+
+    Disabled when ``COLMDRIVER_EMERGENCY_GUARD_DISABLE=1`` is set.
+    Restart count is capped (default 5) to prevent infinite loops if the
+    leak source is something the restart can't clear.
+    """
+
+    # Defaults; all overridable via env vars below.
+    # Last run timeline mapping (b2d_zoo): 21K threads correlated with 22
+    # CARLAs (-24% from peak) and ~88% success — DEGRADED but FUNCTIONAL.
+    # The cascade accelerated between 21K-25K threads, with master crashing
+    # uncontrollably around 32K (Linux per-process thread cap).
+    # WARN=22K gives ~5 min of runway before cascade hardens; CRITICAL=25K
+    # is the last safety net. The other detectors (evict-storm,
+    # CARLA-collapse, CARLA-floor) typically fire earlier and trigger
+    # restart before threads cross WARN — so these thresholds are really
+    # just backstop for cases where those detectors miss.
+    DEFAULT_THREAD_CRITICAL = 25000     # immediate trigger
+    DEFAULT_THREAD_WARN = 22000         # sustained trigger (bumped from 20k)
+    DEFAULT_SUSTAINED_S = 300           # 5 min sustained for warn
+    DEFAULT_EVICT_RATE_PER_MIN = 20     # sustained recycle-storm trigger
+    DEFAULT_EVICT_RATE_WINDOW_S = 300   # 5 min window for evict rate
+    DEFAULT_CHECK_INTERVAL_S = 30
+    DEFAULT_KILL_GRACE_S = 30           # SIGINT → SIGKILL grace
+    DEFAULT_VRAM_DRAIN_TIMEOUT_S = 90   # how long to wait for GPUs to clear
+    DEFAULT_MAX_RESTART_COUNT = 5
+    # CARLA-collapse detector. Threshold informed by observed cascade:
+    #   * b2d_zoo went 29 → 22 over 58 min in healthy slowdown phase (-24%)
+    #   * then 22 → 13 over 18 min in actual cascade (-41%)
+    # We need a window long enough to contain both the peak (29) and the
+    # cascade trough (13), otherwise the rolling peak shrinks alongside
+    # the cascade and the ratio test never trips. Empirically, the cascade
+    # observed here unfolded over ~75 min total — so 90 min window keeps
+    # peak in scope. Healthy slow decline of -24% over 60 min stays well
+    # above the 50% trigger.
+    DEFAULT_CARLA_DROP_RATIO = 0.5      # current < 50% of trailing-window peak
+    DEFAULT_CARLA_DROP_WINDOW_S = 5400  # trailing 90 min window for peak
+    DEFAULT_CARLA_DROP_SUSTAINED_S = 300  # condition must hold 5 min
+    DEFAULT_CARLA_DROP_MIN_PEAK = 5     # ignore noise when small absolute pool
+    # CARLA-floor detector. If we have fewer running CARLAs than GPUs
+    # assigned to us (after a warmup grace period), the pool is severely
+    # depleted. Catches collapse cases where the trailing peak hadn't
+    # built up enough for the drop-ratio detector to fire.
+    DEFAULT_CARLA_FLOOR_PER_GPU = 1     # min CARLAs per GPU
+    DEFAULT_CARLA_FLOOR_WARMUP_S = 600  # 10 min warmup grace (CARLA spawn is slow)
+    DEFAULT_CARLA_FLOOR_SUSTAINED_S = 300  # must hold 5 min
+    # Bulletproof watchdog: a detached helper subprocess that kicks in
+    # after this delay if we somehow haven't restarted ourselves cleanly.
+    DEFAULT_WATCHDOG_DELAY_S = 300      # 5 min absolute deadline
+    RESTART_COUNT_ENV = "_COLMDRIVER_EMERGENCY_RESTART_COUNT"
+
+    def __init__(self) -> None:
+        self.thread_critical = int(os.environ.get(
+            "COLMDRIVER_EMERGENCY_THREAD_CRITICAL", self.DEFAULT_THREAD_CRITICAL))
+        self.thread_warn = int(os.environ.get(
+            "COLMDRIVER_EMERGENCY_THREAD_WARN", self.DEFAULT_THREAD_WARN))
+        self.sustained_s = float(os.environ.get(
+            "COLMDRIVER_EMERGENCY_SUSTAINED_S", self.DEFAULT_SUSTAINED_S))
+        self.evict_rate_per_min = float(os.environ.get(
+            "COLMDRIVER_EMERGENCY_EVICT_RATE_PER_MIN", self.DEFAULT_EVICT_RATE_PER_MIN))
+        self.evict_window_s = float(os.environ.get(
+            "COLMDRIVER_EMERGENCY_EVICT_WINDOW_S", self.DEFAULT_EVICT_RATE_WINDOW_S))
+        self.check_interval_s = float(os.environ.get(
+            "COLMDRIVER_EMERGENCY_CHECK_INTERVAL_S", self.DEFAULT_CHECK_INTERVAL_S))
+        self.kill_grace_s = float(os.environ.get(
+            "COLMDRIVER_EMERGENCY_KILL_GRACE_S", self.DEFAULT_KILL_GRACE_S))
+        self.vram_drain_timeout_s = float(os.environ.get(
+            "COLMDRIVER_EMERGENCY_VRAM_DRAIN_TIMEOUT_S", self.DEFAULT_VRAM_DRAIN_TIMEOUT_S))
+        self.max_restart_count = int(os.environ.get(
+            "COLMDRIVER_EMERGENCY_MAX_RESTARTS", self.DEFAULT_MAX_RESTART_COUNT))
+
+        self.carla_drop_ratio = float(os.environ.get(
+            "COLMDRIVER_EMERGENCY_CARLA_DROP_RATIO", self.DEFAULT_CARLA_DROP_RATIO))
+        self.carla_drop_window_s = float(os.environ.get(
+            "COLMDRIVER_EMERGENCY_CARLA_DROP_WINDOW_S", self.DEFAULT_CARLA_DROP_WINDOW_S))
+        self.carla_drop_sustained_s = float(os.environ.get(
+            "COLMDRIVER_EMERGENCY_CARLA_DROP_SUSTAINED_S", self.DEFAULT_CARLA_DROP_SUSTAINED_S))
+        self.carla_drop_min_peak = int(os.environ.get(
+            "COLMDRIVER_EMERGENCY_CARLA_DROP_MIN_PEAK", self.DEFAULT_CARLA_DROP_MIN_PEAK))
+        self.carla_floor_per_gpu = float(os.environ.get(
+            "COLMDRIVER_EMERGENCY_CARLA_FLOOR_PER_GPU", self.DEFAULT_CARLA_FLOOR_PER_GPU))
+        self.carla_floor_warmup_s = float(os.environ.get(
+            "COLMDRIVER_EMERGENCY_CARLA_FLOOR_WARMUP_S", self.DEFAULT_CARLA_FLOOR_WARMUP_S))
+        self.carla_floor_sustained_s = float(os.environ.get(
+            "COLMDRIVER_EMERGENCY_CARLA_FLOOR_SUSTAINED_S", self.DEFAULT_CARLA_FLOOR_SUSTAINED_S))
+        self.watchdog_delay_s = float(os.environ.get(
+            "COLMDRIVER_EMERGENCY_WATCHDOG_DELAY_S", self.DEFAULT_WATCHDOG_DELAY_S))
+
+        self._thread_history: list[tuple[float, int]] = []  # (ts, count)
+        self._evict_history: list[tuple[float, int]] = []   # (ts, evicts)
+        self._carla_history: list[tuple[float, int]] = []   # (ts, count)
+        self._carla_floor_first_seen_at: float | None = None  # first time below floor
+        self._carla_drop_first_seen_at: float | None = None   # first time below drop threshold
+        self._guard_started_at = time.monotonic()
+        self._stop_event = threading.Event()
+        self._restart_in_progress = False
+        self._our_gpus: set[int] = set()  # populated from --gpus arg
+        self._our_argv = list(sys.argv)
+        self._restart_count = int(os.environ.get(self.RESTART_COUNT_ENV, "0"))
+
+    # --- public API ---
+
+    def start(self, gpus: Iterable[int] | None = None) -> None:
+        """Start the monitoring daemon. ``gpus`` is the set of GPU indices
+        owned by this master (used to verify VRAM drain on emergency)."""
+        if os.environ.get("COLMDRIVER_EMERGENCY_GUARD_DISABLE", "").lower() in ("1", "true", "yes"):
+            print("[EMERGENCY_GUARD] disabled via COLMDRIVER_EMERGENCY_GUARD_DISABLE", flush=True)
+            return
+        if self._restart_count > self.max_restart_count:
+            print(
+                f"[EMERGENCY_GUARD] max restart count ({self.max_restart_count}) "
+                "exceeded; not arming further. Manual intervention required.",
+                flush=True,
+            )
+            return
+        if gpus is not None:
+            self._our_gpus = {int(g) for g in gpus}
+        self._our_argv = list(sys.argv)
+        if self._restart_count > 0:
+            print(
+                f"[EMERGENCY_GUARD] master started after {self._restart_count} "
+                f"emergency restart(s)",
+                flush=True,
+            )
+        threading.Thread(
+            target=self._monitor_loop,
+            daemon=True,
+            name="emergency_guard",
+        ).start()
+        print(
+            f"[EMERGENCY_GUARD] armed: thread_critical={self.thread_critical} "
+            f"thread_warn={self.thread_warn} sustained={self.sustained_s:.0f}s "
+            f"evict_rate={self.evict_rate_per_min:.0f}/min "
+            f"our_gpus={sorted(self._our_gpus) if self._our_gpus else 'all'}",
+            flush=True,
+        )
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    # --- monitoring ---
+
+    def _monitor_loop(self) -> None:
+        while not self._stop_event.wait(self.check_interval_s):
+            if self._restart_in_progress:
+                continue
+            try:
+                trigger = self._check_triggers()
+                if trigger:
+                    self._restart_in_progress = True
+                    print(
+                        f"\n[EMERGENCY_GUARD] *** TRIGGERED *** reason: {trigger}",
+                        flush=True,
+                    )
+                    self._do_emergency_restart(reason=trigger)
+            except Exception:
+                import traceback as _tb
+                print(
+                    f"[EMERGENCY_GUARD] monitor loop error:\n{_tb.format_exc()}",
+                    flush=True,
+                )
+
+    def _current_thread_count(self) -> int:
+        try:
+            return len(os.listdir(f"/proc/{os.getpid()}/task"))
+        except Exception:
+            return -1
+
+    def _current_evict_count(self) -> int:
+        try:
+            with _CARLA_PROBE_CLIENT_LOCK:
+                return int(_CARLA_PROBE_CACHE_STATS.get("evictions", 0))
+        except Exception:
+            return 0
+
+    def _check_triggers(self) -> str | None:
+        now = time.monotonic()
+        threads = self._current_thread_count()
+
+        # 1. Critical: hard ceiling, no sustained check needed.
+        if threads >= self.thread_critical:
+            return f"thread_count_critical (master_threads={threads} >= {self.thread_critical})"
+
+        # 2. Warn-sustained: thread count above warn for >= sustained_s.
+        self._thread_history.append((now, threads))
+        cutoff = now - self.sustained_s
+        self._thread_history = [(t, c) for t, c in self._thread_history if t > cutoff]
+        if (
+            len(self._thread_history) >= 5
+            and self._thread_history[0][0] <= now - self.sustained_s + self.check_interval_s + 1
+            and all(c >= self.thread_warn for _, c in self._thread_history)
+        ):
+            return (f"thread_count_sustained_warn (master_threads stayed >= "
+                    f"{self.thread_warn} for {self.sustained_s:.0f}s; current={threads})")
+
+        # 3. Probe-eviction storm: rate over evict_window_s.
+        evicts = self._current_evict_count()
+        self._evict_history.append((now, evicts))
+        cutoff = now - self.evict_window_s
+        self._evict_history = [(t, e) for t, e in self._evict_history if t > cutoff]
+        if len(self._evict_history) >= 2:
+            t0, e0 = self._evict_history[0]
+            t1, e1 = self._evict_history[-1]
+            dt = t1 - t0
+            de = e1 - e0
+            if dt >= max(60.0, self.evict_window_s / 2):
+                rate = de / dt * 60.0
+                if rate >= self.evict_rate_per_min:
+                    return (f"probe_evict_storm (rate={rate:.1f}/min over "
+                            f"{dt:.0f}s window; threshold={self.evict_rate_per_min:.0f}/min)")
+
+        # 4. CARLA-collapse: pool size dropped below ratio of trailing-window
+        # peak. Catches cascade where existing CARLAs die faster than
+        # replacements spawn. Threshold (50%) calibrated against observed
+        # b2d_zoo cascade (29 → 13 over ~75 min, post-peak phase ~41% in 18 min).
+        carla_count = self._count_running_carlas()
+        self._carla_history.append((now, carla_count))
+        cutoff = now - self.carla_drop_window_s
+        self._carla_history = [(t, c) for t, c in self._carla_history if t > cutoff]
+        if self._carla_history:
+            peak = max(c for _, c in self._carla_history)
+            if (
+                peak >= self.carla_drop_min_peak
+                and carla_count < peak * self.carla_drop_ratio
+            ):
+                if self._carla_drop_first_seen_at is None:
+                    self._carla_drop_first_seen_at = now
+                elif now - self._carla_drop_first_seen_at >= self.carla_drop_sustained_s:
+                    return (f"carla_collapse (current={carla_count} < "
+                            f"{self.carla_drop_ratio:.0%} of peak={peak} for "
+                            f"{now - self._carla_drop_first_seen_at:.0f}s)")
+            else:
+                self._carla_drop_first_seen_at = None
+
+        # 5. CARLA-floor: fewer than N CARLAs per assigned GPU, after warmup.
+        # Catches collapse cases where the trailing peak hadn't built up enough
+        # for the drop-ratio detector. Warmup grace prevents firing during
+        # initial CARLA spawn (which is slow — 30-60s per instance).
+        elapsed_since_arm = now - self._guard_started_at
+        if elapsed_since_arm >= self.carla_floor_warmup_s and self._our_gpus:
+            floor = max(1, int(len(self._our_gpus) * self.carla_floor_per_gpu))
+            if carla_count < floor:
+                if self._carla_floor_first_seen_at is None:
+                    self._carla_floor_first_seen_at = now
+                elif now - self._carla_floor_first_seen_at >= self.carla_floor_sustained_s:
+                    return (f"carla_floor (running_carlas={carla_count} < "
+                            f"floor={floor} ({len(self._our_gpus)} GPUs * "
+                            f"{self.carla_floor_per_gpu:.1f}) for "
+                            f"{now - self._carla_floor_first_seen_at:.0f}s)")
+            else:
+                self._carla_floor_first_seen_at = None
+
+        return None
+
+    def _master_ancestor_pids(self) -> set[int]:
+        """Return ``{master_pid} ∪ all parents of master up to pid 1``.
+
+        Used to keep the GPU sweep from killing the master itself or the
+        shell/tmux/login-session that launched us.  Ancestors normally
+        don't allocate GPU memory, so this is paranoia-good — but cheap.
+        """
+        out: set[int] = {os.getpid()}
+        cur = os.getpid()
+        for _ in range(20):  # safety cap on depth
+            try:
+                with open(f"/proc/{cur}/stat") as f:
+                    line = f.read()
+            except OSError:
+                break
+            rparen = line.rfind(")")
+            if rparen < 0:
+                break
+            rest = line[rparen + 1:].strip().split()
+            try:
+                ppid = int(rest[1])
+            except (IndexError, ValueError):
+                break
+            if ppid <= 1:
+                break
+            out.add(ppid)
+            cur = ppid
+        return out
+
+    def _enumerate_kill_targets_on_our_gpus(self) -> set[int]:
+        """Return all PIDs holding VRAM on this master's GPUs that are
+        safe to kill — i.e. owned by our UID and not the master/ancestors.
+
+        Uses ``nvidia-smi --query-compute-apps`` which lists every
+        VRAM-resident process regardless of parent.  This catches:
+          - CARLAs reparented to init by CarlaUE4.sh's GDB-detach RPC
+            patch (the orphan-by-design case)
+          - vLLM workers, perception models, leaderboard subprocs that
+            live on our GPUs but somehow detached from the master tree
+          - any other compute app we spawned that's still using GPU mem
+
+        Filters:
+          - Restricted to ``self._our_gpus`` (resolved by GPU UUID) so
+            sibling masters on other GPUs are never touched
+          - UID must match ``os.getuid()`` so we never kill another
+            user's processes on shared GPUs
+          - Master PID and master ancestors are excluded (so we don't
+            kill ourselves or our launching shell)
+        """
+        if not self._our_gpus:
+            return set()
+        try:
+            uuid_out = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=index,uuid",
+                 "--format=csv,noheader"],
+                text=True,
+                timeout=10.0,
+            )
+        except Exception:
+            return set()
+        our_uuids: set[str] = set()
+        for line in uuid_out.splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 2:
+                continue
+            try:
+                idx = int(parts[0])
+            except ValueError:
+                continue
+            if idx in self._our_gpus:
+                our_uuids.add(parts[1].lower())
+        if not our_uuids:
+            return set()
+        try:
+            apps_out = subprocess.check_output(
+                ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,process_name",
+                 "--format=csv,noheader"],
+                text=True,
+                timeout=10.0,
+            )
+        except Exception:
+            return set()
+        protected = self._master_ancestor_pids()
+        our_uid = os.getuid()
+        pids: set[int] = set()
+        for line in apps_out.splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                continue
+            uuid = parts[0].lower()
+            if uuid not in our_uuids:
+                continue
+            try:
+                pid = int(parts[1])
+            except ValueError:
+                continue
+            if pid in protected:
+                continue
+            try:
+                if os.stat(f"/proc/{pid}").st_uid != our_uid:
+                    continue
+            except OSError:
+                # Process gone or unreadable — skip rather than guess.
+                continue
+            pids.add(pid)
+        return pids
+
+    def _count_running_carlas(self) -> int:
+        """Count CARLAs the pool considers alive.
+
+        Reads ``CarlaPool``'s ``_instances`` bookkeeping via the module
+        registry rather than walking /proc.  CARLAs spawned via
+        ``CarlaUE4.sh`` under the GDB-detach RPC patch are reparented to
+        init at birth — they are not descendants of the master, so the
+        old descendant-walking implementation always returned 0 (which
+        made the carla_floor trigger fire spuriously after warmup
+        regardless of how many CARLAs were running).
+
+        Returns 0 if the pool hasn't been constructed yet (early warmup);
+        the warmup grace makes that a non-trigger.
+        """
+        try:
+            from tools import _carla_pool as _cp
+        except Exception:
+            return 0
+        pool = _cp.get_active_pool()
+        if pool is None:
+            return 0
+        try:
+            return pool.count_alive_instances()
+        except Exception:
+            return 0
+
+    # --- restart sequence ---
+
+    def _do_emergency_restart(self, *, reason: str) -> None:
+        # Drop a sentinel so post-mortem analysis sees what triggered.
+        try:
+            sentinel = Path("/tmp") / f"emergency_restart_{os.getpid()}_{int(time.time())}.log"
+            sentinel.write_text(
+                f"timestamp_unix={int(time.time())}\n"
+                f"pid={os.getpid()}\n"
+                f"reason={reason}\n"
+                f"thread_count={self._current_thread_count()}\n"
+                f"evict_count={self._current_evict_count()}\n"
+                f"argv={self._our_argv}\n"
+                f"restart_count_so_far={self._restart_count}\n"
+            )
+            print(f"[EMERGENCY_GUARD] sentinel: {sentinel}", flush=True)
+        except Exception:
+            pass
+
+        # Step 0: spawn a bulletproof watchdog subprocess as last-resort
+        # recovery in case the in-process kill-and-execvp sequence below
+        # hangs (e.g. our main thread is in D state, execvp() never returns,
+        # SIGKILL'd descendants stuck in CUDA driver, etc.).
+        # The watchdog is a detached Python helper that:
+        #   1. Sleeps watchdog_delay_s (default 5 min)
+        #   2. Checks if we (the original master PID) still exist
+        #   3. If yes -> SIGKILLs us and all our descendants, then re-execs
+        #      the original command itself
+        #   4. If no (we successfully execvp'd by then) -> exits cleanly
+        # Detached via start_new_session so it survives our death.
+        try:
+            self._spawn_recovery_watchdog()
+        except Exception as _wd_exc:
+            print(
+                f"[EMERGENCY_GUARD] failed to spawn recovery watchdog "
+                f"({_wd_exc}); proceeding with in-process restart anyway",
+                flush=True,
+            )
+
+        # Step 1: pause the pool's start_instance so the main loop can't
+        # spawn fresh CARLAs while we're tearing the old ones down.  Without
+        # this, VRAM ascends during the drain wait and the new master
+        # execvp's into a polluted state.
+        try:
+            from tools import _carla_pool as _cp
+            _live_pool = _cp.get_active_pool()
+        except Exception:
+            _live_pool = None
+        if _live_pool is not None:
+            try:
+                _live_pool.pause_starts()
+                print(
+                    "[EMERGENCY_GUARD] pool starts paused",
+                    flush=True,
+                )
+            except Exception as _pp_exc:
+                print(
+                    f"[EMERGENCY_GUARD] pool.pause_starts failed ({_pp_exc})",
+                    flush=True,
+                )
+
+        # Step 2: build the kill set.  The naive "descendants of master"
+        # approach misses CARLAs reparented to init by CarlaUE4.sh's
+        # GDB-detach RPC patch.  Union three signals so the kill is
+        # robust to process-tree topology:
+        #   (a) /proc descendants of the master (catches per-scenario
+        #       wrappers, leaderboard subprocs, intermediate bash shells,
+        #       and direct-launch CARLAs)
+        #   (b) PIDs the pool itself tracks via PoolInstance.manager
+        #       (catches CarlaUE4.sh wrappers even if their parent chain
+        #       has been disturbed)
+        #   (c) nvidia-smi compute apps on our GPUs that we own — the
+        #       broad sweep, filtered by UID==self and excluding master+
+        #       ancestors.  Catches GDB-detached CARLA binaries plus any
+        #       vLLM/perception/leaderboard processes that may have
+        #       detached from our tree but still occupy our GPUs.
+        descendants = _enumerate_descendants(os.getpid())
+        pool_pids: set[int] = set()
+        if _live_pool is not None:
+            try:
+                pool_pids = {pid for _iid, pid in _live_pool.live_instance_pids()}
+            except Exception:
+                pool_pids = set()
+        gpu_pids = self._enumerate_kill_targets_on_our_gpus()
+        kill_set = (descendants | pool_pids | gpu_pids) - {os.getpid()}
+        print(
+            f"[EMERGENCY_GUARD] kill-set: {len(kill_set)} pid(s) "
+            f"(descendants={len(descendants)}, pool_tracked={len(pool_pids)}, "
+            f"on_our_gpus={len(gpu_pids)})",
+            flush=True,
+        )
+
+        # Step 3: SIGINT all targets (graceful → leaderboards write
+        # results.json via their existing handlers).
+        import signal as _sig
+        sigint_sent = 0
+        for pid in kill_set:
+            try:
+                os.kill(pid, _sig.SIGINT)
+                sigint_sent += 1
+            except (OSError, ProcessLookupError):
+                pass
+        print(
+            f"[EMERGENCY_GUARD] SIGINT sent to {sigint_sent} target(s); "
+            f"waiting {self.kill_grace_s:.0f}s for graceful exit",
+            flush=True,
+        )
+        time.sleep(self.kill_grace_s)
+
+        # Step 4: SIGKILL anything still alive — re-build the union, since
+        # in-flight children may have spawned grandchildren during the
+        # graceful window, and GPU-resident processes may have lost their
+        # parent (becoming new orphans) while we were sleeping.
+        survivors = (
+            _enumerate_descendants(os.getpid())
+            | (pool_pids if _live_pool is None else {
+                pid for _iid, pid in _live_pool.live_instance_pids()
+            })
+            | self._enumerate_kill_targets_on_our_gpus()
+        ) - {os.getpid()}
+        sigkill_sent = 0
+        for pid in survivors:
+            try:
+                os.kill(pid, _sig.SIGKILL)
+                sigkill_sent += 1
+            except (OSError, ProcessLookupError):
+                pass
+        if sigkill_sent:
+            print(
+                f"[EMERGENCY_GUARD] SIGKILL sent to {sigkill_sent} stragglers; "
+                "waiting 5s for OS reap",
+                flush=True,
+            )
+            time.sleep(5.0)
+        else:
+            print(
+                "[EMERGENCY_GUARD] all targets exited gracefully on SIGINT",
+                flush=True,
+            )
+
+        # Step 4: wait for VRAM on our GPUs to drain.
+        if self._our_gpus:
+            self._wait_for_vram_drain()
+
+        # Step 5: re-exec ourselves with original argv. Increment restart
+        # counter via env var so the new master knows its lineage.
+        new_env_count = self._restart_count + 1
+        os.environ[self.RESTART_COUNT_ENV] = str(new_env_count)
+        print(
+            f"[EMERGENCY_GUARD] re-execing master "
+            f"(restart_count={new_env_count}) — argv: {self._our_argv}",
+            flush=True,
+        )
+        # Use sys.executable to make sure we're using the same python
+        # binary even if argv[0] is just "tools/run_custom_eval.py".
+        try:
+            os.execvp(sys.executable, [sys.executable, *self._our_argv])
+        except Exception as exc:
+            print(
+                f"[EMERGENCY_GUARD] os.execvp failed ({exc}); falling back to "
+                "sys.exit(1) — operator must restart manually",
+                flush=True,
+            )
+            os._exit(1)
+
+    def _spawn_recovery_watchdog(self) -> None:
+        """Spawn a detached Python subprocess that will kill us and re-exec
+        the original command if we haven't done so cleanly within
+        ``watchdog_delay_s`` seconds.
+
+        This is the absolute last-resort recovery mechanism. It runs in a
+        completely separate process with its own session, so even if we die
+        in weird ways (D state, kernel hang, etc.), the watchdog still gets
+        scheduled by the kernel and can clean up.
+        """
+        # Build a self-contained Python helper. Inline so we don't depend
+        # on any external file (which could be modified or missing).
+        helper_src = f'''
+import os, sys, time, subprocess, signal as _sig, json
+ORIGINAL_PID = {os.getpid()}
+ORIGINAL_ARGV = {json.dumps(self._our_argv)}
+PYTHON_EXE = {json.dumps(sys.executable)}
+DELAY_S = {self.watchdog_delay_s}
+RESTART_COUNT_ENV = {json.dumps(self.RESTART_COUNT_ENV)}
+NEW_RESTART_COUNT = {self._restart_count + 1}
+LOG_PATH = "/tmp/emergency_watchdog_pid_{os.getpid()}.log"
+
+def log(msg):
+    try:
+        with open(LOG_PATH, "a") as f:
+            f.write(f"[{{time.time():.0f}}] {{msg}}\\n")
+    except Exception:
+        pass
+
+log(f"watchdog armed: waiting {{DELAY_S}}s before checking parent={{ORIGINAL_PID}}")
+time.sleep(DELAY_S)
+
+# Is the original master still alive?
+try:
+    os.kill(ORIGINAL_PID, 0)
+    parent_alive = True
+except (OSError, ProcessLookupError):
+    parent_alive = False
+
+if not parent_alive:
+    log("parent already gone (in-process restart succeeded); exiting")
+    sys.exit(0)
+
+log(f"parent {{ORIGINAL_PID}} STILL ALIVE after {{DELAY_S}}s; forcibly recovering")
+
+def descendants_of(root):
+    out = subprocess.check_output(["ps", "-eo", "pid,ppid"], text=True, errors="replace", timeout=10)
+    children_of = {{}}
+    for line in out.splitlines()[1:]:
+        parts = line.strip().split()
+        if len(parts) < 2: continue
+        try: pid, ppid = int(parts[0]), int(parts[1])
+        except: continue
+        children_of.setdefault(ppid, []).append(pid)
+    out_set = set()
+    queue = [root]
+    while queue:
+        cur = queue.pop()
+        for c in children_of.get(cur, []):
+            if c not in out_set and c != root:
+                out_set.add(c); queue.append(c)
+    return out_set
+
+# SIGKILL all descendants
+desc = descendants_of(ORIGINAL_PID)
+log(f"SIGKILL'ing {{len(desc)}} descendants")
+for pid in desc:
+    try: os.kill(pid, _sig.SIGKILL)
+    except: pass
+# SIGKILL the parent itself
+try: os.kill(ORIGINAL_PID, _sig.SIGKILL)
+except: pass
+time.sleep(5.0)
+
+# Wait briefly for VRAM cleanup (best effort)
+time.sleep(15.0)
+
+# Re-exec original command
+os.environ[RESTART_COUNT_ENV] = str(NEW_RESTART_COUNT)
+log(f"re-execing: {{PYTHON_EXE}} {{ORIGINAL_ARGV}}")
+try:
+    os.execvp(PYTHON_EXE, [PYTHON_EXE] + ORIGINAL_ARGV)
+except Exception as exc:
+    log(f"execvp failed: {{exc}}")
+    sys.exit(1)
+'''
+        # Write to /tmp so the subprocess has a stable file to import from
+        # if needed; we actually pass it via -c, no file needed.
+        # Run detached: own session, stdout/stderr to log file.
+        watchdog_log = open(f"/tmp/emergency_watchdog_pid_{os.getpid()}.stdout.log", "a")
+        wd_proc = subprocess.Popen(
+            [sys.executable, "-c", helper_src],
+            stdout=watchdog_log,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+        print(
+            f"[EMERGENCY_GUARD] recovery watchdog armed: pid={wd_proc.pid} "
+            f"deadline={self.watchdog_delay_s:.0f}s — will forcibly restart "
+            f"if our in-process sequence hangs",
+            flush=True,
+        )
+
+    def _wait_for_vram_drain(self) -> None:
+        """Poll nvidia-smi until our GPUs have most VRAM free, or timeout."""
+        deadline = time.monotonic() + self.vram_drain_timeout_s
+        while time.monotonic() < deadline:
+            try:
+                out = subprocess.check_output(
+                    [
+                        "nvidia-smi",
+                        "--query-gpu=index,memory.used",
+                        "--format=csv,noheader,nounits",
+                    ],
+                    text=True,
+                    timeout=10.0,
+                )
+            except Exception:
+                time.sleep(2.0)
+                continue
+            our_used: dict[int, int] = {}
+            for line in out.splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) < 2:
+                    continue
+                try:
+                    idx, used = int(parts[0]), int(parts[1])
+                except ValueError:
+                    continue
+                if idx in self._our_gpus:
+                    our_used[idx] = used
+            # Consider drained if all our GPUs have <2 GiB used.
+            if our_used and all(u < 2048 for u in our_used.values()):
+                print(
+                    f"[EMERGENCY_GUARD] VRAM drained on our GPUs: {our_used}",
+                    flush=True,
+                )
+                return
+            print(
+                f"[EMERGENCY_GUARD] still waiting on VRAM drain; "
+                f"used_per_gpu={our_used}",
+                flush=True,
+            )
+            time.sleep(5.0)
+        print(
+            "[EMERGENCY_GUARD] VRAM drain timeout exceeded; proceeding to "
+            "re-exec anyway (new master will see leftover VRAM)",
+            flush=True,
+        )
+
+
+def _enumerate_descendants(root_pid: int) -> set[int]:
+    """Return all descendant PIDs of ``root_pid`` (recursive). Uses ``ps``
+    rather than psutil so this works in environments without psutil
+    (e.g. the colmdrivermarco2 conda env). Excludes ``root_pid`` itself."""
+    try:
+        out = subprocess.check_output(
+            ["ps", "-eo", "pid,ppid"],
+            text=True,
+            errors="replace",
+            timeout=10.0,
+        )
+    except Exception:
+        return set()
+    children_of: dict[int, list[int]] = {}
+    for line in out.splitlines()[1:]:
+        parts = line.strip().split()
+        if len(parts) < 2:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children_of.setdefault(ppid, []).append(pid)
+    descendants: set[int] = set()
+    queue = [root_pid]
+    while queue:
+        cur = queue.pop()
+        for child in children_of.get(cur, []):
+            if child not in descendants and child != root_pid:
+                descendants.add(child)
+                queue.append(child)
+    return descendants
 
 
 def _install_signal_handlers() -> None:
@@ -4909,7 +6686,13 @@ def _install_signal_handlers() -> None:
             signal=signum,
             signal_name=getattr(signal.Signals(signum), "name", str(signum)),
         )
-        _cleanup_active_managers()
+        delete_active_results = signum == signal.SIGINT
+        if delete_active_results:
+            _interrupt_delete_active_results.set()
+        _cleanup_active_managers(
+            interrupt_children=delete_active_results,
+            delete_active_results=delete_active_results,
+        )
         if signum == signal.SIGINT:
             raise KeyboardInterrupt
         sys.exit(0)
@@ -5149,6 +6932,470 @@ def _query_all_gpu_memory_stats(
         if key == value.index
     }
 
+
+def _parse_nvidia_smi_gpu_uuid_rows(text: str) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 2:
+            continue
+        index = str(parts[0]).strip()
+        normalized_uuid = _normalize_gpu_uuid(parts[1])
+        if not index.isdigit() or not normalized_uuid:
+            continue
+        mapping[index] = normalized_uuid
+    return mapping
+
+
+def _query_nvidia_gpu_uuid_by_index(force_refresh: bool = False) -> Dict[str, str]:
+    global _GPU_UUID_BY_INDEX_CACHE
+    with _GPU_UUID_CACHE_LOCK:
+        if _GPU_UUID_BY_INDEX_CACHE is not None and not force_refresh:
+            return dict(_GPU_UUID_BY_INDEX_CACHE)
+    cmd = [
+        "nvidia-smi",
+        "--query-gpu=index,uuid",
+        "--format=csv,noheader",
+    ]
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=10.0)
+    except Exception:
+        return {}
+    mapping = _parse_nvidia_smi_gpu_uuid_rows(result.stdout)
+    with _GPU_UUID_CACHE_LOCK:
+        _GPU_UUID_BY_INDEX_CACHE = dict(mapping)
+    return mapping
+
+
+def _parse_vulkaninfo_summary_adapter_uuids(text: str) -> Dict[int, str]:
+    adapters: Dict[int, str] = {}
+    current_index: int | None = None
+    current_vendor = ""
+    current_type = ""
+    current_uuid = ""
+
+    def _flush_current() -> None:
+        if current_index is None:
+            return
+        if current_vendor.lower() != "0x10de":
+            return
+        if "DISCRETE_GPU" not in current_type.upper():
+            return
+        normalized_uuid = _normalize_gpu_uuid(current_uuid)
+        if not normalized_uuid:
+            return
+        adapters[int(current_index)] = normalized_uuid
+
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        match = re.match(r"GPU(\d+):\s*$", line)
+        if match is not None:
+            _flush_current()
+            current_index = int(match.group(1))
+            current_vendor = ""
+            current_type = ""
+            current_uuid = ""
+            continue
+        if current_index is None or "=" not in line:
+            continue
+        key, value = [part.strip() for part in line.split("=", 1)]
+        key_lower = key.lower()
+        if key_lower == "vendorid":
+            current_vendor = value
+        elif key_lower == "devicetype":
+            current_type = value
+        elif key_lower == "deviceuuid":
+            current_uuid = value
+    _flush_current()
+    return adapters
+
+
+def _query_vulkan_adapter_index_by_gpu_index(force_refresh: bool = False) -> Dict[str, int]:
+    global _VULKAN_ADAPTER_INDEX_BY_GPU_INDEX_CACHE
+    with _VULKAN_ADAPTER_CACHE_LOCK:
+        if _VULKAN_ADAPTER_INDEX_BY_GPU_INDEX_CACHE is not None and not force_refresh:
+            return dict(_VULKAN_ADAPTER_INDEX_BY_GPU_INDEX_CACHE)
+
+    nvidia_uuid_by_index = _query_nvidia_gpu_uuid_by_index(force_refresh=force_refresh)
+    if not nvidia_uuid_by_index:
+        return {}
+    try:
+        result = subprocess.run(
+            ["vulkaninfo", "--summary"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20.0,
+        )
+    except Exception:
+        return {}
+
+    adapter_uuid_map = _parse_vulkaninfo_summary_adapter_uuids(
+        "\n".join(part for part in (result.stdout, result.stderr) if part)
+    )
+    gpu_index_by_uuid = {
+        uuid: index
+        for index, uuid in nvidia_uuid_by_index.items()
+    }
+    mapping: Dict[str, int] = {}
+    for adapter_index, normalized_uuid in adapter_uuid_map.items():
+        gpu_index = gpu_index_by_uuid.get(normalized_uuid)
+        if gpu_index is not None:
+            mapping[gpu_index] = int(adapter_index)
+    if not mapping:
+        # Don't cache a failed/empty result - vulkaninfo may have been transiently
+        # unavailable.  Keeping the cache as None forces a retry on the next call
+        # instead of permanently falling back to the identity mapping.
+        print(
+            "[WARN] Vulkan adapter UUID mapping produced an empty result "
+            "(vulkaninfo may have failed or returned unexpected output). "
+            "Will retry on next CARLA launch."
+        )
+        return {}
+    with _VULKAN_ADAPTER_CACHE_LOCK:
+        _VULKAN_ADAPTER_INDEX_BY_GPU_INDEX_CACHE = dict(mapping)
+    return mapping
+
+
+def _query_gpu_bindings_by_pid_pmon(
+    min_mib: int = 0,
+) -> Dict[int, List[tuple[str, int]]] | None:
+    """Return {pid: [(gpu_index_str, fb_mib), ...]} via ``nvidia-smi pmon``.
+
+    Unlike ``--query-compute-apps``, pmon captures *all* process types
+    (C, G, C+G), making it suitable for detecting Vulkan-only GPU usage that
+    appears before a CUDA context is initialised.  This is important early in
+    CARLA startup when the UE4 Vulkan renderer has allocated framebuffer memory
+    but the CUDA stack has not yet initialised.
+
+    Args:
+        min_mib: Minimum framebuffer memory (MiB) required to include a
+            process entry.  Use a small positive value (e.g. 50) to filter
+            out the trivial G-type Xorg/compositor entries that appear on
+            every GPU when a display server is connected.
+    """
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "pmon", "-c", "1", "-s", "m"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+    except Exception:
+        return None
+    if not result.stdout:
+        return None
+    bindings: Dict[int, List[tuple[str, int]]] = {}
+    for raw_line in result.stdout.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        # pmon -s m columns: gpu_idx pid type fb_mib ccpm_mib command
+        if len(parts) < 4:
+            continue
+        try:
+            gpu_idx = str(int(parts[0]))
+            pid = int(parts[1])
+        except (ValueError, IndexError):
+            continue
+        if pid <= 0:
+            continue
+        try:
+            fb_mib = int(parts[3])
+        except (ValueError, IndexError):
+            fb_mib = 0
+        if fb_mib < min_mib:
+            continue
+        bindings.setdefault(pid, []).append((gpu_idx, fb_mib))
+    return bindings if bindings else None
+
+
+def _query_gpu_bindings_by_pid() -> Dict[int, List[tuple[str, int]]] | None:
+    gpu_uuid_by_index = _query_nvidia_gpu_uuid_by_index()
+    if not gpu_uuid_by_index:
+        return None
+    gpu_index_by_uuid = {
+        uuid: index
+        for index, uuid in gpu_uuid_by_index.items()
+    }
+    cmd = [
+        "nvidia-smi",
+        "--query-compute-apps=gpu_uuid,pid,used_gpu_memory",
+        "--format=csv,noheader,nounits",
+    ]
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=10.0)
+    except Exception:
+        return None
+    bindings: Dict[int, List[tuple[str, int]]] = {}
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 3:
+            continue
+        gpu_uuid, pid_text, used_text = parts[:3]
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        gpu_index = gpu_index_by_uuid.get(_normalize_gpu_uuid(gpu_uuid))
+        if gpu_index is None:
+            continue
+        try:
+            used_mib = int(str(used_text).split()[0])
+        except (IndexError, ValueError):
+            used_mib = 0
+        bindings.setdefault(pid, []).append((gpu_index, used_mib))
+    return bindings
+
+
+def _query_process_snapshot() -> Dict[int, tuple[int, str]]:
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid=,ppid=,args="],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+    except Exception:
+        return {}
+    snapshot: Dict[int, tuple[int, str]] = {}
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.rstrip()
+        if not line:
+            continue
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        snapshot[pid] = (ppid, parts[2])
+    return snapshot
+
+
+def _process_start_time_seconds(pid: int | None) -> float | None:
+    """Return the wall-clock start time (epoch seconds) of ``pid`` from
+    ``/proc/<pid>/stat``, or ``None`` if unavailable.
+
+    Used by the GPU-binding validator to discriminate CARLA processes
+    that belong to *this* launcher attempt from stale CARLA instances
+    that may still be holding VRAM.
+    """
+    if pid is None:
+        return None
+    try:
+        with open(f"/proc/{int(pid)}/stat", "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError:
+        return None
+    # comm (field 2) is parenthesised and may contain spaces/parens; skip to
+    # after the last ')'. Post-comm fields are space-separated; starttime
+    # (jiffies since boot) is the 20th field after comm, i.e. index 19.
+    idx = content.rfind(")")
+    if idx < 0:
+        return None
+    parts = content[idx + 1:].split()
+    try:
+        starttime_jiffies = int(parts[19])
+    except (IndexError, ValueError):
+        return None
+    try:
+        hz = os.sysconf("SC_CLK_TCK")
+    except (ValueError, OSError):
+        hz = 100
+    try:
+        with open("/proc/uptime", "r", encoding="utf-8") as f:
+            uptime_s = float(f.read().split()[0])
+    except Exception:
+        return None
+    boot_time = time.time() - uptime_s
+    return boot_time + (starttime_jiffies / float(hz or 100))
+
+
+def _recover_carla_pids_from_bindings(
+    bound_pids: "set[int]",
+    *,
+    launcher_start_time: float | None,
+    snapshot: Dict[int, tuple[int, str]] | None = None,
+) -> List[int]:
+    """Return PIDs from *bound_pids* whose ``ps`` args match CARLA tokens and
+    which started at/after *launcher_start_time* (with small slack).
+
+    This is the descendant-free fallback used when ``_candidate_carla_gpu_pids``
+    cannot reach the CARLA shipping binary through the ppid chain (e.g. the
+    wrapper exited and reparented the binary, or ``setsid`` broke the tree).
+    """
+    if not bound_pids:
+        return []
+    if snapshot is None:
+        snapshot = _query_process_snapshot()
+    matched: List[int] = []
+    slack_s = 5.0
+    for pid in sorted(int(p) for p in bound_pids):
+        if pid <= 0:
+            continue
+        node = snapshot.get(pid)
+        if node is None:
+            continue
+        args_lower = node[1].lower()
+        if not any(token in args_lower for token in CARLA_PROCESS_MATCH_TOKENS):
+            continue
+        if launcher_start_time is not None:
+            pid_start = _process_start_time_seconds(pid)
+            if pid_start is not None and pid_start + slack_s < launcher_start_time:
+                continue
+        matched.append(pid)
+    return matched
+
+
+def _candidate_carla_gpu_pids(root_pid: int | None) -> List[int]:
+    if root_pid is None:
+        return []
+    root_pid = int(root_pid)
+    snapshot = _query_process_snapshot()
+    if not snapshot:
+        return [root_pid]
+    children: Dict[int, List[int]] = {}
+    for pid, (ppid, _args) in snapshot.items():
+        children.setdefault(ppid, []).append(pid)
+    queue_pids = [root_pid]
+    seen: set[int] = set()
+    matches: List[int] = []
+    while queue_pids:
+        pid = queue_pids.pop(0)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        node = snapshot.get(pid)
+        args = "" if node is None else node[1]
+        lowered_args = args.lower()
+        if any(token in lowered_args for token in CARLA_PROCESS_MATCH_TOKENS):
+            matches.append(pid)
+        queue_pids.extend(children.get(pid, []))
+    return matches or [root_pid]
+
+
+def wait_for_carla_gpu_binding(
+    proc: subprocess.Popen[Any] | None,
+    env: Dict[str, str],
+    timeout: float = 45.0,
+    *,
+    quiet: bool = False,
+) -> tuple[bool, str | None]:
+    expected_gpu_index = _resolve_physical_gpu_index_from_env(env)
+    if expected_gpu_index is None:
+        return True, None
+
+    # Minimum framebuffer MiB to count a pmon entry as a real CARLA binding
+    # (not an Xorg/compositor artifact).  Wrong-GPU CARLA instances show only
+    # ~6 MiB G-type on the expected GPU via pmon; real Vulkan framebuffer
+    # allocation is several hundred MiB within the first few seconds of startup.
+    _PMON_MIN_MIB = 50
+
+    self_pid = None if proc is None else proc.pid
+    launcher_start_time = _process_start_time_seconds(self_pid)
+    debug = os.environ.get("CARLA_GPU_BIND_DEBUG", "0") not in ("", "0", "false", "False")
+    first_iter = True
+
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    last_reason = ""
+    while time.monotonic() < deadline:
+        if proc is not None and proc.poll() is not None:
+            return (
+                False,
+                "CARLA exited before GPU placement could be validated "
+                f"(exit_code={proc.poll()}).",
+            )
+        # Primary check: compute-apps (C / C+G processes only).
+        compute_bindings = _query_gpu_bindings_by_pid()
+        if compute_bindings is None:
+            if not quiet:
+                print("[WARN] nvidia-smi unavailable; skipping CARLA GPU placement validation.")
+            return True, "nvidia_smi_unavailable"
+
+        # Secondary source: pmon captures G-type Vulkan processes that the
+        # compute-apps query misses until CUDA is initialised.
+        pmon_bindings = _query_gpu_bindings_by_pid_pmon(min_mib=_PMON_MIN_MIB) or {}
+
+        candidate_pids = _candidate_carla_gpu_pids(self_pid)
+        visible_bindings: List[tuple[int, str, int, str]] = []
+        for pid in candidate_pids:
+            for gpu_index, used_mib in compute_bindings.get(int(pid), []):
+                visible_bindings.append((int(pid), str(gpu_index), int(used_mib), "compute-apps"))
+            for gpu_index, used_mib in pmon_bindings.get(int(pid), []):
+                visible_bindings.append((int(pid), str(gpu_index), int(used_mib), "pmon"))
+
+        # Descendant-free fallback: if the ppid-chain walk yielded no overlap
+        # with observed GPU bindings, accept any PID in the binding tables
+        # whose process args match CARLA tokens and which started at/after
+        # the launcher.  This handles the wrapper-exit / setsid-reparent case
+        # where CarlaUE4-Linux-Shipping is orphaned to init and is no longer
+        # reachable from self.process.pid via ``ps --ppid`` traversal.
+        recovered: List[int] = []
+        if not visible_bindings:
+            bound_pids = set(compute_bindings.keys()) | set(pmon_bindings.keys())
+            recovered = _recover_carla_pids_from_bindings(
+                bound_pids,
+                launcher_start_time=launcher_start_time,
+            )
+            for pid in recovered:
+                for gpu_index, used_mib in compute_bindings.get(int(pid), []):
+                    visible_bindings.append((int(pid), str(gpu_index), int(used_mib), "compute-apps*"))
+                for gpu_index, used_mib in pmon_bindings.get(int(pid), []):
+                    visible_bindings.append((int(pid), str(gpu_index), int(used_mib), "pmon*"))
+
+        matched = [b for b in visible_bindings if b[1] == expected_gpu_index]
+
+        if (first_iter or debug) and not quiet:
+            print(
+                "[DEBUG] CARLA GPU validation: "
+                f"expected_gpu={expected_gpu_index} self_pid={self_pid} "
+                f"candidate_pids={candidate_pids} "
+                f"compute_bindings={dict(compute_bindings)} "
+                f"pmon_bindings={dict(pmon_bindings)} "
+                f"recovered_pids={recovered} "
+                f"matched={matched}"
+            )
+        first_iter = False
+
+        if matched:
+            if recovered and not quiet:
+                print(
+                    "[INFO] CARLA GPU validation: accepted via descendant-free "
+                    f"fallback (recovered pids={recovered}, expected GPU "
+                    f"{expected_gpu_index})."
+                )
+            return True, None
+        if visible_bindings:
+            primary_pid, primary_gpu, primary_used, _src = max(
+                visible_bindings,
+                key=lambda item: (item[2], item[0]),
+            )
+            last_reason = (
+                f"CARLA bound to GPU {primary_gpu} (pid={primary_pid}, {primary_used} MiB) "
+                f"instead of requested GPU {expected_gpu_index}."
+            )
+        else:
+            last_reason = (
+                "CARLA has not appeared in the GPU process table yet "
+                f"(expected GPU {expected_gpu_index}; self_pid={self_pid}; "
+                f"candidate_pids={candidate_pids}; "
+                f"compute_pids={sorted(compute_bindings.keys())}; "
+                f"pmon_pids={sorted(pmon_bindings.keys())})."
+            )
+        time.sleep(0.5)
+    return False, last_reason or f"CARLA GPU placement could not be validated for GPU {expected_gpu_index}."
 
 def _pick_fallback_gpu(
     current_gpu: str | None,
@@ -5491,22 +7738,53 @@ class GPUMemoryMonitor(threading.Thread):
         # baselines[gpu] = (baseline_used_mib, peak_used_mib_since_baseline)
         self._peaks: Dict[str, Tuple[int, int]] = {}
         self._last_update_monotonic: float = 0.0
+        self._consecutive_failures: int = 0
+        self._failure_log_every: int = 5
 
     def run(self) -> None:
         while not self._stop.is_set():
+            query_exc: BaseException | None = None
+            stats_map: Dict[str, GPUMemoryStats] = {}
             try:
-                stats_map = _query_all_gpu_memory_stats(self._gpu_ids) or {}
-            except Exception:  # pylint: disable=broad-except
+                stats_map = query_gpu_memory_stats(self._gpu_ids) or {}
+            except Exception as exc:  # pylint: disable=broad-except
+                query_exc = exc
                 stats_map = {}
             now = time.monotonic()
             with self._lock:
-                self._latest = dict(stats_map)
-                self._last_update_monotonic = now
-                for gpu_id, stats in stats_map.items():
-                    baseline, peak = self._peaks.get(gpu_id, (stats.used_mib, stats.used_mib))
-                    if stats.used_mib > peak:
-                        peak = stats.used_mib
-                    self._peaks[gpu_id] = (baseline, peak)
+                if stats_map:
+                    # Success: overwrite last-known snapshot and advance the
+                    # freshness clock.  Peaks are updated from the new sample.
+                    self._latest = dict(stats_map)
+                    self._last_update_monotonic = now
+                    for gpu_id, stats in stats_map.items():
+                        baseline, peak = self._peaks.get(
+                            gpu_id, (stats.used_mib, stats.used_mib)
+                        )
+                        if stats.used_mib > peak:
+                            peak = stats.used_mib
+                        self._peaks[gpu_id] = (baseline, peak)
+                    self._consecutive_failures = 0
+                else:
+                    # Transient nvidia-smi hiccup: *preserve* the previous
+                    # snapshot so downstream consumers (bin-packer) do not
+                    # deadlock, and do NOT advance ``_last_update_monotonic``
+                    # so ``last_update_age_s`` correctly reflects staleness.
+                    self._consecutive_failures += 1
+                    if (
+                        self._consecutive_failures == 1
+                        or self._consecutive_failures % self._failure_log_every == 0
+                    ):
+                        detail = (
+                            f": {type(query_exc).__name__}: {query_exc}"
+                            if query_exc is not None
+                            else ""
+                        )
+                        print(
+                            "[WARN] GPUMemoryMonitor: nvidia-smi query returned "
+                            f"no stats (consecutive_failures={self._consecutive_failures}); "
+                            f"preserving last snapshot{detail}."
+                        )
             self._stop.wait(self._poll_seconds)
 
     def stop(self) -> None:
@@ -5527,6 +7805,17 @@ class GPUMemoryMonitor(threading.Thread):
             if self._last_update_monotonic <= 0.0:
                 return float("inf")
             return max(0.0, time.monotonic() - self._last_update_monotonic)
+
+    def consecutive_failures(self) -> int:
+        with self._lock:
+            return int(self._consecutive_failures)
+
+    def has_fresh_snapshot(self, max_age_s: float) -> bool:
+        """Return True iff we have a live snapshot younger than ``max_age_s``."""
+        with self._lock:
+            if not self._latest or self._last_update_monotonic <= 0.0:
+                return False
+            return (time.monotonic() - self._last_update_monotonic) <= max(0.0, max_age_s)
 
     def reset_baseline(self, gpu_id: str) -> None:
         with self._lock:
@@ -5769,6 +8058,90 @@ def write_performance_report(
         print(f"[WARN] Failed to write performance report {report_path}: {exc}")
 
 
+def write_run_status(
+    results_root: Path | None,
+    *,
+    status: str,
+    reason: str = "",
+    scope: str = "",
+    attempt: int | None = None,
+    retry_limit: int | None = None,
+    scenario_name: str = "",
+    planner_run_id: str = "",
+    failure_kind: str = "",
+    extra: Dict[str, Any] | None = None,
+) -> None:
+    """Write a small ``_run_status.json`` sentinel into ``results_root``.
+
+    Aggregation tools treat any directory that lacks a sentinel with
+    ``status in {"completed", "success"}`` as suspect, so writing a failure
+    sentinel here guarantees we never silently count a broken run as valid.
+    """
+    if results_root is None:
+        return
+    try:
+        root = Path(results_root)
+    except Exception:  # pylint: disable=broad-except
+        return
+    if not root.exists():
+        return
+    payload: Dict[str, Any] = {
+        "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "status": str(status or "unknown"),
+        "reason": str(reason or ""),
+        "scope": str(scope or ""),
+        "attempt": None if attempt is None else int(attempt),
+        "retry_limit": None if retry_limit is None else int(retry_limit),
+        "scenario_name": str(scenario_name or ""),
+        "planner_run_id": str(planner_run_id or ""),
+        "failure_kind": str(failure_kind or ""),
+    }
+    if extra:
+        try:
+            payload["extra"] = dict(extra)
+        except Exception:  # pylint: disable=broad-except
+            pass
+    try:
+        write_json_file_atomic(root / "_run_status.json", payload)
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"[WARN] Failed to write run-status sentinel in {root}: {exc}")
+
+
+def finalize_failed_result_roots(
+    result_roots: Sequence[Path],
+    *,
+    status: str = "failed",
+    reason: str = "",
+    scope: str = "",
+    attempt: int | None = None,
+    retry_limit: int | None = None,
+    scenario_name: str = "",
+    planner_run_id: str = "",
+    failure_kind: str = "",
+) -> None:
+    """Drop a failure sentinel into each root, then rename to ``_partial_*``.
+
+    The sentinel is written *before* the rename so downstream auditors can
+    inspect the archived directory and know exactly why the run was aborted.
+    """
+    for root in result_roots:
+        try:
+            write_run_status(
+                Path(root),
+                status=status,
+                reason=reason,
+                scope=scope,
+                attempt=attempt,
+                retry_limit=retry_limit,
+                scenario_name=scenario_name,
+                planner_run_id=planner_run_id,
+                failure_kind=failure_kind,
+            )
+        except Exception:  # pylint: disable=broad-except
+            pass
+    delete_result_roots(result_roots)
+
+
 def append_retry_event(
     retry_log_path: Path | None,
     *,
@@ -5816,6 +8189,8 @@ def classify_failure_text_kind(text: str) -> str:
         return "cuda_unavailable"
     if "teardown_gate_timeout" in lowered:
         return "teardown_gate_timeout"
+    if has_tcp_route_command_none_marker(lowered):
+        return "planner_route_command_none"
     if "connection refused" in lowered or "connection reset by peer" in lowered:
         return "rpc_timeout"
     if "sensorreceivednodata" in lowered or "sensor took too long" in lowered:
@@ -6295,6 +8670,35 @@ _SIGNAL_NAMES: dict[int, str] = {
 }
 
 
+def returncode_signal_num(returncode: int | None) -> int | None:
+    try:
+        value = int(returncode)
+    except Exception:
+        return None
+    if value >= 0:
+        return None
+    return abs(value)
+
+
+def returncode_signal_name(returncode: int | None) -> str | None:
+    signal_num = returncode_signal_num(returncode)
+    if signal_num is None:
+        return None
+    return _SIGNAL_NAMES.get(signal_num, f"SIG{signal_num}")
+
+
+def has_tcp_route_command_none_marker(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if not lowered:
+        return False
+    if "[tcp_route_diag]" in lowered and "next_cmd_is_none" in lowered:
+        return True
+    return (
+        "'nonetype' object has no attribute 'value'" in lowered
+        and ("tcp_agent.py" in lowered or "next_command" in lowered)
+    )
+
+
 def _describe_failure_detail(
     failure_kind: str,
     result: MonitoredRunResult,
@@ -6317,9 +8721,17 @@ def _describe_failure_detail(
         entry_status = str(progress_summary.entry_status or "").strip()
         if entry_status:
             parts.append(f"entry_status={entry_status!r}")
+    if result.pid is not None:
+        parts.append(f"child_pid={result.pid}")
+    if result.signal_name is not None:
+        parts.append(f"signal={result.signal_name}")
+    elif result.signal_num is not None:
+        parts.append(f"signal_num={result.signal_num}")
 
     # Check output tail for specific sensor/connection errors (most actionable)
     tail_text = "\n".join(result.output_tail).lower()
+    if has_tcp_route_command_none_marker(tail_text):
+        parts.append("cause=planner_route_command_none (TCP next_cmd became None before next_command.value)")
     if "a sensor took too long to send their data" in tail_text or "sensorreceivednodata" in tail_text:
         parts.append("cause=sensor_data_timeout (sensor did not respond in time)")
     elif "invalid session: no stream available" in tail_text or "error retrieving stream id" in tail_text:
@@ -6374,6 +8786,8 @@ def _describe_failure_detail(
 
     if result.terminated_reason:
         parts.append(f"terminated={result.terminated_reason!r}")
+    parts.append(f"last_output_age_s={result.last_output_age_s:.1f}")
+    parts.append(f"last_any_output_age_s={result.last_any_output_age_s:.1f}")
 
     return ", ".join(parts)
 
@@ -6412,6 +8826,7 @@ def classify_scenario_failure(
       cuda_oom           – CUDA out-of-memory error (planner needs more VRAM)
       cuda_unavailable   – No CUDA GPUs visible to the planner process
       planner_env_error  – Python import / package errors (evaluator never contacted CARLA)
+      planner_route_command_none – TCP planner returned a route command of None
       sensor_failure     – sensor timeout / no-data errors
       stalled            – output stalled (evaluator hung)
       no_results_written – evaluator never produced any result files
@@ -6459,7 +8874,15 @@ def classify_scenario_failure(
         _log_failure_classification("import/module error in output", "planner_env_error")
         return "planner_env_error"
 
-    # --- 2. Sensor failures ---
+    # --- 2. Deterministic planner route-command bugs ---
+    if has_tcp_route_command_none_marker(tail_text):
+        _log_failure_classification(
+            "TCP route command missing (next_cmd became None)",
+            "planner_route_command_none",
+        )
+        return "planner_route_command_none"
+
+    # --- 3. Sensor failures ---
     if (
         "a sensor took too long to send their data" in tail_text
         or "sensorreceivednodata" in tail_text
@@ -6467,12 +8890,12 @@ def classify_scenario_failure(
         _log_failure_classification("sensor timeout/no-data in output", "sensor_failure")
         return "sensor_failure"
 
-    # --- 3. Stalled output ---
+    # --- 4. Stalled output ---
     if result.stalled:
         _log_failure_classification("evaluator output stalled", "stalled")
         return "stalled"
 
-    # --- 4. Health-check terminated the run ---
+    # --- 5. Health-check terminated the run ---
     if result.terminated_reason:
         reason_text = result.terminated_reason.lower()
         if "managed carla became unavailable" in reason_text:
@@ -6487,12 +8910,12 @@ def classify_scenario_failure(
             _log_failure_classification("health-check: no output/progress", "no_route_execution")
             return "no_route_execution"
 
-    # --- 5. CARLA process exited (manager knows about it) ---
+    # --- 6. CARLA process exited (manager knows about it) ---
     if carla_manager is not None and not carla_manager.is_running():
         _log_failure_classification("CARLA manager process not running", "carla_crash")
         return "carla_crash"
 
-    # --- 6. CARLA world port not reachable (process down / never started) ---
+    # --- 7. CARLA world port not reachable (process down / never started) ---
     # TM port is NOT checked here: TM not being up is not the same as CARLA
     # being unreachable, and checking it was the root-cause of false positives.
     world_up = is_port_open(host, world_port, timeout=0.2)
@@ -6500,7 +8923,7 @@ def classify_scenario_failure(
         _log_failure_classification(f"world port {world_port} closed", "carla_process_down")
         return "carla_process_down"
 
-    # --- 7. RPC-level connection errors in log output ---
+    # --- 8. RPC-level connection errors in log output ---
     rpc_markers = (
         "connection refused",
         "connection reset by peer",
@@ -6511,7 +8934,7 @@ def classify_scenario_failure(
         _log_failure_classification("RPC connection error in output", "rpc_timeout")
         return "rpc_timeout"
 
-    # --- 8. No route progress despite the evaluator starting ---
+    # --- 9. No route progress despite the evaluator starting ---
     if progress_summary is not None:
         if strict_record_accounting_enabled() and not bool(progress_summary.has_structured_records):
             _log_failure_classification("no structured route records", "invalid_no_record")
@@ -6532,17 +8955,34 @@ def classify_scenario_failure(
             )
             return label
 
-    # --- 9. Other CARLA-related markers (world port open but CARLA misbehaving) ---
+    # --- 10. Other CARLA-related markers (world port open but CARLA misbehaving) ---
+    # Only claim "carla_unreachable" when the tail matches a CARLA-specific
+    # *error* marker. The bare substring "carla" is NOT used here: it matches
+    # innocuous mentions like "CarlaDataProvider" in cleanup warnings and
+    # mislabels Python-side crashes (e.g. PDM AttributeError) as infra issues.
+    # If we already saw a Python traceback in the tail, do not override it with
+    # a CARLA label — the traceback is the real cause.
+    python_crash = any(
+        marker in tail_text
+        for marker in (
+            "attributeerror",
+            "typeerror",
+            "keyerror",
+            "indexerror",
+            "valueerror",
+            "nameerror",
+            "runtimeerror",
+            "assertionerror",
+        )
+    )
     carla_markers = (
         "make sure the simulator is ready and connected",
         "waiting for the simulator",
         "error retrieving stream id",
         "invalid session: no stream available",
-        "trafficmanager",
-        "carla",
         "simulator is ready and connected",
     )
-    if any(marker in tail_text for marker in carla_markers):
+    if not python_crash and any(marker in tail_text for marker in carla_markers):
         _log_failure_classification("CARLA marker in output (world port open)", "carla_unreachable")
         return "carla_unreachable"
 
@@ -6727,6 +9167,29 @@ def result_roots_have_terminal_outcomes(
     return saw_terminal_outcome
 
 
+def result_root_has_completed_outcomes(result_root: Path, *, ego_count: int) -> bool:
+    summary = collect_result_root_progress(result_root, ego_count=ego_count)
+    return summary.terminal_state in (
+        "completed_clean",
+        "completed_recovered",
+    )
+
+
+def result_roots_have_completed_outcomes(
+    result_roots: Sequence[Path],
+    *,
+    ego_count: int,
+) -> bool:
+    if not result_roots:
+        return False
+    saw_completed_outcome = False
+    for result_root in result_roots:
+        if not result_root_has_completed_outcomes(result_root, ego_count=ego_count):
+            return False
+        saw_completed_outcome = True
+    return saw_completed_outcome
+
+
 def _read_text_tail(path: Path, *, max_bytes: int = STALLED_NEAR_END_LOG_TAIL_BYTES_DEFAULT) -> str:
     try:
         with path.open("rb") as handle:
@@ -6868,7 +9331,13 @@ def should_retry_failure(
     normalized = normalize_retry_limit(retry_limit)
     if normalized is not None and attempt >= normalized:
         return False
-    if failure_kind in ("no_results_written", "no_route_execution", "invalid_no_record", "planner_env_error"):
+    if failure_kind in (
+        "no_results_written",
+        "no_route_execution",
+        "invalid_no_record",
+        "planner_env_error",
+        "planner_route_command_none",
+    ):
         return False
     if normalized is None:
         return attempt < SCENARIO_RETRY_HARD_CEILING
@@ -7104,10 +9573,18 @@ def bin_pack_launch_plan(
 
             stats = gpu_snapshot.get(gpu_id)
             if stats is None:
-                gpu_reject_reasons.append(
-                    {"gpu": gpu_id, "reason": "no_vram_snapshot"}
-                )
-                continue
+                # Live nvidia-smi snapshot missing (transient query failure or
+                # GPUMemoryMonitor lag).  Fall back to the last known stats
+                # stored on the GPU state so placement can still proceed
+                # instead of deadlocking forever on transient probe hiccups.
+                fallback_stats = getattr(state, "last_stats", None)
+                if fallback_stats is not None:
+                    stats = fallback_stats
+                else:
+                    gpu_reject_reasons.append(
+                        {"gpu": gpu_id, "reason": "no_vram_snapshot"}
+                    )
+                    continue
 
             free_mib = int(stats.free_mib)
             # Subtract reservations we haven't yet seen reflected by nvidia-smi.
@@ -7620,12 +10097,24 @@ def planned_result_roots(
 
 
 def delete_result_roots(result_roots: Sequence[Path]) -> None:
-    """Rename partial result directories instead of deleting them.
+    """Remove or archive partial result directories.
 
-    The renamed directory gets a ``_partial_<timestamp>`` suffix so that
-    partial artifacts are preserved for debugging while still clearing the
-    path for the next attempt.
+    Behavior is controlled by the module-level ``_DELETE_PARTIAL_RESULTS``
+    switch (set from ``--delete-partial-results``):
+      * When True, the directory is removed outright so stale/problematic
+        artifacts never accumulate on disk.
+      * When False (default), the directory is renamed to a
+        ``_partial_<timestamp>`` sibling so partial artifacts are preserved
+        for debugging while still clearing the path for the next attempt.
     """
+    if _DELETE_PARTIAL_RESULTS:
+        for root in result_roots:
+            if not root.exists():
+                continue
+            print(f"[INFO] Removing partial result directory: {root}")
+            shutil.rmtree(root, ignore_errors=True)
+        return
+
     timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     for root in result_roots:
         if not root.exists():
@@ -8023,56 +10512,208 @@ def detect_ego_routes(routes_dir: Path, replay_mode: bool = False) -> int:
     return count
 
 
-def detect_scenario_subfolders(routes_dir: Path, routes_leaf: str | None = None) -> List[tuple[Path, str]]:
-    """
-    Check if routes_dir contains multiple scenario subfolders (each with their own ego routes).
-
-    Returns a list of subfolders that each contain at least one ego route.
-    If routes_dir itself contains ego routes directly (not in subfolders), returns empty list.
-    """
-    # First check if there are ego routes directly in routes_dir (not in subfolders)
-    for xml_path in routes_dir.glob("*.xml"):
+def _dir_has_direct_ego_xml(candidate: Path) -> bool:
+    """Return True if *candidate* has at least one ego-role XML directly inside it."""
+    try:
+        entries = list(candidate.glob("*.xml"))
+    except OSError:
+        return False
+    for xml_path in entries:
+        if "_REPLAY" in xml_path.stem:
+            # _REPLAY companions still count as ego — include them so replay-only
+            # scenario directories are discoverable.
+            pass
         try:
             _, _, role = parse_route_metadata(xml_path.read_bytes())
-            if role == "ego":
-                # routes_dir itself is a scenario directory
-                return []
         except Exception:
             continue
+        if role == "ego":
+            return True
+    return False
 
-    # Check subfolders for ego routes
+
+def detect_scenario_subfolders(routes_dir: Path, routes_leaf: str | None = None) -> List[tuple[Path, str]]:
+    """
+    Discover scenario leaf folders under *routes_dir*.
+
+    A scenario leaf folder is any directory that contains at least one ego-role
+    XML file *directly* inside it (not in a subfolder). The walk is fully
+    recursive so arbitrary nesting is supported (e.g. ``llmgen/<Category>/<N>/``
+    as well as ``v2xpnp/<scenario>/``).
+
+    If *routes_dir* itself is a scenario leaf, returns ``[]`` (single-scenario
+    mode, handled by the caller).
+
+    The returned ``scenario_name`` is the relative path from *routes_dir* using
+    ``/`` separators; downstream ``combine_results_subdir`` / results-tag logic
+    already handles slashes by creating nested directories.
+
+    ``routes_leaf`` is retained as a backward-compatible hint: when a scanned
+    directory contains a subdirectory with this exact name that itself holds
+    ego XMLs directly, that inner leaf is used as the scenario dir and the
+    parent's name is used as the scenario label.
+    """
+    routes_dir = Path(routes_dir)
+
+    if _dir_has_direct_ego_xml(routes_dir):
+        return []
+
+    skip_dir_names = {"actors", "__pycache__"}
     scenario_folders: list[tuple[Path, str]] = []
-    for subdir in sorted(routes_dir.iterdir()):
-        if not subdir.is_dir():
-            continue
-        candidates = []
+
+    def _walk(current: Path) -> None:
         if routes_leaf:
-            leaf = subdir / routes_leaf
-            if leaf.is_dir():
-                candidates.append(leaf)
-        candidates.append(subdir)
+            leaf = current / routes_leaf
+            if leaf.is_dir() and _dir_has_direct_ego_xml(leaf):
+                rel = current.relative_to(routes_dir)
+                scenario_folders.append((leaf, str(rel).replace(os.sep, "/")))
+                return
 
-        selected = None
-        selected_name = None
-        for candidate in candidates:
-            has_ego = False
-            for xml_path in candidate.rglob("*.xml"):
-                try:
-                    _, _, role = parse_route_metadata(xml_path.read_bytes())
-                    if role == "ego":
-                        has_ego = True
-                        break
-                except Exception:
-                    continue
-            if has_ego:
-                selected = candidate
-                selected_name = subdir.name
-                break
+        if current != routes_dir and _dir_has_direct_ego_xml(current):
+            rel = current.relative_to(routes_dir)
+            scenario_folders.append((current, str(rel).replace(os.sep, "/")))
+            return
 
-        if selected is not None and selected_name is not None:
-            scenario_folders.append((selected, selected_name))
+        try:
+            children = sorted(p for p in current.iterdir() if p.is_dir())
+        except OSError:
+            return
+        for child in children:
+            if child.name in skip_dir_names:
+                continue
+            if child.name.startswith("."):
+                continue
+            _walk(child)
 
+    _walk(routes_dir)
+    # Bucket-priority ordering (override-able via env var).  Default order:
+    # v2xpnp first, then opencdascenarios, then llmgen, then anything else.
+    # Within a bucket, scenarios stay alphabetical.
+    # Set CARLA_SCENARIO_BUCKET_ORDER="llmgen,opencdascenarios,v2xpnp" to revert.
+    _bucket_order_raw = os.environ.get(
+        "CARLA_SCENARIO_BUCKET_ORDER",
+        "v2xpnp,opencdascenarios,llmgen",
+    )
+    _bucket_priority = {
+        b.strip(): idx for idx, b in enumerate(_bucket_order_raw.split(","))
+        if b.strip()
+    }
+    def _sort_key(item):
+        # item = (Path, "bucket/.../scenario") relative path
+        rel = item[1]
+        bucket = rel.split("/", 1)[0] if "/" in rel else rel
+        # Unknown buckets sort to the end, then alphabetical
+        prio = _bucket_priority.get(bucket, len(_bucket_priority))
+        return (prio, rel)
+    scenario_folders.sort(key=_sort_key)
     return scenario_folders
+
+
+def _parse_bool_attr(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
+def read_scenario_actor_overrides(scenario_dir: Path) -> Dict[str, object]:
+    """
+    Parse scenario-level actor-control overrides from ego route XMLs.
+
+    Recognized attributes (on ``<routes>`` root OR on ``<route>`` element):
+      - ``actor_control_mode`` : ``"policy"`` | ``"replay"``
+      - ``log_replay_actors``  : bool-ish string (``"true"`` / ``"1"`` etc.)
+
+    Returns a dict with (optionally) ``actor_control_mode`` (str) and
+    ``log_replay_actors`` (bool). Keys are omitted when no XML declares the
+    attribute. Attributes on the ``<route>`` element take precedence over
+    attributes on the ``<routes>`` root when both are present in the same file.
+    """
+    overrides: Dict[str, object] = {}
+    if not scenario_dir.is_dir():
+        return overrides
+    try:
+        xml_paths = sorted(scenario_dir.glob("*.xml"))
+    except OSError:
+        return overrides
+
+    for xml_path in xml_paths:
+        try:
+            root = ET.fromstring(xml_path.read_bytes())
+        except Exception:
+            continue
+        if root.tag != "routes":
+            continue
+        route_node = root.find("route")
+        role = (route_node.get("role", "ego") if route_node is not None else "")
+        if role != "ego":
+            continue
+
+        for attr_source in (route_node, root):
+            if attr_source is None:
+                continue
+            mode = attr_source.get("actor_control_mode")
+            if mode is not None and "actor_control_mode" not in overrides:
+                mode_norm = str(mode).strip().lower()
+                if mode_norm in ("policy", "replay"):
+                    overrides["actor_control_mode"] = mode_norm
+            lr = _parse_bool_attr(attr_source.get("log_replay_actors"))
+            if lr is not None and "log_replay_actors" not in overrides:
+                overrides["log_replay_actors"] = lr
+
+        if "actor_control_mode" in overrides and "log_replay_actors" in overrides:
+            break
+
+    return overrides
+
+
+def apply_scenario_xml_overrides(
+    args: argparse.Namespace,
+    scenario_dir: Path,
+    *,
+    saved_defaults: Dict[str, object] | None = None,
+) -> Dict[str, object]:
+    """
+    Apply per-scenario XML overrides to *args* in place.
+
+    When *saved_defaults* is supplied, unset attributes are first restored from
+    that dict before the new overrides are applied. This makes the helper safe
+    to call in a loop that iterates over multiple scenarios using a shared
+    ``args`` namespace.
+
+    Returns ``saved_defaults`` (creating it on first call) so callers can feed
+    it back on subsequent invocations.
+    """
+    if saved_defaults is None:
+        saved_defaults = {
+            "custom_actor_control_mode": getattr(args, "custom_actor_control_mode", "policy"),
+            "log_replay_actors": getattr(args, "log_replay_actors", False),
+        }
+
+    args.custom_actor_control_mode = saved_defaults["custom_actor_control_mode"]
+    args.log_replay_actors = saved_defaults["log_replay_actors"]
+
+    overrides = read_scenario_actor_overrides(scenario_dir)
+    if not overrides:
+        return saved_defaults
+
+    mode = overrides.get("actor_control_mode")
+    if isinstance(mode, str):
+        args.custom_actor_control_mode = mode
+    lr = overrides.get("log_replay_actors")
+    if isinstance(lr, bool):
+        args.log_replay_actors = lr
+
+    print(
+        f"[INFO] Scenario XML override for {scenario_dir}: "
+        f"custom_actor_control_mode={args.custom_actor_control_mode}, "
+        f"log_replay_actors={args.log_replay_actors}"
+    )
+    return saved_defaults
 
 
 def read_manifest(routes_dir: Path) -> tuple[Path | None, Dict[str, List[Dict[str, str]]] | None]:
@@ -8471,18 +11112,247 @@ def clone_routes_with_weather_override(
     return clone_root, temp_dir
 
 
+def _dedupe_near_waypoints(
+    waypoints: "list[tuple[float, float, float, float]]",
+    *,
+    min_dist_m: float = 0.5,
+    max_yaw_diff_deg: float = 5.0,
+) -> "list[tuple[float, float, float, float]]":
+    """
+    Drop waypoints that sit within `min_dist_m` of the previous kept one AND
+    whose yaw differs by less than `max_yaw_diff_deg`. These near-duplicates
+    (often inserted at OpenDRIVE node boundaries) cause GlobalRoutePlanner's
+    A* to occasionally pick a loop-around-the-block path between them.
+
+    The first and last input waypoints are always preserved.
+    """
+    import math
+
+    if len(waypoints) < 2:
+        return list(waypoints)
+
+    def _yaw_diff(a: float, b: float) -> float:
+        return abs((a - b + 180.0) % 360.0 - 180.0)
+
+    kept: "list[tuple[float, float, float, float]]" = [waypoints[0]]
+    for wp in waypoints[1:-1]:
+        px, py, _pz, pyaw = kept[-1]
+        dist = math.hypot(wp[0] - px, wp[1] - py)
+        if dist < min_dist_m and _yaw_diff(wp[3], pyaw) < max_yaw_diff_deg:
+            continue
+        kept.append(wp)
+    # Force-preserve terminal waypoint (even if it is a near-duplicate of the
+    # previous one — it defines the route's end location).
+    if waypoints[-1] != kept[-1]:
+        kept.append(waypoints[-1])
+    return kept
+
+
+def _densify_waypoints(
+    waypoints: "list[tuple[float, float, float, float]]",
+    *,
+    max_gap_m: float = 3.0,
+) -> "list[tuple[float, float, float, float]]":
+    """
+    Insert linearly-interpolated intermediates between any consecutive
+    waypoints that sit more than `max_gap_m` apart. With input pairs ≤ 3 m
+    apart, `grp.trace_route`'s A* has no geometric freedom to pick a
+    loop-around-the-block or a wrong-lane-on-a-highway detour.
+
+    Yaw of the intermediate is copied from the segment endpoint (the segment
+    direction is preserved when we later run GRP/postprocess).
+    """
+    import math
+
+    if len(waypoints) < 2:
+        return list(waypoints)
+
+    result: "list[tuple[float, float, float, float]]" = [waypoints[0]]
+    for i in range(1, len(waypoints)):
+        p = waypoints[i - 1]
+        q = waypoints[i]
+        dx = q[0] - p[0]
+        dy = q[1] - p[1]
+        dz = q[2] - p[2]
+        d = math.hypot(dx, dy)
+        if d > max_gap_m:
+            n_splits = max(2, int(math.ceil(d / max_gap_m)))
+            for j in range(1, n_splits):
+                t = j / n_splits
+                result.append(
+                    (p[0] + dx * t, p[1] + dy * t, p[2] + dz * t, q[3])
+                )
+        result.append(q)
+    return result
+
+
+def _extract_loc_yaw_from_route_item(item: Any) -> "tuple[float, float, float, float] | None":
+    """
+    Robustly pull (x, y, z, yaw) out of either a carla.Waypoint (has a
+    `.transform` attribute/method → Transform) or a carla.Transform (has
+    `.location`/`.rotation` directly). CARLA 0.9.12 exposes `Waypoint.transform`
+    as a method whose `callable()` is True, and `Transform.transform()` is
+    also a method — so we must probe the object shape rather than trust
+    `hasattr` alone.
+    """
+    # carla.Transform: non-callable .location and .rotation
+    loc = getattr(item, "location", None)
+    rot = getattr(item, "rotation", None)
+    if loc is not None and rot is not None and not callable(loc) and not callable(rot):
+        return (float(loc.x), float(loc.y), float(loc.z), float(rot.yaw))
+    # carla.Waypoint: .transform returns a Transform (property or method)
+    tf = getattr(item, "transform", None)
+    if tf is None:
+        return None
+    if callable(tf):
+        try:
+            tf = tf()
+        except Exception:
+            return None
+    tf_loc = getattr(tf, "location", None)
+    tf_rot = getattr(tf, "rotation", None)
+    if tf_loc is None or tf_rot is None:
+        return None
+    return (float(tf_loc.x), float(tf_loc.y), float(tf_loc.z), float(tf_rot.yaw))
+
+
+def _subsample_dense_route(
+    pts: "list[dict]",
+    min_spacing_m: float,
+    keep_yaw_change_deg: float = 8.0,
+) -> "list[dict]":
+    """Reduce density: keep first/last and any point that's either >=min_spacing_m
+    arc-length away from the previous kept point OR has a heading change >
+    keep_yaw_change_deg from the previous kept point. Preserves curve detail."""
+    import math
+    if not pts or min_spacing_m <= 0 or len(pts) <= 2:
+        return list(pts)
+    out = [pts[0]]
+    accum = 0.0
+    for i in range(1, len(pts) - 1):
+        p_prev = pts[i - 1]
+        p = pts[i]
+        accum += math.hypot(float(p["x"]) - float(p_prev["x"]),
+                            float(p["y"]) - float(p_prev["y"]))
+        last = out[-1]
+        yaw_change = abs((float(p.get("yaw", 0.0)) - float(last.get("yaw", 0.0))
+                         + 180.0) % 360.0 - 180.0)
+        if accum >= min_spacing_m or yaw_change >= keep_yaw_change_deg:
+            out.append(p)
+            accum = 0.0
+    out.append(pts[-1])
+    return out
+
+
+def _rewrite_ego_xml_with_dense_grp_trace(
+    *,
+    xml_path: Path,
+    carla_module: Any,
+    carla_map: Any,
+    grp: Any,
+    hop_resolution: float,
+    min_spacing_m: float = 0.0,
+) -> "tuple[int, int]":
+    """
+    Rewrite an ego route XML so its <waypoint> elements are the dense,
+    lane-following, smooth route produced by `tools/route_alignment.align_route`.
+
+    This is the SAME pipeline that `tools/grp_inspector.py --bypass-dp`
+    visualizes — single source of truth across inspector and runtime.
+    What the inspector renders in `grp_vis_final/builder_legacy/<scen>.png`
+    is exactly what the leaderboard's `point_coordinates.json/png` will
+    contain after this rewrite.
+
+    Pipeline (in route_alignment.align_route):
+      1. Densify XML inputs: linear chord for ≤5 m gaps, ALL grp.trace_route
+         waypoints (no subsampling, full hop_resolution density) for >5 m
+         gaps with recursive lane-snapped midpoint fallback at 4× detour.
+      2. Hairpin filter: drop physically-impossible heading reversals (>120°).
+      3. Chaikin corner-cutting (4 iters) — round junction-pinch corners.
+      4. Bounded moving-average smoothing (window 11, ±0.5 m, 2 passes) —
+         flatten residual kinks while staying within ~0.5 m of lane center.
+
+    Returns (original_waypoint_count, dense_waypoint_count). If alignment
+    fails or produces a too-short trace, the XML is left untouched and
+    `original_waypoint_count` is returned for both.
+    """
+    # Import locally so import-order issues don't break run_custom_eval at startup
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import route_alignment  # type: ignore
+    tree = ET.parse(str(xml_path))
+    root = tree.getroot()
+    route_elem = root.find("route")
+    if route_elem is None:
+        raise ValueError(f"No <route> element in {xml_path}")
+
+    wp_elems = route_elem.findall("waypoint")
+    original_count = len(wp_elems)
+    if original_count < 2:
+        return original_count, original_count
+
+    raw_waypoints: "list[dict]" = []
+    for wp in wp_elems:
+        try:
+            raw_waypoints.append({
+                "x": float(wp.get("x", "0")),
+                "y": float(wp.get("y", "0")),
+                "z": float(wp.get("z", "0")),
+                "yaw": float(wp.get("yaw", "0")),
+            })
+        except (TypeError, ValueError):
+            continue
+    if len(raw_waypoints) < 2:
+        return original_count, original_count
+
+    # Run the inspector pipeline (single source of truth).
+    aligned = route_alignment.align_route(
+        carla_module=carla_module,
+        carla_map=carla_map,
+        grp=grp,
+        xml_waypoints=raw_waypoints,
+    )
+    dense_pts = aligned["dense_route"]
+    if len(dense_pts) < 2:
+        raise RuntimeError(
+            f"route_alignment produced too few points for {xml_path.name} "
+            f"({len(dense_pts)} pts, n_input={aligned['n_input_waypoints']})"
+        )
+
+    # Subsample to reduce per-XML waypoint count while preserving curve detail.
+    if min_spacing_m > 0:
+        dense_pts = _subsample_dense_route(dense_pts, min_spacing_m=min_spacing_m)
+
+    # Replace XML waypoints with the aligned dense route.
+    for wp in wp_elems:
+        route_elem.remove(wp)
+    for i, p in enumerate(dense_pts):
+        new_wp = ET.Element("waypoint")
+        new_wp.set("x", f"{p['x']:.6f}")
+        new_wp.set("y", f"{p['y']:.6f}")
+        new_wp.set("z", f"{p.get('z', 0.0):.6f}")
+        new_wp.set("yaw", f"{p.get('yaw', 0.0):.6f}")
+        route_elem.insert(i, new_wp)
+
+    tree.write(xml_path, encoding="utf-8", xml_declaration=True)
+    return original_count, len(dense_pts)
+
+
 def align_ego_routes_in_directory(
     routes_dir: Path,
     town: str,
     carla_host: str,
     carla_port: int,
     sampling_resolution: float,
+    min_spacing_m: float = 0.0,
 ) -> None:
     """
-    Align only ego route XMLs in routes_dir using the scenario_generator alignment module.
+    Rewrite each ego route XML in `routes_dir` so its waypoints are the
+    dense GRP trace that the leaderboard would produce at eval time. This
+    makes what's driven identical to what the scenario_builder "Run GRP"
+    preview plots — removing loops/detours introduced by GRP A* running on
+    sparse or near-duplicate input waypoints.
     """
     try:
-        from scenario_generator.pipeline.step_07_route_alignment import align_route_file
         from scenario_generator.pipeline.step_07_route_alignment import main as align_mod
     except Exception as exc:  # pylint: disable=broad-except
         print(f"[WARN] Ego route alignment unavailable (import failed): {exc}")
@@ -8494,33 +11364,96 @@ def align_ego_routes_in_directory(
         print(f"[WARN] Ego route alignment unavailable (CARLA import failed): {exc}")
         return
 
+    # When multiple scenario workers load Town05 in parallel the simulator
+    # can be slow to respond, so we retry with an increasing timeout instead
+    # of giving up after the first 30s.
     client = None
-    try:
-        print(f"[INFO] Aligning ego routes with CARLA at {carla_host}:{carla_port} (town={town})...")
-        client = create_logged_client(
-            carla,
-            carla_host,
-            carla_port,
-            timeout_s=30.0,
-            context="align_ego_routes",
-            process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
-        )
-        world = client.get_world()
-        current_map = world.get_map().name
-        current_map_base = current_map.split("/")[-1] if "/" in current_map else current_map
-        if current_map_base != town:
-            world = client.load_world(town)
-        carla_map = world.get_map()
-
+    carla_map = None
+    grp = None
+    init_attempts = 4
+    init_timeouts = [60.0, 120.0, 180.0, 240.0]
+    last_exc: "Exception | None" = None
+    print(
+        f"[INFO] Dense-aligning ego routes with CARLA at {carla_host}:{carla_port} (town={town})..."
+    )
+    for attempt in range(init_attempts):
         try:
-            grp = GlobalRoutePlanner(carla_map, sampling_resolution)
-        except TypeError:
-            grp = GlobalRoutePlanner(GlobalRoutePlannerDAO(carla_map, sampling_resolution))
-        if hasattr(grp, "setup"):
-            grp.setup()
-    except Exception as exc:  # pylint: disable=broad-except
-        print(f"[WARN] Ego route alignment failed to initialize CARLA/GRP: {exc}")
-        return
+            client = create_logged_client(
+                carla,
+                carla_host,
+                carla_port,
+                timeout_s=init_timeouts[attempt],
+                context="align_ego_routes",
+                process_name=RUN_CUSTOM_EVAL_PROCESS_NAME,
+            )
+            world = client.get_world()
+            current_map = world.get_map().name
+            current_map_base = current_map.split("/")[-1] if "/" in current_map else current_map
+            if current_map_base != town:
+                world = client.load_world(town)
+            carla_map = world.get_map()
+            try:
+                grp = GlobalRoutePlanner(carla_map, float(sampling_resolution))
+            except TypeError:
+                grp = GlobalRoutePlanner(
+                    GlobalRoutePlannerDAO(carla_map, float(sampling_resolution))
+                )
+            if hasattr(grp, "setup"):
+                grp.setup()
+            break
+        except Exception as exc:  # pylint: disable=broad-except
+            last_exc = exc
+            carla_map = None
+            grp = None
+            # Drop the libcarla client so the next retry opens a fresh TCP
+            # connection; stale clients carry a dead socket after timeouts.
+            client = None
+            print(
+                f"[WARN] Ego route alignment CARLA/GRP init failed "
+                f"(attempt {attempt + 1}/{init_attempts}, timeout={init_timeouts[attempt]}s): {exc}"
+            )
+            if attempt < init_attempts - 1:
+                time.sleep(2.0 * (attempt + 1))
+
+    if carla_map is None or grp is None:
+        raise RuntimeError(
+            "Ego route alignment failed: unable to initialise CARLA/GRP after "
+            f"{init_attempts} attempts at {carla_host}:{carla_port} "
+            f"(last error: {last_exc}). Refusing to run the scenario on "
+            "unaligned routes because that reintroduces the GRP loop bug."
+        )
+
+    failures: "list[tuple[str, str]]" = []
+    try:
+        ego_xmls: List[Path] = []
+        for xml_path in routes_dir.glob("*.xml"):
+            try:
+                _, _, role = parse_route_metadata(xml_path.read_bytes())
+            except Exception:
+                continue
+            if role == "ego":
+                ego_xmls.append(xml_path)
+
+        if not ego_xmls:
+            print(f"[WARN] No ego route XMLs found for alignment in {routes_dir}.")
+            return
+
+        for xml_path in ego_xmls:
+            try:
+                orig, dense = _rewrite_ego_xml_with_dense_grp_trace(
+                    xml_path=xml_path,
+                    carla_module=carla,
+                    carla_map=carla_map,
+                    grp=grp,
+                    hop_resolution=float(sampling_resolution),
+                    min_spacing_m=float(min_spacing_m),
+                )
+                print(
+                    f"[INFO] Dense-aligned {xml_path.name}: {orig} -> {dense} waypoints"
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                print(f"[ERROR] Failed to dense-align {xml_path.name}: {exc}")
+                failures.append((xml_path.name, str(exc)))
     finally:
         release_client_id = log_client_release_begin(
             client,
@@ -8529,7 +11462,7 @@ def align_ego_routes_in_directory(
             reason="align_ego_routes_scope_end",
         )
         # Release libcarla C++ object so its destructor closes the TCP socket
-        # synchronously. carla_map/grp/world are kept alive by their own
+        # synchronously. carla_map/world are kept alive by their own
         # references and do not hold the client socket open.
         client = None  # noqa: F841
         log_client_release_end(
@@ -8539,31 +11472,13 @@ def align_ego_routes_in_directory(
             reason="align_ego_routes_scope_end",
         )
 
-    ego_xmls: List[Path] = []
-    for xml_path in routes_dir.glob("*.xml"):
-        try:
-            _, _, role = parse_route_metadata(xml_path.read_bytes())
-        except Exception:
-            continue
-        if role == "ego":
-            ego_xmls.append(xml_path)
-
-    if not ego_xmls:
-        print(f"[WARN] No ego route XMLs found for alignment in {routes_dir}.")
-        return
-
-    for xml_path in ego_xmls:
-        try:
-            orig, aligned = align_route_file(
-                xml_path,
-                carla_map,
-                grp,
-                backup=False,
-            )
-            if orig != aligned:
-                print(f"[INFO] Aligned {xml_path.name}: {orig} -> {aligned} waypoints")
-        except Exception as exc:  # pylint: disable=broad-except
-            print(f"[WARN] Failed to align {xml_path.name}: {exc}")
+    if failures:
+        detail = "; ".join(f"{name}: {err}" for name, err in failures)
+        raise RuntimeError(
+            f"Ego route alignment failed for {len(failures)} XML(s) in {routes_dir}: "
+            f"{detail}. Refusing to run the scenario on unaligned routes because "
+            "that reintroduces the GRP loop bug."
+        )
 
 
 def set_effective_ports(
@@ -8731,6 +11646,211 @@ def allocate_planner_slots(
     return slots
 
 
+# ----------------------------------------------------------------------
+# Auto-reexec under a planner conda env when the parent process's CARLA
+# client version doesn't match the bundled server.
+# ----------------------------------------------------------------------
+
+# Server-side CARLA version.  The bundled binary at
+# ``carla912/CarlaUE4.sh`` is 0.9.12; this constant is what the parent
+# Python (which runs ``wait_for_carla_rpc_ready`` and the pre-scenario
+# world-sweep RPCs) must match to complete the RPC handshake.  A 0.9.15
+# client cannot talk to a 0.9.12 server -- ``get_world()`` times out and
+# the pool reports a never-ready CARLA on every start attempt.
+_BUNDLED_CARLA_SERVER_VERSION_PREFIX = "0.9.12"
+
+# Sentinel env var used to break re-exec loops: once we've handed off
+# to a conda env's python, we set this to "1" so the second invocation
+# does not try to switch envs again even if its check still disagrees.
+_REEXEC_SENTINEL_ENV = "COLMDRIVER_PARENT_REEXEC"
+
+
+def _read_parent_carla_version() -> str | None:
+    """Return the parent process's carla client version, or None if
+    the carla module can't be imported / probed."""
+    try:
+        import carla  # type: ignore[import]
+        return str(carla.Client("127.0.0.1", 0).get_client_version())
+    except Exception:
+        return None
+
+
+def _extract_planner_conda_envs(argv: list[str]) -> list[str]:
+    """Pull the conda env names from ``--planner [name,env]`` pairs in
+    ``argv``.  Returns them in the order they were passed so the caller
+    can prefer the user's first choice.  Duplicates are removed while
+    preserving order."""
+    envs: list[str] = []
+    seen: set[str] = set()
+    iterator = iter(argv)
+    for arg in iterator:
+        if arg != "--planner":
+            continue
+        try:
+            value = next(iterator)
+        except StopIteration:
+            break
+        text = value.strip().strip("[]")
+        parts = [p.strip() for p in text.split(",")]
+        if len(parts) < 2:
+            continue
+        env_name = parts[1]
+        if env_name and env_name not in seen:
+            seen.add(env_name)
+            envs.append(env_name)
+    return envs
+
+
+def _conda_env_python(env_name: str) -> Path | None:
+    """Resolve ``/path/to/envs/<env_name>/bin/python`` if it exists."""
+    # Common CONDA install locations.  We probe in priority order; the
+    # first hit wins.  Add more roots if your install lives elsewhere.
+    candidate_roots = [
+        Path("/data/miniconda3/envs"),
+        Path(os.environ.get("CONDA_ENVS_PATH", "")) if os.environ.get("CONDA_ENVS_PATH") else None,
+        Path(os.environ.get("CONDA_PREFIX", "")).parent if os.environ.get("CONDA_PREFIX") else None,
+    ]
+    for root in candidate_roots:
+        if root is None:
+            continue
+        candidate = root / env_name / "bin" / "python"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _probe_env_carla_version(env_python: Path) -> str | None:
+    """Run a tiny subprocess in ``env_python`` to read its carla version."""
+    try:
+        out = subprocess.check_output(
+            [
+                str(env_python),
+                "-c",
+                "import carla; print(carla.Client('127.0.0.1',0).get_client_version())",
+            ],
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            text=True,
+        )
+        return out.strip().splitlines()[-1] if out.strip() else None
+    except Exception:
+        return None
+
+
+def _maybe_reexec_under_planner_env() -> None:
+    """If the parent's carla client version does not match the bundled
+    server, re-exec the parent under one of the planner conda envs that
+    *does* match.
+
+    This is what the user expects when they pass
+    ``--planner '[name,env]'`` pairs: the parent should automatically
+    use a planner env's python instead of whichever venv they happened
+    to ``python ...`` from.
+
+    Behavior:
+      * Skips when ``COLMDRIVER_PARENT_REEXEC=1`` (already re-exec'd).
+      * Skips when ``--no-auto-conda-reexec`` is on the command line.
+      * If the parent's carla import works AND its version matches the
+        bundled server, returns silently.
+      * Otherwise iterates the user-supplied planner envs in order; the
+        first one whose python has the matching carla becomes the new
+        interpreter via ``os.execvpe``.  ``argv`` is preserved verbatim
+        so the user-facing command line stays identical.
+      * Falls through (returns) with a clear warning when no suitable
+        env is found, so the operator gets actionable feedback rather
+        than a silent loop of "RPC not ready" warnings.
+    """
+    if os.environ.get(_REEXEC_SENTINEL_ENV) == "1":
+        return
+    if "--no-auto-conda-reexec" in sys.argv:
+        return
+
+    parent_version = _read_parent_carla_version()
+    if parent_version is not None and parent_version.startswith(
+        _BUNDLED_CARLA_SERVER_VERSION_PREFIX
+    ):
+        return  # parent's carla matches the server; no re-exec needed
+
+    candidate_envs = _extract_planner_conda_envs(sys.argv[1:])
+    if not candidate_envs:
+        # Nothing to switch to.  Print a hint and let the run continue
+        # so the user can see the more specific failures downstream.
+        if parent_version is not None:
+            print(
+                f"[WARN] Parent carla version {parent_version!r} does not match "
+                f"bundled CARLA server {_BUNDLED_CARLA_SERVER_VERSION_PREFIX!r}, "
+                "and no --planner [name,env] pairs were given so we cannot "
+                "auto-reexec.  Install carla=={} into your parent env, or "
+                "pass --no-auto-conda-reexec to suppress this warning.".format(
+                    _BUNDLED_CARLA_SERVER_VERSION_PREFIX
+                ),
+                flush=True,
+            )
+        return
+
+    chosen_env: str | None = None
+    chosen_python: Path | None = None
+    chosen_version: str | None = None
+    skipped: list[tuple[str, str]] = []  # (env, reason)
+    for env_name in candidate_envs:
+        env_python = _conda_env_python(env_name)
+        if env_python is None:
+            skipped.append((env_name, "python binary not found"))
+            continue
+        env_version = _probe_env_carla_version(env_python)
+        if env_version is None:
+            skipped.append((env_name, "carla module not importable"))
+            continue
+        if not env_version.startswith(_BUNDLED_CARLA_SERVER_VERSION_PREFIX):
+            skipped.append((env_name, f"carla version {env_version!r}"))
+            continue
+        chosen_env = env_name
+        chosen_python = env_python
+        chosen_version = env_version
+        break
+
+    if chosen_env is None or chosen_python is None:
+        print(
+            f"[WARN] Parent carla version {parent_version!r} does not match "
+            f"bundled CARLA server {_BUNDLED_CARLA_SERVER_VERSION_PREFIX!r} "
+            "and no planner conda env had a compatible carla module:",
+            flush=True,
+        )
+        for env, reason in skipped:
+            print(f"        - {env}: {reason}", flush=True)
+        print(
+            f"        Install carla=={_BUNDLED_CARLA_SERVER_VERSION_PREFIX} into "
+            "your parent env, or activate one of the planner envs manually.",
+            flush=True,
+        )
+        return
+
+    print(
+        f"[INFO] Auto-reexec: parent carla {parent_version!r} != server "
+        f"{_BUNDLED_CARLA_SERVER_VERSION_PREFIX!r}; re-execing under conda env "
+        f"{chosen_env!r} (python={chosen_python}, carla={chosen_version!r}). "
+        "Pass --no-auto-conda-reexec to disable this behavior.",
+        flush=True,
+    )
+    new_env = os.environ.copy()
+    new_env[_REEXEC_SENTINEL_ENV] = "1"
+    # Drop VIRTUAL_ENV so the conda env's python doesn't get confused
+    # by a leftover venv pointer when its own site.py initialises.
+    new_env.pop("VIRTUAL_ENV", None)
+    new_env.pop("PYTHONHOME", None)
+    # Surface which env we ended up in for any downstream code that
+    # wants to log it (e.g. the scheduler tick log, audit reports).
+    new_env["COLMDRIVER_PARENT_CONDA_ENV"] = chosen_env
+    try:
+        os.execvpe(str(chosen_python), [str(chosen_python), *sys.argv], new_env)
+    except OSError as exc:
+        print(
+            f"[WARN] Auto-reexec failed: {type(exc).__name__}: {exc}. "
+            "Continuing in current env -- expect 'RPC not ready' errors.",
+            flush=True,
+        )
+
+
 def main() -> None:
     global _active_carla_manager, _active_crosswalk_worker, _active_colmdriver_vllm_manager
     global _GPU_QUERY_CACHE_TTL_S
@@ -8741,6 +11861,13 @@ def main() -> None:
         _fdt.maybe_install_from_env()
     except Exception:
         _fdt = None  # type: ignore[assignment]
+
+    # Auto-reexec under a planner conda env when the parent's CARLA
+    # client version doesn't match the bundled CARLA server.  See
+    # ``_maybe_reexec_under_planner_env`` for the full rationale.  This
+    # call execvps the process when a switch is needed; if it returns,
+    # the parent's environment is fine and we proceed.
+    _maybe_reexec_under_planner_env()
 
     run_start_monotonic = time.monotonic()
     args = parse_args()
@@ -8780,6 +11907,22 @@ def main() -> None:
         requested_gpus = list(dict.fromkeys(requested_gpus))
     planner_gpu_requests = list(requested_gpus)
     tm_port_offset = compute_tm_port_offset(int(args.port), args.tm_port)
+
+    # Arm the emergency self-restart guard. Monitors thread count and
+    # carla.Client probe-eviction rate; if either crosses crisis thresholds,
+    # kills all our descendants (this master only — uses /proc-walked PID
+    # enumeration so it never touches sibling masters running on other GPUs)
+    # and re-execs ourselves with the same argv. See ``EmergencyGuard``
+    # docstring for the full rationale.
+    try:
+        _emergency_guard = EmergencyGuard()
+        _emergency_guard.start(gpus=requested_gpus or None)
+    except Exception as _eg_exc:
+        print(
+            f"[EMERGENCY_GUARD] failed to arm ({_eg_exc}); continuing without "
+            "leak/collapse safety net.",
+            flush=True,
+        )
 
     if args.npc_only_fake_ego:
         if any(req.name != "log-replay" for req in planner_requests):
@@ -9536,6 +12679,44 @@ def main() -> None:
 
         print(f"[INFO] Scheduler log: {_sched_log_path}")
 
+        # --- Scenario-pool branch (Phase 2c scaffolding) ----------------------
+        if getattr(args, "scenario_pool", False):
+            from tools._pool_integration import run_scenario_pool
+            print(
+                "[INFO] --scenario-pool enabled: handing off to "
+                "tools._pool_integration.run_scenario_pool."
+            )
+            # If --start-colmdriver-vllm + --defer-colmdriver-vllm-start were
+            # set, hand the (not-yet-started) manager and the deferred planner
+            # name set to the pool so it can gate dispatch and trigger startup
+            # at the phase transition.  Without this, the pool would WFQ-pick
+            # colmdriver scenarios immediately and waste compute on connection
+            # failures to vLLM ports that aren't open yet.
+            _pool_vllm_mgr = None
+            _pool_deferred_names: set[str] = set()
+            if defer_colmdriver_vllm_phase and colmdriver_vllm_manager is not None:
+                _pool_vllm_mgr = colmdriver_vllm_manager
+                _pool_deferred_names = {
+                    req.name for req in planner_requests
+                    if req.name in COLMDRIVER_VLLM_PLANNERS
+                }
+            exit_code = run_scenario_pool(
+                args=args,
+                planner_requests=list(planner_requests),
+                vram_estimator=vram_estimator,
+                gpu_monitor=gpu_monitor,
+                planner_gpu_requests=list(planner_gpu_requests),
+                planner_base_results_tag=planner_base_results_tag,
+                planner_results_root=planner_results_root,
+                repo_root=repo_root,
+                carla_root=carla_root,
+                colmdriver_vllm_manager=_pool_vllm_mgr,
+                deferred_colmdriver_planner_names=_pool_deferred_names,
+            )
+            if gpu_monitor is not None:
+                gpu_monitor.stop()
+            sys.exit(int(exit_code))
+
         vram_aware_scheduler = bool(args.vram_aware_scheduler) and not args.dry_run
         if vram_aware_scheduler and not dashboard_enabled:
             _max_mp_label = " [--max-multiprocess]" if getattr(args, "max_multiprocess", False) else ""
@@ -9745,6 +12926,44 @@ def main() -> None:
                     gpu=completed.gpu,
                     ports=completed.ports,
                 )
+                # Planner's retry budget is gone -- any scenario directories
+                # that never reached a terminal route outcome must be marked
+                # ``_partial_*`` so downstream aggregation cannot count them
+                # as valid.  We scan the planner's results dir, check each
+                # scenario subdir's terminal state, drop a failure sentinel,
+                # and rename.  Scenarios that did finish cleanly are left
+                # untouched.
+                try:
+                    _planner_results_dir = planner_dashboard_states[run_id].results_dir
+                    _entries = _per_planner_scenario_entries.get(run_id, [])
+                    _partial_targets: List[Path] = []
+                    if _entries:
+                        for _label, _rel_subdir in _entries:
+                            _candidate = Path(_planner_results_dir) / _rel_subdir
+                            if not _candidate.exists():
+                                continue
+                            if result_root_has_terminal_outcomes(
+                                _candidate,
+                                ego_count=planner_validation_ego_count,
+                            ):
+                                continue
+                            _partial_targets.append(_candidate)
+                    if _partial_targets:
+                        finalize_failed_result_roots(
+                            _partial_targets,
+                            status="retry_exhausted",
+                            reason=reason,
+                            scope="multi_planner_parent",
+                            attempt=current_attempt,
+                            retry_limit=planner_retry_limit,
+                            planner_run_id=run_id,
+                            failure_kind=failure_kind,
+                        )
+                except Exception as _exc:  # pylint: disable=broad-except
+                    print(
+                        "[WARN] Failed to mark planner "
+                        f"{run_id!r} exhausted scenario dirs partial: {_exc}"
+                    )
             with planner_state_lock:
                 dashboard_state.phase = (
                     "queued"
@@ -10539,7 +13758,7 @@ def main() -> None:
                 with active_runners_lock:
                     active_snapshot = list(active_runners)
                 for runner in active_snapshot:
-                    runner.terminate("[INFO] Stopping planner child process.")
+                    runner.interrupt("[INFO] Stopping planner child process after launcher interrupt.")
                 for thread in active_threads.values():
                     thread.join(timeout=5.0)
 
@@ -10795,11 +14014,15 @@ def main() -> None:
                 wait_for_carla_post_start_buffer(args.carla_post_start_buffer)
 
             try:
+                _actor_override_defaults: Dict[str, object] | None = None
                 # Run each subfolder as a separate scenario
                 for i, (subfolder, sub_name) in enumerate(scenario_subfolders, 1):
                     print(f"\n{'='*60}")
                     print(f"SCENARIO {i}/{len(scenario_subfolders)}: {sub_name}")
                     print(f"{'='*60}")
+                    _actor_override_defaults = apply_scenario_xml_overrides(
+                        args, subfolder, saved_defaults=_actor_override_defaults,
+                    )
                     scenario_results_subdir = combine_results_subdir(args.results_subdir, sub_name)
                     effective_results_tag = f"{base_results_tag}/{scenario_results_subdir}"
                     scenario_result_roots = planned_result_roots(
@@ -10853,6 +14076,7 @@ def main() -> None:
                             f"(stall quiet window {float(args.scenario_stall_output_timeout):.1f}s)"
                         )
 
+                    set_active_interrupt_result_roots(scenario_result_roots)
                     max_retries = normalize_retry_limit(args.scenario_retry_limit)
                     attempt = 0
                     scenario_completed = False
@@ -11030,6 +14254,16 @@ def main() -> None:
                                 scenario_name=sub_name,
                                 gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
                                 ports=PortBundle(port=int(args.port), tm_port=int(args.tm_port)),
+                            )
+                            finalize_failed_result_roots(
+                                scenario_result_roots,
+                                status="retry_exhausted",
+                                reason="teardown_gate_timeout_before_child_launch",
+                                scope="multi_scenario_child",
+                                attempt=attempt,
+                                retry_limit=max_retries,
+                                scenario_name=sub_name,
+                                failure_kind=failure_kind,
                             )
                             raise RuntimeError(
                                 "Evaluator teardown gate timed out before scenario child launch "
@@ -11303,6 +14537,20 @@ def main() -> None:
                             gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
                             ports=PortBundle(port=int(args.port), tm_port=int(args.tm_port)),
                         )
+                        if not result_roots_have_terminal_outcomes(
+                            scenario_result_roots,
+                            ego_count=subfolder_ego_count,
+                        ):
+                            finalize_failed_result_roots(
+                                scenario_result_roots,
+                                status="retry_exhausted",
+                                reason="child_failed_no_more_retries",
+                                scope="multi_scenario_child",
+                                attempt=attempt,
+                                retry_limit=max_retries,
+                                scenario_name=sub_name,
+                                failure_kind=failure_kind,
+                            )
                         break
 
                     # FD tracker checkpoint: after scenario execution
@@ -11323,10 +14571,25 @@ def main() -> None:
                             gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
                             ports=PortBundle(port=int(args.port), tm_port=int(args.tm_port)),
                         )
+                        if not result_roots_have_terminal_outcomes(
+                            scenario_result_roots,
+                            ego_count=subfolder_ego_count,
+                        ):
+                            finalize_failed_result_roots(
+                                scenario_result_roots,
+                                status="retry_exhausted",
+                                reason="scenario_not_completed_after_attempts",
+                                scope="multi_scenario_child",
+                                attempt=attempt,
+                                retry_limit=max_retries,
+                                scenario_name=sub_name,
+                                failure_kind="retry_limit_exceeded",
+                            )
                         print(
                             f"[WARNING] Scenario {sub_name} did not complete after "
                             f"{attempt} attempt(s). Continuing to the next scenario."
                         )
+                    clear_active_interrupt_result_roots()
             finally:
                 if carla_manager:
                     # If no failure outcome was already scheduled, this was a clean session end.
@@ -11379,6 +14642,7 @@ def main() -> None:
             )
             return
 
+        apply_scenario_xml_overrides(args, routes_dir)
         auto_ego_num = detect_ego_routes(
             routes_dir,
             replay_mode=(args.planner == "log-replay"),
@@ -11445,6 +14709,7 @@ def main() -> None:
             if perf_candidate.is_absolute()
             else single_results_root / perf_candidate
         )
+    scenario_result_roots = planned_result_roots(repo_root, results_tag, args)
     update_dashboard_status(
         dashboard_status_path,
         phase="running",
@@ -11672,15 +14937,15 @@ def main() -> None:
             wall_s = time.monotonic() - run_start_monotonic
             for line in format_performance_summary_lines(wall_clock_s=wall_s):
                 print(line)
-            write_performance_report(
-                single_perf_report_path,
-                wall_clock_s=wall_s,
-                context={
-                    "mode": "single_scenario",
-                    "scenario_name": str(scenario_name),
-                    "results_root": str(single_results_root),
-                    "finalized_in": "carla_start_failure",
-                },
+            finalize_failed_result_roots(
+                scenario_result_roots,
+                status="retry_exhausted",
+                reason=f"carla_startup_failure: {type(exc).__name__}: {exc}",
+                scope="single_scenario_launcher",
+                attempt=1,
+                retry_limit=normalize_retry_limit(args.scenario_retry_limit),
+                scenario_name=scenario_name,
+                failure_kind="carla_startup_failure",
             )
             raise
         tm_port = set_effective_ports(
@@ -11741,7 +15006,7 @@ def main() -> None:
         _active_crosswalk_worker = crosswalk_worker
         crosswalk_worker.start()
 
-    scenario_result_roots = planned_result_roots(repo_root, results_tag, args)
+    set_active_interrupt_result_roots(scenario_result_roots)
     variant_timeout_seconds = None
     if not args.dry_run and args.carla_crash_multiplier > 0:
         variant_timeout_seconds = estimate_scenario_timeout(
@@ -11831,6 +15096,7 @@ def main() -> None:
                                 carla_host=str(args.align_ego_host),
                                 carla_port=int(align_port),
                                 sampling_resolution=float(args.align_ego_sampling_resolution),
+                                min_spacing_m=float(args.align_ego_min_spacing_m),
                             )
                         else:
                             print("[WARN] Ego route alignment requested, but no ego XMLs found to infer town.")
@@ -11839,6 +15105,14 @@ def main() -> None:
                     env = env_template.copy()
                     env["ROUTES"] = str(variant_routes_dir)
                     env["ROUTES_DIR"] = str(variant_routes_dir)
+                    if args.align_ego_routes:
+                        # Tell route_scenario._update_route to skip interpolate_trajectory
+                        # and use the dense aligned XML waypoints verbatim — otherwise
+                        # GRP A* re-runs over the smooth trace and re-introduces the
+                        # lane-change/back-jump artefacts we just removed.
+                        env["CUSTOM_USE_PRECOMPUTED_DENSE_ROUTE"] = "1"
+                    else:
+                        env.pop("CUSTOM_USE_PRECOMPUTED_DENSE_ROUTE", None)
 
                     variant_manifest = variant_routes_dir / "actors_manifest.json"
                     if variant_manifest.exists():
@@ -12115,6 +15389,17 @@ def main() -> None:
                         env["CUSTOM_EGO_NORMALIZE_Z"] = "1"
                     else:
                         env.pop("CUSTOM_EGO_NORMALIZE_Z", None)
+                    # FAIL-FAST: do NOT accept partial ego spawn.  Forensics
+                    # showed scenarios were being accepted (4/5 egos), then
+                    # running for 50+ minutes, then the classifier marked them
+                    # as deterministic failure anyway because of the
+                    # "accepting partial ego spawn" log marker.  Net result:
+                    # 50+ min wasted on a guaranteed-failed run.  By disabling
+                    # acceptance here, the leaderboard raises immediately at
+                    # the spawn step, the grandchild exits in ~1s, and the
+                    # classifier still tags it deterministic.  Same outcome,
+                    # 50 min faster.
+                    env["CUSTOM_ALLOW_PARTIAL_EGO_SPAWN"] = "0"
                     # Always enable per-tick vehicle tilt alignment so vehicles
                     # pitch/roll match the road surface (4-corner ground raycast).
                     env["CUSTOM_EGO_GROUND_ALIGN_TILT"] = "1"
@@ -12361,6 +15646,16 @@ def main() -> None:
                                 gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
                                 ports=PortBundle(port=int(args.port), tm_port=int(tm_port)),
                             )
+                            finalize_failed_result_roots(
+                                scenario_result_roots,
+                                status="retry_exhausted",
+                                reason="soft_failure_non_retryable",
+                                scope="single_scenario",
+                                attempt=scenario_attempt,
+                                retry_limit=scenario_retry_limit,
+                                scenario_name=scenario_name,
+                                failure_kind=soft_failure_kind,
+                            )
                             raise RuntimeError(
                                 "Scenario failed after evaluator exit "
                                 f"(reason={soft_failure_kind})."
@@ -12422,6 +15717,16 @@ def main() -> None:
                                 scenario_name=scenario_name,
                                 gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
                                 ports=PortBundle(port=int(args.port), tm_port=int(tm_port)),
+                            )
+                            finalize_failed_result_roots(
+                                scenario_result_roots,
+                                status="retry_exhausted",
+                                reason="missing_terminal_outcomes_non_retryable",
+                                scope="single_scenario",
+                                attempt=scenario_attempt,
+                                retry_limit=scenario_retry_limit,
+                                scenario_name=scenario_name,
+                                failure_kind=detail_reason,
                             )
                             raise RuntimeError(
                                 "Scenario exited without terminal route outcomes "
@@ -12507,6 +15812,16 @@ def main() -> None:
                             scenario_name=scenario_name,
                             gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
                             ports=PortBundle(port=int(args.port), tm_port=int(tm_port)),
+                        )
+                        finalize_failed_result_roots(
+                            scenario_result_roots,
+                            status="retry_exhausted",
+                            reason=f"evaluator_exit_non_retryable_rc={result.returncode}",
+                            scope="single_scenario",
+                            attempt=scenario_attempt,
+                            retry_limit=scenario_retry_limit,
+                            scenario_name=scenario_name,
+                            failure_kind=failure_kind,
                         )
                         raise RuntimeError(
                             "Scenario evaluator exited nonzero "
@@ -12613,6 +15928,16 @@ def main() -> None:
                 gpu=runtime_env.get("CUDA_VISIBLE_DEVICES"),
                 ports=PortBundle(port=int(args.port), tm_port=int(tm_port)),
             )
+            finalize_failed_result_roots(
+                scenario_result_roots,
+                status="retry_exhausted",
+                reason="scenario_retry_limit_exceeded",
+                scope="single_scenario",
+                attempt=scenario_attempt,
+                retry_limit=scenario_retry_limit,
+                scenario_name=scenario_name,
+                failure_kind="retry_limit_exceeded",
+            )
             retry_limit_label = (
                 str(scenario_retry_limit)
                 if scenario_retry_limit is not None
@@ -12657,8 +15982,19 @@ def main() -> None:
                 "results_root": str(single_results_root),
             },
         )
+        for _root in scenario_result_roots:
+            write_run_status(
+                _root,
+                status="completed",
+                reason="scenario_completed",
+                scope="single_scenario",
+                attempt=scenario_attempt,
+                retry_limit=scenario_retry_limit,
+                scenario_name=scenario_name,
+            )
         single_perf_report_written = True
     finally:
+        clear_active_interrupt_result_roots()
         if crosswalk_worker:
             crosswalk_worker.stop()
         _active_crosswalk_worker = None
@@ -12673,7 +16009,14 @@ def main() -> None:
         _active_colmdriver_vllm_manager = None
         if fake_ego_temp_dir is not None:
             fake_ego_temp_dir.cleanup()
-        if not single_perf_report_written:
+        if (
+            not single_perf_report_written
+            and not interrupt_delete_active_results_requested()
+            and result_roots_have_completed_outcomes(
+                scenario_result_roots,
+                ego_count=ego_num,
+            )
+        ):
             wall_s = time.monotonic() - run_start_monotonic
             for line in format_performance_summary_lines(wall_clock_s=wall_s):
                 print(line)
@@ -12692,6 +16035,8 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except KeyboardInterrupt:
+        raise SystemExit(130)
     except Exception as exc:
         log_process_exception(exc, process_name=RUN_CUSTOM_EVAL_PROCESS_NAME, where="__main__")
         raise

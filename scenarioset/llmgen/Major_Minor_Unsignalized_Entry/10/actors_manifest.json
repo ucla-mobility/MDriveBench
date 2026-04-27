@@ -1,0 +1,45 @@
+{
+  "bicycle": [],
+  "ego": [
+    {
+      "file": "town02_vehicle_1_0.xml",
+      "kind": "ego",
+      "name": "Vehicle 1",
+      "route_id": "07_placement",
+      "speed": 8.0,
+      "town": "Town02",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 8.0
+    },
+    {
+      "file": "town02_vehicle_2_1.xml",
+      "kind": "ego",
+      "name": "Vehicle 2",
+      "route_id": "07_placement",
+      "speed": 9.0,
+      "town": "Town02",
+      "model": "vehicle.lincoln.mkz2017",
+      "target_speed": 9.0
+    },
+    {
+      "file": "town02_ego_vehicle_2.xml",
+      "kind": "ego",
+      "name": "ego_vehicle_2",
+      "route_id": "town02_ego_ego_vehicle_2",
+      "town": "Town02",
+      "model": "vehicle.lincoln.mkz2017"
+    }
+  ],
+  "npc": [
+    {
+      "file": "actors/npc/town02_npc_vehicle_0.xml",
+      "kind": "npc",
+      "name": "npc_vehicle_0",
+      "route_id": "07_placement",
+      "town": "Town02",
+      "model": "vehicle.audi.a2"
+    }
+  ],
+  "pedestrian": [],
+  "static": []
+}

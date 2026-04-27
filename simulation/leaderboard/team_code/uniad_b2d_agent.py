@@ -9,6 +9,7 @@ from collections import deque
 import math
 from collections import OrderedDict
 import torch
+torch.backends.cudnn.benchmark = True
 import carla
 import numpy as np
 from PIL import Image
@@ -30,6 +31,9 @@ from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 from leaderboard.utils.route_manipulation import _get_latlon_ref
 
 SAVE_PATH = os.environ.get('SAVE_PATH', None)
+SKIP_AGENT_IMAGE_DUMP = os.environ.get('CARLA_SKIP_AGENT_IMAGE_DUMP', '0').lower() in ('1', 'true', 'yes')
+if SKIP_AGENT_IMAGE_DUMP:
+    SAVE_PATH = None
 IS_BENCH2DRIVE = os.environ.get('IS_BENCH2DRIVE', None)
 
 def get_entry_point():
@@ -200,7 +204,10 @@ class UniadAgent(autonomous_agent.AutonomousAgent):
 			print(e, flush=True)
 			self.lat_ref, self.lon_ref = 0, 0        
 		self._route_planners = []
-		for ego_id in range(self.ego_vehicles_num):
+		actual_plans = len(self._global_plan)
+		if actual_plans < self.ego_vehicles_num:
+			self._log(f"[WARN] ego_vehicles_num={self.ego_vehicles_num} but only {actual_plans} routes in global_plan; capping loop")
+		for ego_id in range(min(self.ego_vehicles_num, actual_plans)):
 			route_planner = RoutePlanner(4.0, 50.0, lat_ref=self.lat_ref, lon_ref=self.lon_ref)
 			route_planner.set_route([self._global_plan[ego_id]], True, [self._global_plan_world_coord[ego_id]])
 			self._route_planners.append(route_planner)
@@ -319,6 +326,8 @@ class UniadAgent(autonomous_agent.AutonomousAgent):
 		# Allow for (pos, cmd, pos_world) tuples
 		near_node, near_command = route_out[0], route_out[1]
 		near_world = route_out[2] if len(route_out) > 2 else None
+		tail_mode = bool(getattr(self._route_planners[ego_id], "tail_mode", False))
+		tail_passed_terminal = bool(getattr(self._route_planners[ego_id], "tail_passed_terminal", False))
 
 		if self.debug_log and (self.step % self.log_every == 0):
 			ego_actor = CarlaDataProvider.get_hero_actor(hero_id=ego_id)
@@ -353,8 +362,9 @@ class UniadAgent(autonomous_agent.AutonomousAgent):
 				'acceleration':acceleration,
 				'angular_velocity':angular_velocity,
 				'command_near':near_command,
-				'command_near_xy':near_node
-	
+				'command_near_xy':near_node,
+				'tail_mode': tail_mode,
+				'tail_passed_terminal': tail_passed_terminal,
 				}
 		
 		return result
@@ -365,11 +375,19 @@ class UniadAgent(autonomous_agent.AutonomousAgent):
 		self.step += 1
 		#print(self.step)
 		for ego_id in range(self.ego_vehicles_num):
-			if CarlaDataProvider.get_hero_actor(hero_id=ego_id) is not None:
-				control = self.run_step_single_vehicle(ego_id, input_data, timestamp)
-				control_all.append(control)
-			else:
+			hero = CarlaDataProvider.get_hero_actor(hero_id=ego_id)
+			# Skip if hero is missing OR no longer alive OR its sensor stream has
+			# been torn down (scenario_manager.cleanup_single may have
+			# unregistered sensors on this tick, so input_data no longer carries
+			# the ego's keys even though the actor reference is still around).
+			if hero is None or not getattr(hero, "is_alive", True):
 				control_all.append(None)
+				continue
+			if f'CAM_FRONT_{ego_id}' not in input_data:
+				control_all.append(None)
+				continue
+			control = self.run_step_single_vehicle(ego_id, input_data, timestamp)
+			control_all.append(control)
 		return control_all
 
 	@torch.no_grad()
@@ -464,7 +482,13 @@ class UniadAgent(autonomous_agent.AutonomousAgent):
 		print('inference time:', inference_end - inference_start)
 		out_truck =  output_data_batch[0]['planning']['result_planning']['sdc_traj'][0].cpu().numpy()
 		controller = self.pidcontrollers[ego_id]
-		steer_traj, throttle_traj, brake_traj, metadata_traj = controller.control_pid(out_truck, tick_data['speed'], local_command_xy)
+		steer_traj, throttle_traj, brake_traj, metadata_traj = controller.control_pid(
+			out_truck,
+			tick_data['speed'],
+			local_command_xy,
+			tail_mode=tick_data.get('tail_mode', False),
+			tail_passed_terminal=tick_data.get('tail_passed_terminal', False),
+		)
 		
 		end_time = time.time()
 		print('time:', end_time - start_time)
@@ -502,12 +526,18 @@ class UniadAgent(autonomous_agent.AutonomousAgent):
 
 	def save(self, ego_id, tick_data):
 		frame = self.step // 10
-		Image.fromarray(tick_data['imgs'][f'CAM_FRONT_{ego_id}']).save(self.save_path / 'rgb_front_{}'.format(ego_id) / ('%04d.png' % frame))
-		Image.fromarray(tick_data['imgs'][f'CAM_FRONT_LEFT_{ego_id}']).save(self.save_path / 'rgb_front_left_{}'.format(ego_id) / ('%04d.png' % frame))
-		Image.fromarray(tick_data['imgs'][f'CAM_FRONT_RIGHT_{ego_id}']).save(self.save_path / 'rgb_front_right_{}'.format(ego_id) / ('%04d.png' % frame))
-		Image.fromarray(tick_data['imgs'][f'CAM_BACK_{ego_id}']).save(self.save_path / 'rgb_back_{}'.format(ego_id) / ('%04d.png' % frame))
-		Image.fromarray(tick_data['imgs'][f'CAM_BACK_LEFT_{ego_id}']).save(self.save_path / 'rgb_back_left_{}'.format(ego_id) / ('%04d.png' % frame))
-		Image.fromarray(tick_data['imgs'][f'CAM_BACK_RIGHT_{ego_id}']).save(self.save_path / 'rgb_back_right_{}'.format(ego_id) / ('%04d.png' % frame))
+		# Model-facing images stay in OpenCV BGR order; convert only for human-readable saves.
+		camera_dirs = [
+			(f'CAM_FRONT_{ego_id}', 'rgb_front_{}'.format(ego_id)),
+			(f'CAM_FRONT_LEFT_{ego_id}', 'rgb_front_left_{}'.format(ego_id)),
+			(f'CAM_FRONT_RIGHT_{ego_id}', 'rgb_front_right_{}'.format(ego_id)),
+			(f'CAM_BACK_{ego_id}', 'rgb_back_{}'.format(ego_id)),
+			(f'CAM_BACK_LEFT_{ego_id}', 'rgb_back_left_{}'.format(ego_id)),
+			(f'CAM_BACK_RIGHT_{ego_id}', 'rgb_back_right_{}'.format(ego_id)),
+		]
+		for camera_key, camera_dir in camera_dirs:
+			img_rgb = cv2.cvtColor(tick_data['imgs'][camera_key], cv2.COLOR_BGR2RGB)
+			Image.fromarray(img_rgb).save(self.save_path / camera_dir / ('%04d.png' % frame))
 		Image.fromarray(tick_data['bev']).save(self.save_path / 'bev_{}'.format(ego_id) / ('%04d.png' % frame))
 		outfile = open(self.save_path / 'meta_{}'.format(ego_id) / ('%04d.json' % frame), 'w')
 		json.dump(self.pid_metadata, outfile, indent=4)

@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="utf-8"?>
+<routes><route id="town01_bicycle_bicycle_0" model="vehicle.bh.crossbike" role="bicycle" town="Town01"><weather cloudiness="20.00" fog_density="5.00" fog_distance="80.00" precipitation="0.00" precipitation_deposits="0.00" sun_altitude_angle="-15.00" sun_azimuth_angle="300.00" wetness="10.00" wind_intensity="5.00" /><waypoint x="62.009000" y="330.568000" yaw="0.028648" z="0.000000" /><waypoint x="74.009000" y="330.574000" yaw="0.028648" z="0.000000" /></route></routes>

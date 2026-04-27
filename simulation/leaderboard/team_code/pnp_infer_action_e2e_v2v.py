@@ -603,6 +603,39 @@ class PnP_infer():
 		else:
 			processed_pred_box = [] # infer_result['pred_box_tensor']
 
+		# Stash world-frame perception predictions for downstream open-loop AP@50
+		# evaluation in carla_openloop_prototype.py. Re-uses the same transform_2d_points
+		# call as the LiDAR->ego pass above, but with car2 = (0, 0, 0) so the output
+		# stays in the CARLA world frame (matches world.get_actors() coordinates).
+		_pred_world_corners_list = []
+		if (infer_result['pred_box_tensor'] is not None) and len(infer_result['pred_box_tensor']) > 0:
+			_meas = car_data_raw[0]['measurements']
+			for _i in range(infer_result['pred_box_tensor'].shape[0]):
+				_world_corners = transform_2d_points(
+					infer_result['pred_box_tensor'][_i].cpu().numpy(),
+					np.pi / 2 - _meas["theta"],
+					_meas["lidar_pose_y"],
+					_meas["lidar_pose_x"],
+					0.0, 0.0, 0.0,
+				)
+				_pred_world_corners_list.append(_world_corners)
+		_pred_world_arr = (np.stack(_pred_world_corners_list, axis=0).astype(np.float32)
+		                   if _pred_world_corners_list else np.zeros((0, 8, 3), dtype=np.float32))
+		_pred_score_arr = (infer_result['pred_score'].cpu().numpy().astype(np.float32)
+		                   if infer_result.get('pred_score') is not None else np.zeros((0,), dtype=np.float32))
+		if not hasattr(self, '_last_perception_for_save'):
+			self._last_perception_for_save = {}
+		_meas_full = car_data_raw[0]['measurements']
+		self._last_perception_for_save[ego_id] = {
+			'pred_box_world': _pred_world_arr,
+			'pred_score': _pred_score_arr,
+			'lidar_pose_x': float(_meas_full["lidar_pose_x"]),
+			'lidar_pose_y': float(_meas_full["lidar_pose_y"]),
+			'theta': float(_meas_full["theta"]),
+			'ego_x': float(_meas_full.get("x", 0.0)),
+			'ego_y': float(_meas_full.get("y", 0.0)),
+		}
+
 		### turn boxes into occupancy map
 		if len(processed_pred_box) > 0:
 			occ_map = turn_traffic_into_map(processed_pred_box[:,:4,:2].cpu(), self.det_range)
@@ -924,15 +957,44 @@ class PnP_infer():
 	def save(self, tick_data, frame, ego_id):
 		if frame % self.skip_frames != 0:
 			return
+		# Surface JPEGs are debug visualizations — never read back by training
+		# or scoring code, so encode them at very low quality to slash per-tick
+		# I/O. Default 15 cuts a 6750×1500 frame from ~1.6 MB to ~150 KB and
+		# shaves real time off the per-tick save path. Override via the
+		# CODRIVING_SURFACE_JPEG_QUALITY env var (1-95) if you need cleaner
+		# debug images.
+		try:
+			_q = int(os.environ.get("CODRIVING_SURFACE_JPEG_QUALITY", "15"))
+		except Exception:
+			_q = 15
+		_q = max(1, min(95, _q))
 		for ego_i in range(1): # self.ego_vehicles_num
 			folder_path = self.save_path / pathlib.Path("ego_vehicle_{}".format(ego_id))
 			if not os.path.exists(folder_path):
 				os.mkdir(folder_path)
 			Image.fromarray(tick_data[ego_i]["surface"]).save(
-				folder_path / ("%04d.jpg" % frame)
+				folder_path / ("%04d.jpg" % frame),
+				quality=_q,
+				optimize=False,
+				progressive=False,
 			)
 			with open(folder_path / ("%04d.json" % frame), 'w') as f:
 				json.dump(tick_data[ego_i]['planning'], f, indent=4)
+			# Also dump per-frame world-frame perception predictions so the
+			# carla_openloop_prototype can compute AP@50 against live CARLA
+			# actor ground truth without re-running inference.
+			_per = getattr(self, '_last_perception_for_save', {}).get(ego_id)
+			if _per is not None:
+				np.savez(
+					str(folder_path / ("%04d_pred.npz" % frame)),
+					pred_box_world=_per['pred_box_world'],
+					pred_score=_per['pred_score'],
+					lidar_pose_x=_per['lidar_pose_x'],
+					lidar_pose_y=_per['lidar_pose_y'],
+					theta=_per['theta'],
+					ego_x=_per['ego_x'],
+					ego_y=_per['ego_y'],
+				)
 		return
 
 

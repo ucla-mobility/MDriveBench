@@ -302,6 +302,9 @@ def refine_waypoints_dp(
     shape_penalty: float = 0.2,
     max_skip: int = 20,
     waypoint_step: float = 1.0,
+    disable_compression: bool = False,
+    lane_change_penalty: float = 30.0,
+    heading_thresh_deg: float = 30.0,
 ) -> Tuple[List[Dict], List]:
     """
     Use dynamic programming to find optimal waypoint snapping that minimizes
@@ -316,9 +319,8 @@ def refine_waypoints_dp(
     # Recompute headings based on actual waypoint directions
     recompute_headings(waypoints)
     
-    heading_thresh = 30.0
+    heading_thresh = heading_thresh_deg
     straight_thresh = 15.0
-    lane_change_penalty = 30.0
     straight_turn_penalty = 30.0
     
     # Get all map waypoints
@@ -484,40 +486,47 @@ def refine_waypoints_dp(
             'end_wp': curr_wp,
         })
     
-    # Compress: keep only waypoints where lane/road changes or turns occur
+    # Compress: keep only waypoints where lane/road changes or turns occur.
+    # disable_compression=True skips this step (keeps every DP state) — useful
+    # when downstream needs a dense trace through curved sections (e.g.
+    # roundabouts whose internal segments are labeled LANEFOLLOW and would
+    # otherwise be aggressively pruned).
     keep_flags = [False] * len(state_records)
     keep_flags[0] = True
     keep_flags[-1] = True
-    
-    for mid in range(1, len(state_records) - 1):
-        prev_state = state_records[mid - 1]
-        curr_state = state_records[mid]
-        next_state = state_records[mid + 1]
-        prev_wp = prev_state['wp']
-        curr_wp = curr_state['wp']
-        next_wp = next_state['wp']
-        
-        lane_change = (
-            curr_wp.road_id != prev_wp.road_id or
-            curr_wp.lane_id != prev_wp.lane_id or
-            next_wp.road_id != curr_wp.road_id or
-            next_wp.lane_id != curr_wp.lane_id
-        )
-        turn_near = segment_data[mid - 1]['has_turn'] or segment_data[mid]['has_turn']
-        
-        if lane_change or turn_near:
-            keep_flags[mid] = True
-            continue
-        
-        # Check if we can merge through this waypoint
-        merged_route = grp.trace_route(prev_wp.transform.location, next_wp.transform.location)
-        if not merged_route:
-            keep_flags[mid] = True
-            continue
-        
-        _, merged_turn, _ = route_metrics(merged_route)
-        if merged_turn:
-            keep_flags[mid] = True
+
+    if disable_compression:
+        keep_flags = [True] * len(state_records)
+    else:
+        for mid in range(1, len(state_records) - 1):
+            prev_state = state_records[mid - 1]
+            curr_state = state_records[mid]
+            next_state = state_records[mid + 1]
+            prev_wp = prev_state['wp']
+            curr_wp = curr_state['wp']
+            next_wp = next_state['wp']
+
+            lane_change = (
+                curr_wp.road_id != prev_wp.road_id or
+                curr_wp.lane_id != prev_wp.lane_id or
+                next_wp.road_id != curr_wp.road_id or
+                next_wp.lane_id != curr_wp.lane_id
+            )
+            turn_near = segment_data[mid - 1]['has_turn'] or segment_data[mid]['has_turn']
+
+            if lane_change or turn_near:
+                keep_flags[mid] = True
+                continue
+
+            # Check if we can merge through this waypoint
+            merged_route = grp.trace_route(prev_wp.transform.location, next_wp.transform.location)
+            if not merged_route:
+                keep_flags[mid] = True
+                continue
+
+            _, merged_turn, _ = route_metrics(merged_route)
+            if merged_turn:
+                keep_flags[mid] = True
     
     compressed_states = [state for flag, state in zip(keep_flags, state_records) if flag]
     if len(compressed_states) < 2:

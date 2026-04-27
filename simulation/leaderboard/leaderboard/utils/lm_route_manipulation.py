@@ -147,14 +147,66 @@ def interpolate_trajectory(world, waypoints_trajectory, hop_resolution=1.0):
         dao = GlobalRoutePlannerDAO(world.get_map(), hop_resolution)
         grp = GlobalRoutePlanner(dao)
         grp.setup()
+
+    # ── Per-segment loop guard (mirrors route_manipulation.py) ───────────────
+    _LOOP_RATIO   = 2.0
+    _LOOP_SLACK_M = 5.0
+    _DENSE_STEP_M = 3.0
+    _wmap = world.get_map()
+
+    def _seg_len(trace):
+        total = 0.0
+        prev = None
+        for wp, _ in trace:
+            loc = wp.transform.location if hasattr(wp, 'transform') else wp.location
+            if prev is not None:
+                total += math.hypot(loc.x - prev[0], loc.y - prev[1])
+            prev = (loc.x, loc.y)
+        return total
+
+    def _densified_trace(a, b):
+        d = math.hypot(b.x - a.x, b.y - a.y)
+        n = max(2, int(math.ceil(d / _DENSE_STEP_M)) + 1)
+        out = []
+        for k in range(n - 1):
+            t0 = k / (n - 1)
+            t1 = (k + 1) / (n - 1)
+            loc_a = type(a)(x=a.x + (b.x - a.x) * t0, y=a.y + (b.y - a.y) * t0, z=a.z + (b.z - a.z) * t0)
+            loc_b = type(a)(x=a.x + (b.x - a.x) * t1, y=a.y + (b.y - a.y) * t1, z=a.z + (b.z - a.z) * t1)
+            try:
+                seg = grp.trace_route(loc_a, loc_b)
+            except Exception:
+                seg = []
+            if not seg:
+                try:
+                    mid = type(a)(x=(loc_a.x + loc_b.x) / 2, y=(loc_a.y + loc_b.y) / 2, z=(loc_a.z + loc_b.z) / 2)
+                    wp = _wmap.get_waypoint(mid, project_to_road=True)
+                    seg = [(wp, RoadOption.LANEFOLLOW)]
+                except Exception:
+                    pass
+            out.extend(seg)
+        return out
+
     # Obtain route plan
     route_trace = []
+    loop_fallback_count = 0
     for i in range(len(waypoints_trajectory) - 1):   # Goes until the one before the last.
 
         waypoint = waypoints_trajectory[i]
         waypoint_next = waypoints_trajectory[i + 1]
+        straight = math.hypot(waypoint_next.x - waypoint.x, waypoint_next.y - waypoint.y)
         interpolated_trace = grp.trace_route(waypoint, waypoint_next)
+        seg_len = _seg_len(interpolated_trace)
+        if interpolated_trace and seg_len > (_LOOP_RATIO * straight) + _LOOP_SLACK_M:
+            loop_fallback_count += 1
+            interpolated_trace = _densified_trace(waypoint, waypoint_next)
         route_trace.extend(interpolated_trace)
+
+    if loop_fallback_count:
+        print(
+            f"[interpolate_trajectory] loop_fallbacks={loop_fallback_count}/{len(waypoints_trajectory)-1} "
+            f"segment(s) replaced with dense-hop re-routing"
+        )
 
     route_before = [(wp_tuple[0].transform, wp_tuple[1]) for wp_tuple in route_trace]
     postprocess_meta = {}
