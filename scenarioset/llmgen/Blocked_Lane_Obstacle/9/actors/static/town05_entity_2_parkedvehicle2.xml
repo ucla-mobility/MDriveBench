@@ -1,2 +1,2 @@
 <?xml version="1.0" encoding="utf-8"?>
-<routes><route id="07_placement" model="vehicle.carlamotors.carlacola" role="static" speed="0.00" town="Town05"><waypoint x="-108.639000" y="88.817000" yaw="-179.933155" z="0.000000" /></route></routes>
+<routes><route id="07_placement" town="Town05" role="static" model="vehicle.carlamotors.carlacola" speed="0.00" bbox_height="2.467445" bbox_length="5.203838" bbox_width="2.614572"><weather cloudiness="20.00" precipitation="0.00" precipitation_deposits="0.00" wind_intensity="5.00" sun_azimuth_angle="300.00" sun_altitude_angle="-15.00" wetness="10.00" fog_distance="80.00" fog_density="5.00" /><waypoint x="-108.639000" y="88.817000" z="0.000000" yaw="-179.933155" /></route></routes>

@@ -1,11 +1,2 @@
-<?xml version='1.0' encoding='utf-8'?>
-<routes>
-  <route id="07_placement" town="Town05" role="ego" speed="7.0">
-    <waypoint x="-173.806" y="94.868" z="0.000" yaw="0.065556" />
-    <waypoint x="-142.806" y="94.903" z="0.000" yaw="0.065956" />
-    <waypoint x="-141.692" y="94.905" z="0.000" yaw="0.065542" />
-    <waypoint x="-109.692" y="94.941" z="0.000" yaw="0.065576" />
-    <waypoint x="-108.646" y="94.942" z="0.000" yaw="0.065550" />
-    <waypoint x="-64.646" y="94.993" z="0.000" yaw="0.065550" />
-  <weather id="default" cloudiness="30.0" precipitation="0.0" precipitation_deposits="0.0" wind_intensity="0.35" sun_azimuth_angle="0.0" sun_altitude_angle="70.0" wetness="0.0" fog_distance="0.0" fog_density="0.0" fog_falloff="0.0" /></route>
-</routes>
+<?xml version="1.0" encoding="utf-8"?>
+<routes><route id="07_placement" town="Town05" role="ego" model="vehicle.lincoln.mkz2017" speed="7.00"><weather cloudiness="30.00" precipitation="0.00" precipitation_deposits="0.00" wind_intensity="0.35" sun_azimuth_angle="0.00" sun_altitude_angle="70.00" wetness="0.00" fog_distance="0.00" fog_density="0.00" /><waypoint x="-173.806000" y="94.868000" z="0.000000" yaw="0.065556" /><waypoint x="-142.806000" y="94.903000" z="0.000000" yaw="0.065956" /><waypoint x="-141.692000" y="94.905000" z="0.000000" yaw="0.065542" /><waypoint x="-109.692000" y="94.941000" z="0.000000" yaw="0.065576" /><waypoint x="-108.646000" y="94.942000" z="0.000000" yaw="0.065550" /><waypoint x="-64.646000" y="94.993000" z="0.000000" yaw="0.065550" /></route></routes>
