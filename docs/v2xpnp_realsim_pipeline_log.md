@@ -488,7 +488,7 @@ queue/row patterns at xy regions where the road has noticeable elevation
 (z = 8.5 m vs the spawn z=0 we'd been using). After ground alignment the
 expectation is that the spawn-collision-or-unreachable rate drops.
 
-### 6.18. Final headline numbers
+### 6.18. Final headline numbers (all 46 scenarios)
 
 | Metric | Value |
 |--------|-------|
@@ -497,9 +497,21 @@ expectation is that the spawn-collision-or-unreachable rate drops.
 | Scenarios converted to scenarioset XML | 46 |
 | Scenarios with 100% XML/manifest validity | 46/46 (100%) |
 | Total actors exported | 3,758 |
-| Live CARLA spawn rate (post-align, z-retry) | ~98.9% |
-| Scenarios with 100% spawn | 18+ of first 26 tested |
+| **Live CARLA spawn rate** | **1634/1652 = 98.91%** |
+| **Scenarios at 100% spawn** | **35/46 (76%)** |
+| **Scenarios at ≥95% spawn** | **44/46 (96%)** |
+| Lowest-spawn scenario | 2023-04-07-15-02-15_1_0 at 89% |
 | Catastrophic-load scenarios | 0 |
+| Ego trajectory waypoint spawn (4 frac × 2 ego) | 256/368 (69.6%) |
+
+The 18 unspawnable actors (1.09%) are clustered in residual perception-noise
+locations (out-of-map detections like x≈-727 in 11_1) and tight-overlap pairs
+the merger couldn't fully deduplicate. The ego trajectory waypoint spawn rate
+is lower because it tests positions at 25%, 50%, 75%, 100% of the route —
+some egos drive into parking lots or off-road areas at the trajectory endpoint
+where CARLA cannot spawn a vehicle. This does NOT mean the route is invalid for
+replay; it just means picking arbitrary positions along the route as spawn
+candidates is sometimes infeasible.
 
 ### 6.19. Tools shipped on this branch
 
