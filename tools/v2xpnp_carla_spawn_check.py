@@ -96,18 +96,33 @@ def _spawn_actor(carla, world, model: str, wp: Dict[str, float], blueprint_lib):
             pass
     if bp is None:
         return None, "no blueprint"
-    # Add 0.5 m clearance above road surface so the OBB doesn't intersect the
-    # ground mesh (CARLA's try_spawn_actor returns None if any face overlaps).
-    # Retry at z+1.0, +1.5, +2.0 if the first try fails (helps when actors are
-    # close to road geometry edges or steep grade).
+    # Add clearance + retry at multiple z lifts to escape mesh overlap.
+    # If still failing, try small xy nudges along the heading direction (+/-0.5 m,
+    # +/-1.0 m); CARLA returns spawn=None if there's a tight overlap with a
+    # nearby actor, and a small offset along the actor's own forward axis is the
+    # safest deconfliction.
+    yaw_rad = wp["yaw"] * 3.141592653589793 / 180.0
+    import math as _math
+    fx = _math.cos(yaw_rad); fy = _math.sin(yaw_rad)
+    px, py = -fy, fx  # perpendicular (lateral)
+    nudge_offsets = [
+        (0.0, 0.0),
+        (0.5, 0.0), (-0.5, 0.0),
+        (1.0, 0.0), (-1.0, 0.0),
+        (0.0, 0.5), (0.0, -0.5),
+        (1.5, 0.0), (-1.5, 0.0),
+    ]
     for z_lift in (0.5, 1.0, 1.5, 2.0):
-        transform = carla.Transform(
-            carla.Location(x=wp["x"], y=wp["y"], z=wp["z"] + z_lift),
-            carla.Rotation(pitch=wp["pitch"], yaw=wp["yaw"], roll=wp["roll"]),
-        )
-        actor = world.try_spawn_actor(bp, transform)
-        if actor is not None:
-            return actor, "ok"
+        for fwd, lat in nudge_offsets:
+            x = wp["x"] + fwd * fx + lat * px
+            y = wp["y"] + fwd * fy + lat * py
+            transform = carla.Transform(
+                carla.Location(x=x, y=y, z=wp["z"] + z_lift),
+                carla.Rotation(pitch=wp["pitch"], yaw=wp["yaw"], roll=wp["roll"]),
+            )
+            actor = world.try_spawn_actor(bp, transform)
+            if actor is not None:
+                return actor, "ok" if (fwd == 0 and lat == 0 and z_lift == 0.5) else f"ok_nudged_{fwd}_{lat}_z{z_lift}"
     return None, "spawn_collision_or_unreachable"
 
 
