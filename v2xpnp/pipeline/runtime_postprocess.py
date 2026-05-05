@@ -5441,6 +5441,75 @@ def _merge_duplicate_vehicle_tracks(
                 "match_kind": "full" if full_dup else "spawn",
             })
 
+    # C) Cross-time spawn coincidence: same vehicle re-IDed across a temporal
+    #    gap (e.g. perception lost track and re-acquired). Compares each pair's
+    #    frame[0] xy/yaw directly, regardless of t-key alignment. Only fires
+    #    when at least one of the two tracks is short (likely a re-ID sliver).
+    spawn_xy_thresh = _env_float("V2X_CARLA_DUPLICATE_TRACK_SPAWN_XY_THRESH_M", 1.2)
+    spawn_xt_yaw_deg = _env_float("V2X_CARLA_DUPLICATE_TRACK_SPAWN_XT_YAW_DEG", 35.0)
+    spawn_xt_short_max = _env_int(
+        "V2X_CARLA_DUPLICATE_TRACK_SPAWN_XT_SHORT_MAX_FRAMES",
+        25, minimum=2, maximum=200,
+    )
+    for i in range(len(tables)):
+        tr_i, tab_i, L_i, W_i = tables[i]
+        if id(tr_i) in drop_set:
+            continue
+        fi0 = (tr_i.get("frames") or [None])[0]
+        if not isinstance(fi0, dict):
+            continue
+        for j in range(i + 1, len(tables)):
+            tr_j, tab_j, L_j, W_j = tables[j]
+            if id(tr_j) in drop_set:
+                continue
+            fj0 = (tr_j.get("frames") or [None])[0]
+            if not isinstance(fj0, dict):
+                continue
+            try:
+                xa = float(fi0["x"]); ya = float(fi0["y"]); yawa = float(fi0["yaw"])
+                xb = float(fj0["x"]); yb = float(fj0["y"]); yawb = float(fj0["yaw"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            d0 = math.hypot(xa - xb, ya - yb)
+            if d0 > float(spawn_xy_thresh):
+                continue
+            dyaw0 = abs(((yawb - yawa + 540.0) % 360.0) - 180.0)
+            if dyaw0 > float(spawn_xt_yaw_deg):
+                continue
+            n_i = len(tr_i.get("frames") or [])
+            n_j = len(tr_j.get("frames") or [])
+            if min(n_i, n_j) > int(spawn_xt_short_max):
+                continue  # both long-lived → safer to leave alone
+            role_i = str(tr_i.get("role", "")).strip().lower()
+            role_j = str(tr_j.get("role", "")).strip().lower()
+            if role_i == "ego" and role_j == "ego":
+                continue
+            if role_i == "ego":
+                drop_id = id(tr_j); keep_tr = tr_i; drop_tr = tr_j
+            elif role_j == "ego":
+                drop_id = id(tr_i); keep_tr = tr_j; drop_tr = tr_i
+            else:
+                if n_i < n_j:
+                    drop_id = id(tr_i); keep_tr = tr_j; drop_tr = tr_i
+                elif n_j < n_i:
+                    drop_id = id(tr_j); keep_tr = tr_i; drop_tr = tr_j
+                else:
+                    sig_i = _track_significance_score(tr_i)
+                    sig_j = _track_significance_score(tr_j)
+                    if sig_i >= sig_j:
+                        drop_id = id(tr_j); keep_tr = tr_i; drop_tr = tr_j
+                    else:
+                        drop_id = id(tr_i); keep_tr = tr_j; drop_tr = tr_i
+            drop_set.add(drop_id)
+            pairs_recorded.append({
+                "keep_id": str(keep_tr.get("id", "?")),
+                "drop_id": str(drop_tr.get("id", "?")),
+                "frame0_dist_m": round(d0, 3),
+                "frame0_yaw_diff_deg": round(dyaw0, 2),
+                "shorter_n_frames": int(min(n_i, n_j)),
+                "match_kind": "spawn_xtime",
+            })
+
     if drop_set:
         # Mutate `tracks` in place: remove dropped entries.
         kept: List[Dict[str, object]] = []
