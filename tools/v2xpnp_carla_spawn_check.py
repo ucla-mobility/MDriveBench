@@ -96,8 +96,10 @@ def _spawn_actor(carla, world, model: str, wp: Dict[str, float], blueprint_lib):
             pass
     if bp is None:
         return None, "no blueprint"
+    # Add 0.5 m clearance above road surface so the OBB doesn't intersect the
+    # ground mesh (CARLA's try_spawn_actor returns None if any face overlaps).
     transform = carla.Transform(
-        carla.Location(x=wp["x"], y=wp["y"], z=max(wp["z"], 0.5)),
+        carla.Location(x=wp["x"], y=wp["y"], z=wp["z"] + 0.5),
         carla.Rotation(pitch=wp["pitch"], yaw=wp["yaw"], roll=wp["roll"]),
     )
     actor = world.try_spawn_actor(bp, transform)
