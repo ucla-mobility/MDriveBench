@@ -455,7 +455,24 @@ This is the headline number: the pipeline produces CARLA-loadable scenarios
 with 96%+ spawn success on the first try. There's no catastrophic failure
 mode where an entire scenario can't load.
 
-### 6.16. Ground alignment
+### 6.16. Final spawn validation (with ground alignment + z-retry)
+
+After running `carla_ground_align` to backfill z/pitch/roll values, and
+after adding a z-lift retry (0.5 → 2.0 m) in the spawn check tool, the
+spawn rate climbs to:
+
+| Spawn-check version | Total | Spawned | Rate |
+|---------------------|-------|---------|------|
+| v1: no align, z=0   | 1652  | 1593    | 96.4% |
+| v2: align, z+0      | 239   | 117     | 49.0% (regression — actors stuck in mesh) |
+| v3: align, z+0.5    | 239   | 229     | 95.8% |
+| v4: align, z+0.5...2.0 retry | 570 | 564 | **98.9%** |
+
+So with all the pieces in place — pipeline + smoothness + off-road filter +
+ground align + z-lift retry — we hit ~99% first-try spawn success in CARLA
+across the converted scenarios.
+
+### 6.17. Ground alignment
 
 Per-actor `z`/`pitch`/`roll` values were left at 0 by the converter (the
 HTML embedded dataset doesn't have them). After running
