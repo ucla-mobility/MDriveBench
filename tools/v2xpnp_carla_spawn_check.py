@@ -51,6 +51,34 @@ def _wp_first(path: Path) -> Optional[Dict[str, float]]:
         return None
 
 
+def _wp_at_fractions(path: Path, fractions: List[float]) -> List[Dict[str, float]]:
+    try:
+        root = ET.parse(str(path)).getroot()
+    except ET.ParseError:
+        return []
+    wps = root.findall(".//waypoint")
+    if not wps:
+        return []
+    out = []
+    n = len(wps)
+    for f in fractions:
+        idx = max(0, min(n - 1, int(round(f * (n - 1)))))
+        wp = wps[idx]
+        try:
+            out.append({
+                "x": float(wp.attrib["x"]),
+                "y": float(wp.attrib["y"]),
+                "z": float(wp.attrib.get("z", "0")),
+                "yaw": float(wp.attrib.get("yaw", "0")),
+                "pitch": float(wp.attrib.get("pitch", "0")),
+                "roll": float(wp.attrib.get("roll", "0")),
+                "fraction": f,
+            })
+        except (KeyError, ValueError):
+            pass
+    return out
+
+
 def _spawn_actor(carla, world, model: str, wp: Dict[str, float], blueprint_lib):
     bp = None
     if model:
@@ -88,6 +116,8 @@ def main() -> None:
     p.add_argument("--egg", default="/data2/marco/CoLMDriver/carla912/PythonAPI/carla/dist/carla-0.9.12-py3.7-linux-x86_64.egg")
     p.add_argument("--max-scenarios", type=int, default=10)
     p.add_argument("--out", default=None)
+    p.add_argument("--multi-waypoint-egos", action="store_true",
+                   help="Also test ego at 25%/50%/75%/100% waypoints to verify trajectory")
     args = p.parse_args()
 
     carla = _load_carla(args.egg)
@@ -122,9 +152,13 @@ def main() -> None:
         spawn_failures: List[Dict[str, Any]] = []
         actors_to_destroy: List[Any] = []
 
+        # First: find ego entries
+        ego_entries = manifest.get("ego", [])
         for kind, entries in manifest.items():
             for e in entries:
                 actor_xml = scen_dir / e["file"]
+                if kind == "ego":
+                    actor_xml = scen_dir / e["file"]
                 if not actor_xml.exists():
                     continue
                 wp = _wp_first(actor_xml)
@@ -142,6 +176,27 @@ def main() -> None:
                 else:
                     n_failed += 1
                     spawn_failures.append({"name": e.get("name"), "kind": kind, "status": status, "x": wp["x"], "y": wp["y"]})
+
+        # Multi-waypoint ego test
+        ego_traj_failures: List[Dict[str, Any]] = []
+        if args.multi_waypoint_egos:
+            for e in ego_entries:
+                actor_xml = scen_dir / e["file"]
+                if not actor_xml.exists():
+                    continue
+                model = e.get("model", "")
+                wps_at_fractions = _wp_at_fractions(actor_xml, [0.25, 0.5, 0.75, 1.0])
+                for wp in wps_at_fractions:
+                    actor, status = _spawn_actor(carla, world, model, wp, blueprint_lib)
+                    if actor is not None:
+                        actors_to_destroy.append(actor)
+                    else:
+                        ego_traj_failures.append({
+                            "ego": e.get("name"),
+                            "fraction": wp["fraction"],
+                            "status": status,
+                            "x": wp["x"], "y": wp["y"],
+                        })
         # Destroy spawned actors before next scenario
         for a in actors_to_destroy:
             try:
@@ -157,6 +212,7 @@ def main() -> None:
             "n_failed": n_failed,
             "pct_spawned": (n_spawned / n_total) if n_total else 0.0,
             "failures": spawn_failures[:5],  # top 5 only
+            "ego_traj_failures": ego_traj_failures,
         }
         results.append(result)
         print(f"  {scen_dir.name}: {n_spawned}/{n_total} spawned ({result['pct_spawned']*100:.0f}%)", flush=True)

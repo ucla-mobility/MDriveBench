@@ -455,7 +455,23 @@ This is the headline number: the pipeline produces CARLA-loadable scenarios
 with 96%+ spawn success on the first try. There's no catastrophic failure
 mode where an entire scenario can't load.
 
-### 6.16. Known issues still standing
+### 6.16. Ground alignment
+
+Per-actor `z`/`pitch`/`roll` values were left at 0 by the converter (the
+HTML embedded dataset doesn't have them). After running
+`v2xpnp/pipeline/carla_ground_align.py` against the live CARLA on port
+4070 the values get backfilled per-waypoint:
+
+```
+z=8.564299, pitch=-1.265480, roll=-1.508237
+```
+
+Most spawn failures from the first validation pass were clustered in
+queue/row patterns at xy regions where the road has noticeable elevation
+(z = 8.5 m vs the spawn z=0 we'd been using). After ground alignment the
+expectation is that the spawn-collision-or-unreachable rate drops.
+
+### 6.17. Known issues still standing
 
 These are real but deferred — none can be resolved without either CARLA replay
 to triage visual impact, or significantly more pipeline-internal investigation:
