@@ -497,19 +497,26 @@ expectation is that the spawn-collision-or-unreachable rate drops.
 | Scenarios converted to scenarioset XML | 46 |
 | Scenarios with 100% XML/manifest validity | 46/46 (100%) |
 | Total actors exported | 3,758 |
-| **Live CARLA spawn rate** | **1643/1652 = 99.46%** |
-| **Scenarios at 100% spawn** | **41/46 (89%)** |
+| **Live CARLA spawn rate** | **1650/1652 = 99.88%** |
+| **Scenarios at 100% spawn** | **44/46 (96%)** |
 | **Scenarios at ≥95% spawn** | **46/46 (100%)** |
 | Catastrophic-load scenarios | 0 |
 | Ego trajectory waypoint spawn (4 frac × 2 ego) | 256/368 (69.6%) |
 
-After enabling the xy-nudge fallback (+/-0.5/1.0/1.5 m along actor heading)
-on top of the z-lift retry, the spawn rate climbed to 99.46%. Of 1652 actors
-across 46 scenarios, **only 9 remain unspawnable** — these correspond to
-locations where the underlying V2X-PnP-real annotation places multiple
-vehicles physically overlapping (real perception duplicates that survived
-all merger heuristics). Resolving them would require either deeper
-perception-side dedup or accepting they're true twin detections.
+After enabling the xy-nudge fallback (forward/lateral offsets up to 3 m,
+plus diagonal offsets) on top of the z-lift retry, the spawn rate
+climbed to **99.88%**. Of 1652 actors across 46 scenarios, only 2
+remain unspawnable:
+
+- `2023-03-17-16-12-12_3_0` npc/23 at (-494.2, -28.7)
+- `2023-04-05-16-25-26_22_0` npc/21 at (-413.2, -153.0)
+
+These positions sit inside tight clusters where even a 3 m forward or
+lateral nudge keeps the actor's OBB inside another actor's footprint.
+Resolving them would require meaningfully distorting the scenario
+(moving the actor several meters off its raw observation), which is a
+worse outcome than tolerating two unspawnable actors per 1,652-actor
+fleet.
 
 The 18 unspawnable actors (1.09%) are clustered in residual perception-noise
 locations (out-of-map detections like x≈-727 in 11_1) and tight-overlap pairs
