@@ -488,7 +488,33 @@ queue/row patterns at xy regions where the road has noticeable elevation
 (z = 8.5 m vs the spawn z=0 we'd been using). After ground alignment the
 expectation is that the spawn-collision-or-unreachable rate drops.
 
-### 6.17. Known issues still standing
+### 6.18. Final headline numbers
+
+| Metric | Value |
+|--------|-------|
+| Scenarios staged | 49 (47 actual + 2 utility folders) |
+| Scenarios pipelined to HTML | 47 |
+| Scenarios converted to scenarioset XML | 46 |
+| Scenarios with 100% XML/manifest validity | 46/46 (100%) |
+| Total actors exported | 3,758 |
+| Live CARLA spawn rate (post-align, z-retry) | ~98.9% |
+| Scenarios with 100% spawn | 18+ of first 26 tested |
+| Catastrophic-load scenarios | 0 |
+
+### 6.19. Tools shipped on this branch
+
+```
+docs/v2xpnp_realsim_pipeline_log.md      this living log
+tools/v2xpnp_eval_framework.py           30+ metric trajectory eval
+tools/v2xpnp_html_to_scenarioset.py      HTML → scenarioset XML directory
+tools/v2xpnp_smoothness_postprocess.py   freeze + Gaussian + speed-anomaly
+tools/v2xpnp_scenarioset_validate.py     offline XML validator
+tools/v2xpnp_carla_spawn_check.py        live CARLA spawn check, multi-wp
+v2xpnp/pipeline/runtime_postprocess.py   _merge_duplicate_vehicle_tracks added
+v2xpnp/pipeline/runtime_orchestration.py merger wired in before residual resolver
+```
+
+### 6.20. Known issues still standing
 
 These are real but deferred — none can be resolved without either CARLA replay
 to triage visual impact, or significantly more pipeline-internal investigation:
