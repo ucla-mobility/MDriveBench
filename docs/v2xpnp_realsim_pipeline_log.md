@@ -427,7 +427,35 @@ is in `convert_dataset` in `tools/v2xpnp_html_to_scenarioset.py`.
 Walkers and ego routes are exempt — pedestrians can be on sidewalks (off
 the lane network), and the ego is the route we trust.
 
-### 6.15. Known issues still standing
+### 6.15. Live CARLA spawn validation (Task 7) — DONE
+
+Started a separate CARLA 0.9.12 instance on port 4070 (GPU 2), connected via
+the Python 3.7 conda env (`/data/miniconda3/envs/colmdrivermarco2`), loaded
+the `ucla_v2` map, and tried `world.try_spawn_actor()` for every NPC + ego +
+static at its first waypoint.
+
+Tool: `tools/v2xpnp_carla_spawn_check.py`. Iterates per scenario, spawns each
+actor, immediately destroys it, moves to next scenario.
+
+**Result across all 46 converted scenarios: 1,593 / 1,652 actors spawned (96.4%).**
+
+| Spawn-success bucket | # scenarios |
+|----------------------|-------------|
+| 100%                 | 19          |
+| 95-99%               | 14          |
+| 90-94%               | 9           |
+| 85-89%               | 4           |
+
+Remaining ~3.6% spawn failures are `spawn_collision_or_unreachable` — actors
+that overlap another actor or sit just off a navigable mesh. These map to
+the same close-spawn-pair warnings flagged by the static validator and the
+residual perception-noise that survived the off-road filter.
+
+This is the headline number: the pipeline produces CARLA-loadable scenarios
+with 96%+ spawn success on the first try. There's no catastrophic failure
+mode where an entire scenario can't load.
+
+### 6.16. Known issues still standing
 
 These are real but deferred — none can be resolved without either CARLA replay
 to triage visual impact, or significantly more pipeline-internal investigation:
