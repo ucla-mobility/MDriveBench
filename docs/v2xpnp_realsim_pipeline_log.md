@@ -396,7 +396,38 @@ correspond to the same residual-duplicate detections discussed in 6.6.
 - **`v2xpnp/pipeline/runtime_orchestration.py`** (modified): wired the merger
   in before residual-collision resolver.
 
-### 6.12. Known issues still standing
+### 6.13. Full-fleet results (46 scenarios)
+
+After all the fixes, I expanded from the 3-scenario subset to all 47 staged
+scenarios (46 succeeded; 1 was the slow-pipeline edge case `2023-04-07-15-05-15_4_0`
+that hit the timeout).
+
+| Metric | Value |
+|--------|-------|
+| Scenarios processed | 46 |
+| XML/manifest validity | 46/46 (100%) |
+| Scenarios with no close-spawn pairs | 28/46 (61%) |
+| Scenarios with 1-4 close-spawn warnings | 18/46 (39%) |
+| Total actors exported | 3,758 |
+| Total close-spawn pairs (over all scenarios) | 31 |
+| Catastrophic spawn collisions | 0 |
+
+Close-spawn pairs are *warnings*, not failures: the pair is within 2 m at
+spawn but the OBBs may or may not actually overlap. CARLA usually handles
+0.5-1.5 m close spawns through nudge-to-feasibility logic.
+
+### 6.14. Off-road actor filter
+
+Vehicles whose *every* sampled frame is > 4 m from any drivable lane
+get dropped from the XML export rather than spawned in CARLA. Across
+the 46 scenarios this dropped a total of 100+ actors that would
+otherwise have spawned inside buildings or on grass strips. The filter
+is in `convert_dataset` in `tools/v2xpnp_html_to_scenarioset.py`.
+
+Walkers and ego routes are exempt — pedestrians can be on sidewalks (off
+the lane network), and the ego is the route we trust.
+
+### 6.15. Known issues still standing
 
 These are real but deferred — none can be resolved without either CARLA replay
 to triage visual impact, or significantly more pipeline-internal investigation:

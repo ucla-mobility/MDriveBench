@@ -239,7 +239,37 @@ def convert_dataset(
     ego_entries: List[Dict[str, Any]] = []
     actors_by_kind: Dict[str, List[Dict[str, Any]]] = {"npc": [], "walker": [], "static": []}
 
+    # Pre-compute lane segments for off-road filtering
+    _lane_segs = []
+    _lines = (dataset.get("carla_map") or {}).get("lines") or []
+    for _line in _lines:
+        _pts = _line.get("polyline") or []
+        for k in range(len(_pts) - 1):
+            try:
+                x0, y0 = float(_pts[k][0]), float(_pts[k][1])
+                x1, y1 = float(_pts[k + 1][0]), float(_pts[k + 1][1])
+            except (TypeError, ValueError):
+                continue
+            sdx = x1 - x0; sdy = y1 - y0
+            l2 = sdx * sdx + sdy * sdy
+            if l2 < 1e-9:
+                continue
+            _lane_segs.append((x0, y0, sdx, sdy, l2))
+
+    def _min_lane_dist(px: float, py: float) -> float:
+        best = float("inf")
+        for x0, y0, sdx, sdy, l2 in _lane_segs:
+            t = ((px - x0) * sdx + (py - y0) * sdy) / l2
+            if t < 0.0: t = 0.0
+            elif t > 1.0: t = 1.0
+            cx = x0 + t * sdx; cy = y0 + t * sdy
+            d = math.hypot(cx - px, cy - py)
+            if d < best:
+                best = d
+        return best if math.isfinite(best) else float("inf")
+
     ego_count = 0
+    n_dropped_off_road = 0
     for track in tracks:
         tid = str(track.get("id", "?"))
         role = str(track.get("role", "")).strip().lower()
@@ -249,6 +279,24 @@ def convert_dataset(
         frames = track.get("frames") or []
         if not frames:
             continue
+        # Drop vehicle tracks that are ENTIRELY off-road (every frame > 4 m from
+        # nearest drivable lane). These are perception-noise detections of
+        # objects in parking lots, driveways, or interior parts of properties
+        # — replaying them in CARLA would put a "vehicle" inside a building.
+        # Walkers and ego are exempt (walkers can be on sidewalks; ego is the
+        # target route and we trust it).
+        if role == "vehicle" and kind != "ego" and _lane_segs:
+            min_dists = []
+            for f in frames:
+                cx = _safe_float(f.get("cx"))
+                cy = _safe_float(f.get("cy"))
+                if math.isfinite(cx) and math.isfinite(cy):
+                    min_dists.append(_min_lane_dist(cx, cy))
+                if len(min_dists) >= 20:
+                    break  # enough samples to decide
+            if min_dists and min(min_dists) > 4.0:
+                n_dropped_off_road += 1
+                continue
         # Build raw and snap waypoint candidates; pick whichever is smoother
         # for moving vehicles (raw often beats snap for fast NPCs because the
         # snap pipeline introduces stuck/teleport frames that raw doesn't have).
@@ -411,6 +459,8 @@ def convert_dataset(
         encoding="utf-8",
     )
 
+    if n_dropped_off_road:
+        print(f"  Dropped {n_dropped_off_road} off-road vehicle track(s)")
     return manifest
 
 
