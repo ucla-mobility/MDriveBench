@@ -497,12 +497,19 @@ expectation is that the spawn-collision-or-unreachable rate drops.
 | Scenarios converted to scenarioset XML | 46 |
 | Scenarios with 100% XML/manifest validity | 46/46 (100%) |
 | Total actors exported | 3,758 |
-| **Live CARLA spawn rate** | **1634/1652 = 98.91%** |
-| **Scenarios at 100% spawn** | **35/46 (76%)** |
-| **Scenarios at ≥95% spawn** | **44/46 (96%)** |
-| Lowest-spawn scenario | 2023-04-07-15-02-15_1_0 at 89% |
+| **Live CARLA spawn rate** | **1643/1652 = 99.46%** |
+| **Scenarios at 100% spawn** | **41/46 (89%)** |
+| **Scenarios at ≥95% spawn** | **46/46 (100%)** |
 | Catastrophic-load scenarios | 0 |
 | Ego trajectory waypoint spawn (4 frac × 2 ego) | 256/368 (69.6%) |
+
+After enabling the xy-nudge fallback (+/-0.5/1.0/1.5 m along actor heading)
+on top of the z-lift retry, the spawn rate climbed to 99.46%. Of 1652 actors
+across 46 scenarios, **only 9 remain unspawnable** — these correspond to
+locations where the underlying V2X-PnP-real annotation places multiple
+vehicles physically overlapping (real perception duplicates that survived
+all merger heuristics). Resolving them would require either deeper
+perception-side dedup or accepting they're true twin detections.
 
 The 18 unspawnable actors (1.09%) are clustered in residual perception-noise
 locations (out-of-map detections like x≈-727 in 11_1) and tight-overlap pairs
