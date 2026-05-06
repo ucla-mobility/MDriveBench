@@ -340,7 +340,7 @@ def process_scenario(
     rec["stages"]["spawn"] = "ok" if not failed_actors else "partial"
 
     # --- 3. copy to final-out if clean enough ---
-    accept_threshold = 0.95  # ≥95% spawn
+    accept_threshold = float(os.environ.get("WD_ACCEPT_THRESHOLD", "0.95"))
     if n_total and (n_spawned / n_total) >= accept_threshold:
         dst = final_out / scen_dir.name
         if dst.exists():
