@@ -32,22 +32,6 @@
       "target_speed": 8.0
     },
     {
-      "file": "town05_vehicle_4_3.xml",
-      "kind": "ego",
-      "name": "Vehicle 4",
-      "route_id": "07_placement",
-      "speed": 8.0,
-      "town": "Town05"
-    },
-    {
-      "file": "town05_vehicle_5_4.xml",
-      "kind": "ego",
-      "name": "Vehicle 5",
-      "route_id": "07_placement",
-      "speed": 8.0,
-      "town": "Town05"
-    },
-    {
       "file": "town05_ego_vehicle_5.xml",
       "kind": "ego",
       "name": "ego_vehicle_5",
@@ -101,7 +85,7 @@
       "file": "actors/static/town05_truck_89.xml",
       "kind": "static",
       "name": "Truck 88",
-      "route_id": "07_placement",
+      "route_id": "town05_static_4",
       "town": "Town05",
       "model": "vehicle.carlamotors.carlacola"
     }

@@ -230,32 +230,26 @@ def process_scenario(
     rec: Dict[str, Any] = {"scenario": name, "ok": False, "stages": {}, "fixes": []}
     print(f"\n[watchdog] === {name} ===", flush=True)
 
-    # --- 1. ground align ---
+    # --- 1. ground align (in-process — reuses our world handle) ---
     if run_ground_align:
-        ga_log = (log_dir / f"ga_{name}.log") if log_dir else Path(os.devnull)
-        ga_log.parent.mkdir(parents=True, exist_ok=True) if log_dir else None
-        env = dict(os.environ)
-        env["PYTHONPATH"] = egg + ":" + env.get("PYTHONPATH", "")
-        cmd = [
-            "/data/miniconda3/envs/colmdrivermarco2/bin/python", "-W", "ignore",
-            "-m", "v2xpnp.pipeline.carla_ground_align",
-            str(scen_dir),
-            "--carla-host", carla_host,
-            "--carla-port", str(carla_port),
-            "--timeout", "60",
-        ]
         try:
-            with open(ga_log, "w") as logf:
-                proc = subprocess.run(cmd, stdout=logf, stderr=logf, timeout=240)
-            rec["stages"]["ground_align"] = "ok" if proc.returncode == 0 else f"exit_{proc.returncode}"
-            print(f"  [GA] {rec['stages']['ground_align']}", flush=True)
-        except subprocess.TimeoutExpired:
-            rec["stages"]["ground_align"] = "timeout"
-            print(f"  [GA] timeout", flush=True)
+            from v2xpnp.pipeline.carla_ground_align import align_routes_dir
+            t0 = time.time()
+            report = align_routes_dir(world, scen_dir, verbose=False)
+            elapsed = time.time() - t0
+            err = report.get("error") if isinstance(report, dict) else None
+            if err:
+                rec["stages"]["ground_align"] = f"error: {err}"
+                print(f"  [GA] error: {err}", flush=True)
+            else:
+                rec["stages"]["ground_align"] = "ok"
+                print(f"  [GA] ok ({elapsed:.1f}s)", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            rec["stages"]["ground_align"] = f"exception: {type(exc).__name__}"
+            print(f"  [GA] exception: {type(exc).__name__}: {exc}", flush=True)
             return rec
-        # ground_align reloads the world too; re-grab it
+        # In-process align doesn't reload world, but be safe
         try:
-            world = client.get_world()
             blueprint_lib = world.get_blueprint_library()
         except Exception:
             pass
