@@ -338,3 +338,22 @@ scenario_generator/debug_output/
 scenario_generator/legal_paths_test/
 scenario_generator/crop_map.json
 scenario_generator/crop_map_detailed.json
+
+# Claude Code project state
+.claude/
+
+# Third-party repos vendored alongside this one (git repos themselves)
+OpenCDA/
+V2Xverse/
+
+# Large generated/in-progress data not yet ready for tracking
+v2xpnp/dataset_new/
+v2xpnp/newroutes/
+scenarioset/v2xpnp_new/
+v2xpnp/map/carla_topdown_cache.jpg
+v2xpnp/map/carla_topdown_cache.json
+
+# Per-scenario caches written by the patch_editor / watchdog tools
+.grp_cache.json
+.scenario_review_state.json
+scenario_review_status.csv
